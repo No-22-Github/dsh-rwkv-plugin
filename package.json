@@ -1,0 +1,44 @@
+{
+  "name": "dsh-rwkv-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RWKV-7 G1 continuation models as a DeepSeek Harness LLM provider, with the RWKV-Agent harness (agent-wire XML, parser repairs, duplicate/closeout policy) ported in.",
+  "type": "module",
+  "main": "src/index.ts",
+  "files": [
+    "src",
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "build": "node scripts/build-client.mjs",
+    "test": "node --test test/*.test.ts",
+    "smoke": "node scripts/smoke.ts",
+    "adapter": "node scripts/adapter.ts"
+  },
+  "engines": {
+    "node": ">=24.9.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-brand": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  }
+}

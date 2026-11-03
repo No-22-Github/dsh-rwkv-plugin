@@ -1,0 +1,373 @@
+// One DSH model request = one RWKV agent step. DSH owns the outer loop (it
+// executes the tool and calls again), so this decides one action from the
+// history, running the RWKV-Agent harness inside the request: protocol
+// re-asks, duplicate and failure gates, the forced closeout, and the answer
+// stage fallbacks (runner_turn.go, runner_tool_step.go, think_stop.go).
+
+import type { GenerateRequest, GenerateResult, Generator, Sampling } from '../backend/generator.ts'
+import {
+  cleanFinalText,
+  endsWithCompleteCall,
+  parseAction,
+  thinkOpen,
+  type Action,
+} from './parse.ts'
+import {
+  analyzeTurn,
+  ANSWER_STAGE_REASK,
+  answerFallbackSummary,
+  answerOpener,
+  callKey,
+  correction,
+  DUPLICATE_ANSWER_REMINDER,
+  DUPLICATE_FAILED_REMINDER,
+  duplicateRetryReminder,
+  EMPTY_EXIT_REASK,
+  oneStageAnswerInstruction,
+  POST_TOOL_REMINDER,
+  POST_TOOL_REMINDER_THINK,
+  salvageAnswerProse,
+  toolFailureReminder,
+  transcriptEntries,
+  type HistoryItem,
+  type TurnState,
+} from './policy.ts'
+import { reconstructOutput, recordToolCall, renderPrompt, systemPrompt, toolResponse, type Entry, type ThinkingMode } from './prompt.ts'
+import { coerceArguments, type Args, type WireTool } from './tools.ts'
+
+export const DECISION_STOPS = ['</tool_call>', '\nUser:', '\nSystem:', '\nTool:'] as const
+
+export interface HarnessConfig {
+  readonly thinking: ThinkingMode
+  readonly historyEmptyThink: boolean
+  /** Tool calls DSH may execute in one user turn before the forced closeout. */
+  readonly maxSteps: number
+  /** Consecutive failures of one tool before a further call of it is blocked. */
+  readonly maxConsecutiveFailures: number
+  /** Re-asks after unparseable output within one request. */
+  readonly protocolRetries: number
+  readonly decisionMaxTokens: number
+  readonly answerMaxTokens: number
+  readonly maxResultChars: number
+  readonly sampling: Sampling
+  readonly taskContract?: string
+}
+
+export const DEFAULT_HARNESS: HarnessConfig = {
+  thinking: 'full',
+  historyEmptyThink: false,
+  maxSteps: 12,
+  maxConsecutiveFailures: 2,
+  protocolRetries: 2,
+  decisionMaxTokens: 4096,
+  answerMaxTokens: 4096,
+  maxResultChars: 12000,
+  sampling: {
+    temperature: 0.3,
+    topK: 65536,
+    topP: 0.5,
+    presencePenalty: 0.5,
+    frequencyPenalty: 0.1,
+    penaltyDecay: 0.996,
+  },
+}
+
+export type FinalVia = 'model' | 'exit' | 'answer-stage' | 'salvage' | 'summary'
+
+export type Decision =
+  | { readonly type: 'tool'; readonly tool: WireTool; readonly args: Args; readonly repairs: readonly string[] }
+  | { readonly type: 'final'; readonly text: string; readonly via: FinalVia }
+
+export interface GenerationTrace {
+  readonly stage: 'decision' | 'answer'
+  readonly prompt: string
+  readonly output: string
+  readonly finish: string
+  readonly stop?: string
+  readonly action: string
+}
+
+export interface StepHooks {
+  /** Live reasoning text of the current generation. */
+  reasoning?(delta: string): void
+  /** A new generation starts; label says why (first try, re-ask, ...). */
+  attempt?(label: string): void
+  trace?(trace: GenerationTrace): void
+}
+
+export interface StepInput {
+  readonly history: readonly HistoryItem[]
+  readonly tools: readonly WireTool[]
+  readonly config: HarnessConfig
+  readonly generator: Generator
+  readonly signal?: AbortSignal
+  readonly sessionId?: string
+  readonly hooks?: StepHooks
+}
+
+export interface StepResult {
+  readonly decision: Decision
+  readonly promptTokens: number
+  readonly completionTokens: number
+  readonly generations: number
+}
+
+/** Streams the reasoning of a withheld "<think" generation: drops the closing ">", stops at </think>. */
+class ThinkSplitter {
+  private buffer = ''
+  private started = false
+  private done = false
+  private readonly emit: (text: string) => void
+
+  constructor(emit: (text: string) => void) {
+    this.emit = emit
+  }
+
+  feed(delta: string): void {
+    if (this.done) return
+    this.buffer += delta
+    if (!this.started) {
+      if (this.buffer === '') return
+      if (this.buffer.startsWith('>')) this.buffer = this.buffer.slice(1)
+      this.started = true
+    }
+    const end = this.buffer.indexOf('</think>')
+    if (end >= 0) {
+      if (end > 0) this.emit(this.buffer.slice(0, end))
+      this.buffer = ''
+      this.done = true
+      return
+    }
+    let hold = 0
+    for (let length = Math.min(7, this.buffer.length); length > 0; length--) {
+      if ('</think>'.startsWith(this.buffer.slice(-length))) {
+        hold = length
+        break
+      }
+    }
+    const ready = this.buffer.slice(0, this.buffer.length - hold)
+    if (ready !== '') this.emit(ready)
+    this.buffer = this.buffer.slice(this.buffer.length - hold)
+  }
+}
+
+const MAX_THINK_STOP_RESUMES = 4
+
+function describe(action: Action): string {
+  switch (action.type) {
+    case 'tool':
+      return `tool ${action.name}${action.repairs.length > 0 ? ` (${action.repairs.join(',')})` : ''}`
+    case 'exit':
+      return 'no_tool'
+    case 'final':
+      return 'final'
+    case 'error':
+      return `error ${action.kind}`
+  }
+}
+
+export async function decideStep(input: StepInput): Promise<StepResult> {
+  const { config, tools, hooks } = input
+  const state = analyzeTurn(input.history)
+  const reminder = config.thinking === 'full' ? POST_TOOL_REMINDER_THINK : POST_TOOL_REMINDER
+  const base: Entry[] = [
+    { role: 'system', text: systemPrompt(tools, config.thinking, config.taskContract) },
+    ...transcriptEntries(input.history, { tools, postToolReminder: reminder, maxResultChars: config.maxResultChars }),
+  ]
+  let promptTokens = 0
+  let completionTokens = 0
+  let generations = 0
+
+  const generate = async (
+    entries: readonly Entry[],
+    stage: 'decision' | 'answer',
+    label: string,
+    prefill?: string,
+  ): Promise<{ output: string; result: GenerateResult; prompt: string }> => {
+    const prompt = renderPrompt(entries, {
+      thinking: config.thinking,
+      historyEmptyThink: config.historyEmptyThink,
+      ...prefill === undefined ? {} : { prefill },
+    })
+    hooks?.attempt?.(label)
+    const splitter = config.thinking === 'full' && hooks?.reasoning ? new ThinkSplitter(hooks.reasoning) : undefined
+    const request: GenerateRequest = {
+      prompt,
+      maxTokens: stage === 'answer' ? config.answerMaxTokens : config.decisionMaxTokens,
+      stops: [...DECISION_STOPS],
+      sampling: config.sampling,
+      ...input.signal ? { signal: input.signal } : {},
+      ...input.sessionId ? { sessionId: input.sessionId } : {},
+    }
+    const onDelta = splitter ? (text: string) => splitter.feed(text) : undefined
+    let result = await input.generator.generate(request, onDelta)
+    generations++
+    let text = result.text
+    let spent = result.completionTokens ?? Math.ceil(text.length / 3)
+    promptTokens += result.promptTokens ?? Math.ceil(prompt.length / 3)
+    // A quoted </tool_call> inside an open think block is not the end of the
+    // step: put the stop back and continue the same generation.
+    const opening = config.thinking === 'full' ? '<think' : ''
+    for (let resume = 0; resume < MAX_THINK_STOP_RESUMES; resume++) {
+      if (result.finish !== 'stop' || result.stop !== '</tool_call>' || !thinkOpen(opening + text) || endsWithCompleteCall(text)) break
+      text += '</tool_call>'
+      onDelta?.('</tool_call>')
+      const remaining = request.maxTokens - spent
+      if (remaining <= 0) {
+        result = { ...result, finish: 'length' }
+        break
+      }
+      const next = await input.generator.generate({ ...request, prompt: prompt + text, maxTokens: remaining }, onDelta)
+      generations++
+      text += next.text
+      spent += next.completionTokens ?? Math.ceil(next.text.length / 3)
+      result = { ...next, text }
+    }
+    completionTokens += spent
+    return { output: reconstructOutput(text, config.thinking), result: { ...result, text }, prompt }
+  }
+
+  const traced = (stage: 'decision' | 'answer', prompt: string, output: string, result: GenerateResult, action: Action) => {
+    hooks?.trace?.({
+      stage, prompt, output, finish: result.finish, action: describe(action),
+      ...result.stop === undefined ? {} : { stop: result.stop },
+    })
+  }
+
+  const done = (decision: Decision): StepResult => ({ decision, promptTokens, completionTokens, generations })
+
+  /** The forced closeout: tools withdrawn, plain-text answer from the evidence so far. */
+  const answerStage = async (entries: readonly Entry[], prelude: readonly string[]): Promise<StepResult> => {
+    const staged: Entry[] = [
+      ...entries,
+      ...prelude.map(text => ({ role: 'user' as const, text })),
+      { role: 'user', text: oneStageAnswerInstruction() },
+    ]
+    let lastOutput = ''
+    let opener: string | undefined
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt === 2) {
+        // The re-ask did not help: prefill a prose opening so the model
+        // continues a sentence instead of opening another call. The thinking
+        // wire withholds "<think" after "Assistant:", so it cannot take one.
+        if (config.thinking === 'full') break
+        opener = answerOpener(state.task)
+      }
+      const { output, result, prompt } = await generate(staged, 'answer', attempt === 0 ? 'answer' : 'answer re-ask', opener)
+      const action = parseAction(opener ? `${opener}${output}` : output, result.finish)
+      traced('answer', prompt, output, result, action)
+      lastOutput = opener ? `${opener}${output}` : output
+      if (action.type === 'final' && !action.text.toLowerCase().includes('<tool_call')) {
+        const text = cleanFinalText(action.text)
+        if (text !== '') return done({ type: 'final', text, via: 'answer-stage' })
+      }
+      if (action.type === 'exit' && action.answer !== '') return done({ type: 'final', text: action.answer, via: 'answer-stage' })
+      if (attempt === 0) staged.push({ role: 'user', text: ANSWER_STAGE_REASK })
+    }
+    const salvaged = salvageAnswerProse(lastOutput, opener)
+    if (salvaged !== '') return done({ type: 'final', text: cleanFinalText(salvaged), via: 'salvage' })
+    return done({ type: 'final', text: answerFallbackSummary(state.task, state.results), via: 'summary' })
+  }
+
+  if (state.steps >= config.maxSteps) return answerStage(base, [])
+
+  const extra: Entry[] = []
+  let protocolRetries = 0
+  let duplicateRetryUsed = false
+  let blockedRetries = 0
+  for (let attempt = 0; attempt < config.protocolRetries + 4; attempt++) {
+    const label = attempt === 0 ? 'decide' : 're-ask'
+    const { output, result, prompt } = await generate([...base, ...extra], 'decision', label)
+    if (result.finish === 'cancelled') throw new DOMException('aborted', 'AbortError')
+    const action = parseAction(output, result.finish)
+    traced('decision', prompt, output, result, action)
+    switch (action.type) {
+      case 'final': {
+        const text = cleanFinalText(action.text)
+        if (text !== '') return done({ type: 'final', text, via: 'model' })
+        break
+      }
+      case 'exit':
+        if (action.answer !== '') return done({ type: 'final', text: action.answer, via: 'exit' })
+        return answerStage([...base, ...extra], [EMPTY_EXIT_REASK])
+      case 'tool': {
+        const gated = gateToolCall(action, state, tools, config, duplicateRetryUsed)
+        if (gated.type === 'run') {
+          return done({ type: 'tool', tool: gated.tool, args: gated.args, repairs: action.repairs })
+        }
+        if (gated.type === 'closeout') return answerStage([...base, ...extra], [gated.reminder])
+        if (gated.type === 'duplicate-retry') duplicateRetryUsed = true
+        // Rejected without execution. The rejected call is echoed only for
+        // unknown/blocked tools, which get a failed tool result like the Go
+        // runner records; a repeated call is never echoed (RWKV copies it).
+        extra.push(...gated.receipt)
+        if (++blockedRetries > 3) return answerStage([...base, ...extra], [])
+        continue
+      }
+      case 'error':
+        break
+    }
+    // Unparseable or empty output: one correction per retry, no echo of a
+    // truncated think (it would be re-read and continued).
+    if (++protocolRetries > config.protocolRetries) {
+      return state.steps > 0 ? answerStage([...base, ...extra], []) : done({
+        type: 'final',
+        text: answerFallbackSummary(state.task, state.results),
+        via: 'summary',
+      })
+    }
+    const kind = action.type === 'error' ? action.kind : 'empty'
+    extra.push({ role: 'user', text: correction(kind) })
+  }
+  return answerStage([...base, ...extra], [])
+}
+
+type Gate =
+  | { readonly type: 'run'; readonly tool: WireTool; readonly args: Args }
+  | { readonly type: 'closeout'; readonly reminder: string }
+  | { readonly type: 'duplicate-retry' | 'rejected'; readonly receipt: Entry[] }
+
+function gateToolCall(
+  action: Extract<Action, { type: 'tool' }>,
+  state: TurnState,
+  tools: readonly WireTool[],
+  config: HarnessConfig,
+  duplicateRetryUsed: boolean,
+): Gate {
+  const tool = tools.find(item => item.name === action.name)
+  if (tool === undefined) {
+    const error = `unknown tool "${action.name}"`
+    return {
+      type: 'rejected',
+      receipt: [
+        { role: 'assistant', text: recordToolCall(action.name, action.args) },
+        { role: 'user', text: toolResponse(action.name, false, error) },
+        { role: 'user', text: toolFailureReminder(action.name, error, false, tools) },
+      ],
+    }
+  }
+  const args = coerceArguments(action.args, tool.schema)
+  const key = callKey(tool.name, args)
+  if (state.successKeys.has(key)) {
+    // harness v26: the first repeat of a successful call gets one more decision.
+    if (!duplicateRetryUsed) {
+      return { type: 'duplicate-retry', receipt: [{ role: 'user', text: duplicateRetryReminder(tools) }] }
+    }
+    return { type: 'closeout', reminder: DUPLICATE_ANSWER_REMINDER }
+  }
+  if (state.failedEpochs.get(key) === state.successfulCalls) {
+    return { type: 'closeout', reminder: state.successfulCalls > 0 ? DUPLICATE_ANSWER_REMINDER : DUPLICATE_FAILED_REMINDER }
+  }
+  if (tool.name === state.consecutiveFailedTool && state.consecutiveFailures >= config.maxConsecutiveFailures) {
+    const error = `tool "${tool.name}" blocked after ${state.consecutiveFailures} consecutive failures; choose a different tool or answer`
+    return {
+      type: 'rejected',
+      receipt: [
+        { role: 'assistant', text: recordToolCall(tool.name, args) },
+        { role: 'user', text: toolResponse(tool.name, false, error) },
+        { role: 'user', text: toolFailureReminder(tool.name, error, true, tools) },
+      ],
+    }
+  }
+  return { type: 'run', tool, args }
+}
