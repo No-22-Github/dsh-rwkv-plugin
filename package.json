@@ -4,14 +4,14 @@
   "private": true,
   "description": "RWKV-7 G1 continuation models as a DeepSeek Harness LLM provider, with the RWKV-Agent harness (agent-wire XML, parser repairs, duplicate/closeout policy) ported in.",
   "type": "module",
-  "main": "src/index.ts",
+  "main": "lib/index.js",
   "files": [
-    "src",
     "lib",
+    "src",
     "cordis.patch.yml"
   ],
   "scripts": {
-    "build": "node scripts/build-client.mjs",
+    "build": "node scripts/build.mjs",
     "test": "node --test test/*.test.ts",
     "smoke": "node scripts/smoke.ts",
     "adapter": "node scripts/adapter.ts"
@@ -37,7 +37,7 @@
     "@deepseek-ai/schemastery": "*"
   },
   "exports": {
-    ".": "./src/index.ts",
+    ".": "./lib/index.js",
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   }

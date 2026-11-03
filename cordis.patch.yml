@@ -1,57 +1,13 @@
-# Bundle layer for `dsh plugin --profile <name> add /Users/no22/Projects/dsh-rwkv-plugin`.
-# Same rows as dev.cordis.yml, referencing this package by name.
+# Bundle layer applied when this package is installed into a profile
+# (Desktop: Plugins → Add plugin; CLI: `dsh plugin add`). It starts with no
+# models: add your endpoints in Settings → RWKV. `rwkv_agent` uses the model
+# id `default`, which resolves to the first configured model.
 - insert:
     - id: rwkv-llm
       name: dsh-rwkv-plugin
       config:
         providers: [rwkv]
-        # agent-wire-think-v1.0 + agent-fast sampling, as in the current exams.
-        thinking: full
-        maxSteps: 12
-        models:
-          - id: g1l-7.2b
-            name: 'RWKV · G1L 7.2B'
-            backend: irwkv
-            baseURL: 'http://100.64.0.5:8103'
-            model: rwkv7-g1l-7.2b
-            contextWindow: 32768
-          - id: g1l-13.3b
-            name: 'RWKV · G1L 13.3B'
-            backend: irwkv
-            baseURL: 'http://100.64.0.5:8104'
-            model: rwkv7-g1l-13.3b
-            contextWindow: 32768
-          - id: g1l-2.9b
-            name: 'RWKV · G1L 2.9B'
-            backend: irwkv
-            baseURL: 'http://100.64.0.5:8102'
-            model: rwkv7-g1l-2.9b
-            contextWindow: 32768
-          # rwkv_lightning CUDA + think-sft-mix NoRA (agent-wire-think-v2.0 history).
-          # The adapter is uploaded from `file` when the server does not list
-          # `id` (for example after a server restart).
-          - id: g1l-7.2b-think-sft
-            name: 'RWKV · G1L 7.2B + think-sft-mix'
-            backend: lightning
-            baseURL: 'http://100.64.0.9:8000'
-            model: rwkv7-g1l-7.2b-20261031-ctx34304
-            contextWindow: 32768
-            historyEmptyThink: true
-            adapter:
-              id: think-sft-mix-g1l
-              file: '/Users/no22/think-sft-mix-g1l.pth'
-          # rwkv_lightning CUDA with an adapter: uploaded from `file` when the
-          # server does not list `id` yet (re-uploaded after a server restart).
-          # Point baseURL at a lightning server that runs the matching G1L base.
-          # - id: g1l-7.2b-nora-v30
-          #   name: 'RWKV · G1L 7.2B + NoRA v3.0'
-          #   backend: lightning
-          #   baseURL: 'http://100.64.0.8:8100'
-          #   model: rwkv7-g1l-7.2b
-          #   contextWindow: 32768
-          #   adapter:
-          #     id: nora-v30-r16-lr2e-5-e2
-          #     file: '/Users/no22/Projects/RWKV-Agent/local/hf-upload/weights/rwkv7-g1l-7.2b-20261031-ctx34304/nora/v3.0/base-r16-lr2e-5-b8-e2/adapter-final.pth'
+        models: []
 
     - id: preset-rwkv
       name: '@deepseek-ai/dsh-agent-preset'
@@ -86,10 +42,4 @@
         agentPreset: rwkv
         agentOptions:
           provider: rwkv
-          model: g1l-7.2b
-
-# - id: agent-default-model
-#   name: '@deepseek-ai/dsh-agent-default-model'
-#   config:
-#     provider: rwkv
-#     model: g1l-7.2b
+          model: default

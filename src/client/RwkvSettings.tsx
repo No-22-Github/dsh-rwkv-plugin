@@ -272,7 +272,7 @@ function ModelEditor(props: {
       <div className="rwkv-grid">
         <Field label="模型 ID"><TextInput value={draft.id} disabled={disabled} placeholder="g1l-7.2b" onChange={value => set('id', value)} /></Field>
         <Field label="显示名"><TextInput value={draft.name} disabled={disabled} placeholder="RWKV · G1L 7.2B" onChange={value => set('name', value)} /></Field>
-        <Field label="服务地址"><TextInput value={draft.baseURL} disabled={disabled} placeholder="http://100.64.0.9:8000" onChange={value => set('baseURL', value)} /></Field>
+        <Field label="服务地址"><TextInput value={draft.baseURL} disabled={disabled} placeholder="http://host:8000" onChange={value => set('baseURL', value)} /></Field>
         <Field label="上游模型 ID"><TextInput value={draft.model} disabled={disabled} placeholder="rwkv7-g1l-7.2b" onChange={value => set('model', value)} /></Field>
       </div>
       {lightning ? (
@@ -455,7 +455,7 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
             <textarea className="rwkv-input rwkv-prose" value={draft.taskContract} disabled={disabled} onChange={event => update({ taskContract: event.target.value })} />
           </Field>
           <Field label="轨迹目录">
-            <TextInput value={draft.traceDir} disabled={disabled} placeholder="/Users/no22/Projects/dsh-rwkv-plugin/traces" onChange={value => update({ traceDir: value })} />
+            <TextInput value={draft.traceDir} disabled={disabled} placeholder="/path/to/traces" onChange={value => update({ traceDir: value })} />
           </Field>
         </div>
       </details>

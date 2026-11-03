@@ -18,6 +18,9 @@ import { decideStep, type GenerationTrace, type HarnessConfig } from './core/age
 import { buildCatalog, type ToolMode } from './core/tools.ts'
 import { historyFromMessages } from './history.ts'
 
+/** Route model id that resolves to the first configured model. */
+export const DEFAULT_MODEL_ID = 'default'
+
 export interface ModelConfig {
   readonly id: string
   readonly name?: string
@@ -100,7 +103,8 @@ export class RwkvAdapter extends LlmAdapter {
     const config = this.model(model)
     return Promise.resolve({
       provider,
-      id: config.id,
+      // The requested id, so a `default` route resolves to itself.
+      id: model,
       name: config.name ?? config.id,
       inputModalities: ['text'] as const,
       context: { contextWindow: config.contextWindow ?? 32768 },
@@ -109,7 +113,10 @@ export class RwkvAdapter extends LlmAdapter {
   }
 
   private model(id: string): ModelConfig {
-    const config = this.settings.models.find(model => model.id === id)
+    // `default` names the first configured model, so the bundle's rwkv_agent
+    // row works before the user has picked model ids of their own.
+    const models = this.settings.models
+    const config = id === DEFAULT_MODEL_ID && !models.some(model => model.id === id) ? models[0] : models.find(model => model.id === id)
     if (config === undefined) {
       throw new LlmError(`rwkv: unknown model "${id}"; configured: ${this.settings.models.map(model => model.id).join(', ') || 'none'}`, 'MODEL_NOT_FOUND')
     }

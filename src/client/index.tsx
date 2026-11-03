@@ -1,7 +1,7 @@
 // Browser half: a "RWKV" section in Settings that edits the rwkv-llm row's
 // config (endpoints, models, adapters, harness, sampling). It registers while
 // the Host serves that row, so a profile without the plugin shows nothing.
-// Built by scripts/build-client.mjs into the lazy-CJS factory DSH loads;
+// Built by scripts/build.mjs into the lazy-CJS factory DSH loads;
 // only `react` is shared from the module table.
 
 import type { Context } from '@deepseek-ai/cordis'
