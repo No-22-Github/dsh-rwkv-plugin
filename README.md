@@ -14,6 +14,5 @@
 
 ## 已知限制
 
-- 经 Tailscale 直连上传大 adapter 会卡住，大文件请走 Cloudflare 前置的地址。
 - DSH 的系统提示词不发给 RWKV，额外约束写在 `taskContract`。
 - 重复调用的「重试一次」按单次请求计，跨请求不记忆。
