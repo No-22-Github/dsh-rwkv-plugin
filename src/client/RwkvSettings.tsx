@@ -4,6 +4,7 @@
 // every field is volatile, so the next request already uses the saved value.
 
 import { useState, useSyncExternalStore, type ReactNode } from 'react'
+import { AdapterPicker } from './AdapterPicker.tsx'
 
 interface ConfigFormSnapshot {
   status: 'loading' | 'ready' | 'unavailable'
@@ -246,8 +247,6 @@ function ModelEditor(props: {
     setTouched(true)
     setFailure(undefined)
   }
-  const adapter = draft.adapter ?? {}
-  const setAdapter = (patch: Partial<NonNullable<ModelDraft['adapter']>>) => set('adapter', { ...adapter, ...patch })
   const lightning = draft.backend === 'lightning'
   const disabled = props.disabled || busy
   const invalid = modelFailure(draft, props.others) ?? headersError
@@ -271,25 +270,17 @@ function ModelEditor(props: {
         />
       </Field>
       <div className="rwkv-grid">
-        <Field label="模型 ID" hint="在 DSH 里选择这个模型时用的 id"><TextInput value={draft.id} disabled={disabled} placeholder="g1l-7.2b" onChange={value => set('id', value)} /></Field>
+        <Field label="模型 ID"><TextInput value={draft.id} disabled={disabled} placeholder="g1l-7.2b" onChange={value => set('id', value)} /></Field>
         <Field label="显示名"><TextInput value={draft.name} disabled={disabled} placeholder="RWKV · G1L 7.2B" onChange={value => set('name', value)} /></Field>
-        <Field label="服务地址" hint="填到端口即可，/v1 会自动补上"><TextInput value={draft.baseURL} disabled={disabled} placeholder="http://100.64.0.9:8000" onChange={value => set('baseURL', value)} /></Field>
-        <Field label="上游模型 ID" hint="服务端 /v1/models 里的 id"><TextInput value={draft.model} disabled={disabled} placeholder="rwkv7-g1l-7.2b" onChange={value => set('model', value)} /></Field>
+        <Field label="服务地址"><TextInput value={draft.baseURL} disabled={disabled} placeholder="http://100.64.0.9:8000" onChange={value => set('baseURL', value)} /></Field>
+        <Field label="上游模型 ID"><TextInput value={draft.model} disabled={disabled} placeholder="rwkv7-g1l-7.2b" onChange={value => set('model', value)} /></Field>
       </div>
       {lightning ? (
-        <div className="rwkv-block">
-          <span className="rwkv-block-title">Adapter</span>
-          <div className="rwkv-grid">
-            <Field label="Adapter ID" hint="MiSS / LoRA / NoRA；留空用基模"><TextInput value={adapter.id} disabled={disabled} placeholder="think-sft-mix-g1l" onChange={value => setAdapter({ id: value })} /></Field>
-            <Field label="State ID"><TextInput value={draft.stateId} disabled={disabled} onChange={value => set('stateId', value)} /></Field>
-            <Field label="本地 adapter 文件" hint="服务器上没有这个 id 时自动上传。经 Tailscale 直连上传大文件会卡住，优先用 Cloudflare 地址" wide>
-              <TextInput value={adapter.file} disabled={disabled} placeholder="/Users/no22/think-sft-mix-g1l.pth" onChange={value => setAdapter({ file: value })} />
-            </Field>
-            <Field label="服务器上的 adapter 路径" hint="和本地文件二选一；相对推理服务的工作目录" wide>
-              <TextInput value={adapter.serverPath} disabled={disabled} onChange={value => setAdapter({ serverPath: value })} />
-            </Field>
-          </div>
-        </div>
+        <AdapterPicker
+          connection={{ baseURL: draft.baseURL, apiKey: draft.apiKey, headers: draft.headers }}
+          value={draft.adapter?.id} disabled={disabled}
+          onChange={id => set('adapter', id ? { id } : undefined)}
+        />
       ) : null}
       <details className="rwkv-details">
         <summary className="rwkv-summary">自定义设置</summary>
@@ -304,14 +295,14 @@ function ModelEditor(props: {
                 onChange={value => set('thinking', value || undefined)}
               />
             </Field>
-            <Field label="历史空思考块" hint="think-sft 系列模型要开">
+            <Field label="历史空思考块">
               <SelectInput
                 value={draft.historyEmptyThink === undefined ? '' : draft.historyEmptyThink ? 'on' : 'off'} disabled={disabled}
                 options={[['', '跟随运行参数'], ['on', '开'], ['off', '关']] as const}
                 onChange={value => set('historyEmptyThink', value === '' ? undefined : value === 'on')}
               />
             </Field>
-            <Field label="额外请求头（JSON）" hint="例如 Cloudflare Access 的 CF-Access-Client-Id / CF-Access-Client-Secret" wide>
+            <Field label="额外请求头（JSON）" wide>
               <HeadersInput value={draft.headers} disabled={disabled} onChange={(value, error) => { setHeadersError(error); if (!error) set('headers', value) }} />
             </Field>
           </div>
@@ -407,12 +398,12 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
         />
       </Field>
       <div className="rwkv-grid3">
-        <Field label="每轮最多工具步数" hint="到上限后强制收尾作答">{num('maxSteps')}</Field>
+        <Field label="每轮最多工具步数">{num('maxSteps')}</Field>
         <Field label="同一工具连续失败上限">{num('maxConsecutiveFailures')}</Field>
         <Field label="格式错误重问次数">{num('protocolRetries')}</Field>
         <Field label="决策步 max tokens">{num('decisionMaxTokens')}</Field>
         <Field label="作答 max tokens">{num('answerMaxTokens')}</Field>
-        <Field label="工具结果最多字符" hint="超出部分保留头尾">{num('maxResultChars')}</Field>
+        <Field label="工具结果最多字符">{num('maxResultChars')}</Field>
       </div>
       <div className="rwkv-checks">
         <Check label="历史空思考块（think-sft）" checked={draft.historyEmptyThink} disabled={disabled} onChange={value => update({ historyEmptyThink: value })} />
@@ -430,7 +421,7 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
         <div className="rwkv-grid3">
           <Field label="temperature">{sampling('temperature')}</Field>
           <Field label="top_p">{sampling('topP')}</Field>
-          <Field label="top_k" hint="65536 表示不截断">{sampling('topK')}</Field>
+          <Field label="top_k">{sampling('topK')}</Field>
           <Field label="presence penalty">{sampling('presencePenalty')}</Field>
           <Field label="frequency penalty">{sampling('frequencyPenalty')}</Field>
           <Field label="penalty decay">{sampling('penaltyDecay')}</Field>
@@ -447,7 +438,7 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
               onChange={value => update({ toolMode: value || 'mapped' })}
             />
           </Field>
-          <Field label="隐藏的工具" hint="逗号分隔，DSH 名或 RWKV 名都行">
+          <Field label="隐藏的工具">
             <TextInput
               value={draft.excludeTools.join(', ')} disabled={disabled} placeholder="bash, web_fetch"
               onChange={value => update({ excludeTools: value.split(',').map(item => item.trim()).filter(Boolean) })}
@@ -460,10 +451,10 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
       <details className="rwkv-details">
         <summary className="rwkv-summary">自定义设置</summary>
         <div className="rwkv-details-body">
-          <Field label="任务契约" hint="追加在 RWKV 系统提示词末尾的「Task-specific contract」">
+          <Field label="任务契约">
             <textarea className="rwkv-input rwkv-prose" value={draft.taskContract} disabled={disabled} onChange={event => update({ taskContract: event.target.value })} />
           </Field>
-          <Field label="轨迹目录" hint="每次生成的完整 prompt 与原始输出写成 JSONL；留空不写">
+          <Field label="轨迹目录">
             <TextInput value={draft.traceDir} disabled={disabled} placeholder="/Users/no22/Projects/dsh-rwkv-plugin/traces" onChange={value => update({ traceDir: value })} />
           </Field>
         </div>
@@ -477,8 +468,26 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
 
 const BLANK: ModelDraft = { id: '', backend: 'lightning', baseURL: '', model: '', contextWindow: 32768 }
 
-export function RwkvSettings(props: { form: ConfigFormLike }) {
+export function RwkvSettings(props: { form: ConfigFormLike; explain?: (field: string, value: unknown) => Promise<string> }) {
   const { form } = props
+  const [writeError, setWriteError] = useState('')
+  /**
+   * Writes one field; on refusal shows the Host's reason. After a refused
+   * write the shared form re-reads Host state, and that re-read can stall,
+   * so a write still pending after a few seconds is reported the same way.
+   */
+  const write = async (field: string, value: unknown): Promise<boolean> => {
+    setWriteError('')
+    const settled = await Promise.race([
+      form.set(field, value),
+      new Promise<'timeout'>(resolve => setTimeout(() => resolve('timeout'), 8000)),
+    ])
+    if (settled === true) return true
+    const reason = await props.explain?.(field, value)
+    if (settled === 'timeout' && !reason) return true
+    setWriteError(`保存失败${reason ? `：${reason}` : ''}`)
+    return false
+  }
   const getSnapshot = () => form.getSnapshot()
   const snapshot = useSyncExternalStore(listener => form.subscribe(listener), getSnapshot, getSnapshot)
   const [editing, setEditing] = useState<number | 'new' | 'run' | undefined>()
@@ -489,14 +498,14 @@ export function RwkvSettings(props: { form: ConfigFormLike }) {
   const config = normalize(snapshot.value)
   const disabled = !snapshot.writable
   const saveModels = async (models: ModelDraft[]) => {
-    const ok = await form.set('models', models.map(cleanModel))
+    const ok = await write('models', models.map(cleanModel))
     if (ok) setEditing(undefined)
     return ok
   }
   const saveRun = async (run: RunSettings) => {
     for (const field of RUN_FIELDS) {
       if (same(run[field], config[field])) continue
-      if (!await form.set(field, run[field])) return false
+      if (!await write(field, run[field])) return false
     }
     setEditing(undefined)
     return true
@@ -507,6 +516,7 @@ export function RwkvSettings(props: { form: ConfigFormLike }) {
       <h2 className="rwkv-title">RWKV</h2>
       <p className="rwkv-intro">通过续写接口接入的 RWKV-7 G1 模型。每个模型都会出现在模型选择的「rwkv」下，也可以作为子 Agent 工具 rwkv_agent 的执行模型。</p>
       {disabled ? <p className="rwkv-hint">本部署的设置是只读的。</p> : null}
+      {writeError ? <p className="rwkv-error">{writeError}</p> : null}
 
       <ul className="rwkv-rows">
         {config.models.map((model, index) => (

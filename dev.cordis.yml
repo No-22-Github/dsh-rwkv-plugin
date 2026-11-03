@@ -14,8 +14,9 @@
 
 - insert:
     - id: rwkv-llm
-      # Plugin paths in a --patch overlay must be absolute.
-      name: '/Users/no22/Projects/dsh-rwkv-plugin/src/index.ts'
+      # Absolute file: URL. DSH names the row by this URL; a bare path makes
+      # settings saves fail ("overridden by a home patch or command-line overlay").
+      name: 'file:///Users/no22/Projects/dsh-rwkv-plugin/src/index.ts'
       config:
         providers: [rwkv]
         # agent-wire-think-v1.0 + agent-fast sampling, as in the current exams.

@@ -2,11 +2,13 @@
 // Select it for the main agent (agent-default-model) or for a delegation tool
 // (tool-subagent agentOptions); see README.md and cordis.patch.yml.
 
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { RwkvAdapter, type AdapterSettings, type ModelConfig } from './adapter.ts'
 import { DEFAULT_HARNESS } from './core/agent.ts'
 import type { ToolMode } from './core/tools.ts'
+import { handleAdapterRoute } from './routes.ts'
 
 export const name = 'rwkv-llm'
 export const inject = ['llm']
@@ -135,4 +137,14 @@ export function apply(ctx: Context, config: Config): void {
   }
   prepare()
   ctx.on('loader/volatile-update', prepare)
+  // Adapter list / upload / delete for the settings page, behind the /api
+  // bridge's authentication (client-connection runs this waterfall only for
+  // admitted requests). Absent in compositions without a Web connection.
+  const on = ctx.on as unknown as (
+    event: string,
+    listener: (request: IncomingMessage, response: ServerResponse, next: () => Promise<void>) => Promise<void>,
+  ) => () => void
+  on.call(ctx, 'connection/request', async (request, response, next) => {
+    if (!await handleAdapterRoute(request, response)) await next()
+  })
 }

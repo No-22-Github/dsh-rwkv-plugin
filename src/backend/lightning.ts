@@ -117,7 +117,11 @@ export class LightningClient implements Generator {
 
   /** Uploads a local adapter package (multipart: adapter_id + file). Returns the registered version. */
   async uploadAdapter(adapterId: string, file: string): Promise<string> {
-    const blob = await openAsBlob(file)
+    return this.uploadAdapterBlob(adapterId, await openAsBlob(file), basename(file))
+  }
+
+  /** Uploads adapter bytes already in memory (the settings page sends the browser's file through the Host). */
+  async uploadAdapterBlob(adapterId: string, blob: Blob, fileName: string): Promise<string> {
     if (blob.size > MAX_ADAPTER_UPLOAD_BYTES) {
       throw new BackendError(
         `adapter file is ${blob.size >> 20} MB, over the ${MAX_ADAPTER_UPLOAD_BYTES >> 20} MB request limit of Cloudflare-fronted endpoints; upload the adapter package, not the full training checkpoint`,
@@ -126,7 +130,7 @@ export class LightningClient implements Generator {
     }
     const form = new FormData()
     form.set('adapter_id', adapterId)
-    form.set('file', blob, basename(file))
+    form.set('file', blob, fileName)
     const response = await fetch(`${this.root}/adapters`, { method: 'POST', headers: this.headers(), body: form })
     return this.registered(response)
   }

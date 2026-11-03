@@ -66,7 +66,7 @@ cd /Users/no22/Projects/dsh-rwkv-plugin && npm run build
 cd /Users/no22/Projects/deepseek-harness && pnpm dsh web
 ```
 
-不要再用 `--patch dev.cordis.yml`：设置页保存时写的是 profile patch，而 `--patch` 覆盖层优先级更高，会把保存的值盖掉（DSH 会拒绝写入）。
+插件行的 `name` 必须写成 `file:///…/src/index.ts`：DSH 用这个 URL 给行命名，写成裸路径时设置页保存会被拒（「overridden by a home patch or command-line overlay」）。不要再用 `--patch dev.cordis.yml`：设置页保存时写的是 profile patch，而 `--patch` 覆盖层优先级更高，会把保存的值盖掉（DSH 会拒绝写入）。
 
 打开 http://127.0.0.1:3080：
 
@@ -116,5 +116,6 @@ cd /Users/no22/Projects/dsh-rwkv-plugin && node scripts/adapter.ts list http://1
   列表/注册/删除接口和"已注册 adapter 推理"是通的。需要上传时用 Cloudflare 前置的地址，或用 `serverPath` 注册服务器上已有的文件。
 - **v26 的"重复重试只给一次"按单次请求计**：DSH 每执行一个工具会重新请求一次，跨请求的重试标记没有保存；
   被拒的重复调用不会进 DSH 历史，所以影响只是极端情况下多给一次机会。
+- 设置页的 adapter 列表、上传、删除经宿主转发（`/api/rwkv/adapters`，挂在 DSH `/api` 鉴权之后）；经 Tailscale 直连上传大文件仍会卡住。
 - 设置页只编辑 volatile 字段（除 `providers` 外全部是），保存后下一次请求生效，不需要重载插件；`providers` 改了要重启 DSH。
 - DSH 的 `stop` 参数不支持（会报 `UNSUPPORTED_OPTION`），`temperature` / `maxTokens` 会覆盖对应设置。
