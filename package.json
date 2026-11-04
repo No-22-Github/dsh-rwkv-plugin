@@ -14,7 +14,8 @@
     "build": "node scripts/build.mjs",
     "test": "node --test test/*.test.ts",
     "smoke": "node scripts/smoke.ts",
-    "adapter": "node scripts/adapter.ts"
+    "adapter": "node scripts/adapter.ts",
+    "headless": "node scripts/headless.ts"
   },
   "engines": {
     "node": ">=24.9.0"
