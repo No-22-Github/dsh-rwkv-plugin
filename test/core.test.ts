@@ -6,8 +6,10 @@ import { LoopGuard, splitAtStop, v1Root } from '../src/backend/generator.ts'
 import { decideStep, DEFAULT_HARNESS, type HarnessConfig } from '../src/core/agent.ts'
 import { parseAction } from '../src/core/parse.ts'
 import { dshSystemSections } from '../src/core/dsh-prompt.ts'
-import { toolFailureReminder, transcriptEntries, POST_TOOL_REMINDER_THINK, type HistoryItem } from '../src/core/policy.ts'
+import { analyzeTurn, toolFailureReminder, transcriptEntries, POST_TOOL_REMINDER_THINK, type HistoryItem } from '../src/core/policy.ts'
 import { renderPrompt, systemPrompt } from '../src/core/prompt.ts'
+import { historyFromMessages } from '../src/history.ts'
+import { runtimeCwd } from '../src/paths.ts'
 import { buildCatalog, coerceArguments, normalizeArguments, resolveTool, type DshToolSchema, type WireTool } from '../src/core/tools.ts'
 
 const identity = (args: Record<string, unknown>) => args
@@ -283,4 +285,31 @@ test('RWKV Agent catalog keeps DSH names and arguments; trained names and keys s
   const bash = dshTools.find(tool => tool.name === 'bash')!
   assert.deepEqual(normalizeArguments(bash, { command: 'ls -la' }), { command: 'ls -la', description: 'ls -la' })
   assert.match(toolFailureReminder('read', 'not found', false, dshTools), /use glob or grep before another read call/)
+})
+
+test('runtime context keeps only the working directory and sandbox policy, as a note rather than the task', () => {
+  const sections = [
+    { name: 'working-directory:current', text: 'Current working directory: "/Users/me/ws".' },
+    { name: 'sandbox:policy', text: 'Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: "/Users/me/ws". Some platform temporary areas may also be writable.' },
+    { name: 'approval:policy', text: 'Approval prompts are enabled in this session.' },
+    { name: 'harness:source', text: 'Current DeepSeek Harness implementation checkout: "/Applications/x".' },
+    { name: 'app:web-surface', text: 'Current DeepSeek Harness Web GUI URL: "http://127.0.0.1:1".' },
+  ]
+  const messages = [
+    { role: 'system', content: [{ type: 'text', text: 'system prompt' }] },
+    { role: 'user', content: [{ type: 'text', text: '帮我写一个 HTML 简历模板' }], source: { kind: 'user' } },
+    {
+      role: 'user',
+      content: [{ type: 'text', text: `Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\n${sections.map(s => s.text).join('\n\n')}` }],
+      source: { kind: 'runtime-context', form: 'snapshot', sections },
+    },
+    { role: 'user', content: [{ type: 'text', text: 'Current runtime context: none. Earlier runtime-context snapshots no longer apply.' }], source: { kind: 'runtime-context' } },
+  ] as never
+  const history = historyFromMessages(messages, [], { includeDeveloper: false })
+  assert.deepEqual(history, [
+    { kind: 'user', text: '帮我写一个 HTML 简历模板' },
+    { kind: 'note', text: `${sections[0]!.text}\n${sections[1]!.text}` },
+  ])
+  assert.equal(analyzeTurn(history).task, '帮我写一个 HTML 简历模板')
+  assert.equal(runtimeCwd(history), '/Users/me/ws')
 })

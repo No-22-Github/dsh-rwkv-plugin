@@ -47,7 +47,17 @@ Never mix commentary with a tool call. Close your thinking with </think>, then o
 Never invent file content.
 ```
 
-**runtime context 不发**：DSH 每轮会附带一条 developer 消息，内容有工作目录、沙箱和审批策略等。原生模型能看到它，RWKV 默认看不到（`includeDeveloper: false`）。插件只从这条消息里读出工作目录，用来修路径（见 3.6 节）。额外的约束可以写在插件设置的 `taskContract` 里，会附在 System 块末尾。
+**运行时上下文只发两段**：DSH 会在用户消息后面追加一条运行时上下文，内容变化时才追加新的一条，共 5 段，约 170 token。原生模型看到的是全部 5 段；插件只转给 RWKV 其中两段，约 64 token：
+
+| 段 | 内容 | RWKV |
+|---|---|---|
+| working-directory:current | 当前工作目录 | 保留（路径修复也靠它，见 3.6 节） |
+| sandbox:policy | 文件沙箱策略：只读 / 工作区可写 / 完全放开 | 保留 |
+| approval:policy | 审批策略：越权操作会不会弹窗问用户 | 删 |
+| harness:source | DSH 源码 checkout 路径 | 删 |
+| app:web-surface | Web GUI 地址 | 删 |
+
+保留的两段作为一条附注放在用户消息之后，不会被当成本轮任务。额外的约束可以写在插件设置的 `taskContract` 里，会附在 System 块末尾。
 
 ## 2. 工具：只有 8 个
 

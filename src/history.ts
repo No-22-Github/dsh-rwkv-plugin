@@ -34,6 +34,19 @@ function parseArgs(raw: string | undefined): Args {
   }
 }
 
+interface RuntimeSource {
+  readonly kind?: string
+  readonly form?: string
+  readonly sections?: readonly { readonly name: string; readonly text: string }[]
+}
+
+/**
+ * Runtime-context sections shown to RWKV: the working directory (path repair
+ * reads it too) and the file sandbox policy. Approval policy, the DSH checkout
+ * and the Web GUI URL are dropped.
+ */
+export const RUNTIME_CONTEXT_KEPT: readonly string[] = ['working-directory:current', 'sandbox:policy']
+
 export interface HistoryOptions {
   /** Include developer messages (DSH context snapshots, instructions) as user notes. */
   readonly includeDeveloper: boolean
@@ -73,7 +86,14 @@ export function historyFromMessages(
       case 'user': {
         const text = textOf(content)
         if (!text) break
-        const source = 'source' in message ? message.source as { kind?: string; form?: string } | undefined : undefined
+        const source = 'source' in message ? message.source as RuntimeSource | undefined : undefined
+        if (source?.kind === 'runtime-context') {
+          // DSH's runtime-context snapshot: a note, never the task, and only
+          // the sections RWKV can use (the cleared marker has none).
+          const kept = (source.sections ?? []).filter(section => RUNTIME_CONTEXT_KEPT.includes(section.name))
+          if (kept.length > 0) items.push({ kind: 'note', text: kept.map(section => section.text).join('\n') })
+          break
+        }
         items.push({ kind: source?.form === 'notice' ? 'note' : 'user', text })
         break
       }

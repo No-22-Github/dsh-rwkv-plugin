@@ -14,5 +14,5 @@
 
 ## 已知限制
 
-- DSH 的 runtime context（工作目录等 developer 消息）默认不发给 RWKV；额外约束写在 `taskContract`。
+- DSH 的运行时上下文只转给 RWKV 工作目录和文件沙箱策略两段，审批策略、DSH 源码路径、Web GUI 地址不发；额外约束写在 `taskContract`。
 - 重复调用的「重试一次」按单次请求计，跨请求不记忆。
