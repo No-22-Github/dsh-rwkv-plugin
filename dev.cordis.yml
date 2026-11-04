@@ -6,10 +6,10 @@
 #
 # It adds three rows:
 #   rwkv-llm        the RWKV provider (route "rwkv"), selectable for any agent
-#   preset-rwkv     an agent preset with only the tools RWKV was trained on
+#   preset-rwkv     the "RWKV Agent" preset: bash/fs/fs-search/web, Standard persona
 #   tool-rwkv-agent a `rwkv_agent` delegation tool: the main (DeepSeek) agent
 #                   hands a sub-task to an RWKV child running preset-rwkv
-# To run RWKV as the main agent, pick model "RWKV · G1L 7.2B" and preset "RWKV"
+# To run RWKV as the main agent, pick model "RWKV · G1L 7.2B" and preset "RWKV Agent"
 # in the Web UI (or uncomment the agent-default-model row at the bottom).
 
 - insert:
@@ -72,10 +72,15 @@
       name: '@deepseek-ai/dsh-agent-preset'
       config:
         id: rwkv
-        name: RWKV
-        description: Tools the RWKV agent was trained on (read/write/edit, list/search, bash, web).
+        name: RWKV Agent
+        description: 'For RWKV-7 G1 models: bash, read/write/edit, glob/grep and web search/fetch under their DSH names, with the Standard system prompt minus the sections for tools, background jobs and surfaces this mode leaves out.'
         order: 9
         plugins:
+          # Same persona as the Standard preset.
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: You are a coding agent powered by the {{model}} model.
           - id: tool-bash
             name: '@deepseek-ai/dsh-tool-bash'
             disabled: !!js process.platform === 'win32'

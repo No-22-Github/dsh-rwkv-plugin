@@ -3,7 +3,7 @@
 
 import type { RequestMessage } from '@deepseek-ai/dsh-llm'
 import type { HistoryItem } from './core/policy.ts'
-import type { Args, WireTool } from './core/tools.ts'
+import type { Args, ToolNames, WireTool } from './core/tools.ts'
 import { BUILTIN_MAPPINGS } from './core/tools.ts'
 
 interface BlockLike {
@@ -37,6 +37,14 @@ function parseArgs(raw: string | undefined): Args {
 export interface HistoryOptions {
   /** Include developer messages (DSH context snapshots, instructions) as user notes. */
   readonly includeDeveloper: boolean
+  /** Name tools outside the catalog by their trained (default) or DSH names. */
+  readonly names?: ToolNames
+}
+
+/** The leading system message DSH assembled for this request ('' when absent). */
+export function systemText(messages: readonly RequestMessage[]): string {
+  const first = messages[0]
+  return first?.role === 'system' ? textOf(first.content as readonly BlockLike[]) : ''
 }
 
 /**
@@ -80,7 +88,7 @@ export function historyFromMessages(
           const dshName = call.name ?? ''
           const args = parseArgs(call.arguments)
           const wire = byDsh.get(dshName)
-          const mapping = BUILTIN_MAPPINGS[dshName]
+          const mapping = options.names === 'dsh' ? undefined : BUILTIN_MAPPINGS[dshName]
           const name = wire?.name ?? mapping?.wireName ?? dshName
           const wireArgs = wire ? wire.fromDsh(args) : mapping ? mapping.fromDsh(args) : args
           const id = call.id ?? `call-${items.length}`

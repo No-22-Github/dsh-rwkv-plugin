@@ -21,7 +21,7 @@
    保存后立即生效。
 
 3. 开始使用：
-   - **RWKV 当主 Agent**：新会话里模型选刚加的 RWKV 模型，Agent 预设选「RWKV」。
+   - **RWKV 当主 Agent**：新会话里模型选刚加的 RWKV 模型，Agent 预设选「RWKV Agent」。
    - **RWKV 当子 Agent**：保持 DeepSeek 主 Agent，它会多一个 `rwkv_agent` 工具，默认用你加的第一个模型。
 
 更新插件：在**添加插件**里重新填一次同样的地址并安装。

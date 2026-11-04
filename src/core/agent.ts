@@ -103,6 +103,8 @@ export interface StepInput {
   readonly signal?: AbortSignal
   readonly sessionId?: string
   readonly hooks?: StepHooks
+  /** Head of the system block in place of the trained opener (DSH's filtered system prompt). */
+  readonly systemHead?: string
 }
 
 export interface StepResult {
@@ -173,7 +175,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
   const state = analyzeTurn(input.history)
   const reminder = config.thinking === 'full' ? POST_TOOL_REMINDER_THINK : POST_TOOL_REMINDER
   const base: Entry[] = [
-    { role: 'system', text: systemPrompt(tools, config.thinking, config.taskContract) },
+    { role: 'system', text: systemPrompt(tools, config.thinking, config.taskContract, input.systemHead) },
     ...transcriptEntries(input.history, { tools, postToolReminder: reminder, maxResultChars: config.maxResultChars }),
   ]
   let promptTokens = 0

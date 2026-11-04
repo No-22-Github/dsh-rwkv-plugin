@@ -33,29 +33,32 @@ Tools are now unavailable. Answer from the Tool results, and clearly state anyth
 /** harness v26: the first repeat of a successful call gets one more decision with an edit hint. */
 export function duplicateRetryReminder(tools: readonly WireTool[]): string {
   let prompt = 'That tool call was rejected because it repeats a successful call; its result is already above. Do not call it again.\n'
-  const edits = ['edit_file', 'write_file'].filter(name => tools.some(tool => tool.name === name))
+  const edits = ['edit', 'write'].flatMap(dsh => tools.filter(tool => tool.dshName === dsh).map(tool => tool.name))
   if (edits.length > 0) {
     prompt += `If the task asks to change a file you have already read, make the change now with ${edits.join(' or ')}, using the text already shown.\n`
   }
   return `${prompt}If one specific fact is still missing, call a tool with different arguments. Otherwise answer now.`
 }
 
-const FAILURE_HINTS: Record<string, { companions: string[]; hint: string }> = {
-  read_file: {
-    companions: ['list_files', 'search_text'],
-    hint: 'If the path is uncertain, use list_files or search_text before another read_file call. ',
+/** Keyed by DSH tool name; the hint names the tools as the catalog shows them. */
+const FAILURE_HINTS: Record<string, { companions: string[]; hint: (names: Record<string, string>) => string }> = {
+  read: {
+    companions: ['read', 'glob', 'grep'],
+    hint: n => `If the path is uncertain, use ${n.glob} or ${n.grep} before another ${n.read} call. `,
   },
-  list_files: {
-    companions: ['search_text'],
-    hint: 'Try an existing parent directory or workspace root, or use search_text for a known literal. ',
+  glob: {
+    companions: ['grep'],
+    hint: n => `Try an existing parent directory or workspace root, or use ${n.grep} for a known literal. `,
   },
 }
 
 export function toolFailureReminder(name: string, error: string, recoveryBlocked: boolean, tools: readonly WireTool[]): string {
   let prompt = `The tool call failed: ${oneLine(error)}. `
   prompt += recoveryBlocked ? 'Do not call the same tool again in this turn. ' : 'Do not repeat the same call. '
-  const entry = FAILURE_HINTS[name]
-  if (entry && entry.companions.every(companion => tools.some(tool => tool.name === companion))) prompt += entry.hint
+  const failed = tools.find(tool => tool.name === name)
+  const entry = failed === undefined ? undefined : FAILURE_HINTS[failed.dshName]
+  const names: Record<string, string> = Object.fromEntries(tools.map(tool => [tool.dshName, tool.name]))
+  if (entry && entry.companions.every(companion => names[companion] !== undefined)) prompt += entry.hint(names)
   return `${prompt}Choose a different useful tool or answer with the limitation. Do not guess.`
 }
 

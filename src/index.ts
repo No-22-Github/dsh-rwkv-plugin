@@ -7,7 +7,7 @@ import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { RwkvAdapter, type AdapterSettings, type ModelConfig } from './adapter.ts'
 import { DEFAULT_HARNESS } from './core/agent.ts'
-import type { ToolMode } from './core/tools.ts'
+import type { ToolMode, ToolNames } from './core/tools.ts'
 import { handleAdapterRoute } from './routes.ts'
 
 export const name = 'rwkv-llm'
@@ -34,6 +34,7 @@ export interface Settings {
   }
   taskContract: string
   toolMode: ToolMode
+  toolNames: ToolNames
   excludeTools: string[]
   includeDeveloper: boolean
   loopGuard: boolean
@@ -93,6 +94,8 @@ export const Config = z.object({
   taskContract: z.string().default('').description('Appended to the RWKV system prompt as "Task-specific contract".').volatile(),
   toolMode: z.union(['mapped', 'passthrough']).default('mapped')
     .description('mapped: only DSH tools with an RWKV-trained counterpart (read/write/edit/glob/grep/bash/web); passthrough: all offered tools.').volatile(),
+  toolNames: z.union(['dsh', 'trained']).default('dsh')
+    .description('dsh: DSH tool names (read, glob, ...) and DSH\'s system prompt without the sections for tools the RWKV preset does not mount; trained: the agent-tool-v3 names (read_file, ...) and the Go-aligned prompt.').volatile(),
   excludeTools: z.array(z.string()).default([]).description('Tool names (DSH or RWKV) hidden from the model.').volatile(),
   includeDeveloper: z.boolean().default(false).description('Show DSH developer/context messages to the model as user notes.').volatile(),
   loopGuard: z.boolean().default(true).description('Client-side repetition cut-off.').volatile(),
@@ -115,6 +118,7 @@ function settingsOf(config: Config): AdapterSettings {
       ...config.taskContract.get() ? { taskContract: config.taskContract.get() } : {},
     },
     toolMode: config.toolMode.get(),
+    toolNames: config.toolNames.get(),
     excludeTools: config.excludeTools.get(),
     includeDeveloper: config.includeDeveloper.get(),
     loopGuard: config.loopGuard.get(),

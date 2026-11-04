@@ -15,8 +15,9 @@ import { BackendError, type Generator } from './backend/generator.ts'
 import { IRWKVClient } from './backend/irwkv.ts'
 import { LightningClient } from './backend/lightning.ts'
 import { decideStep, type GenerationTrace, type HarnessConfig } from './core/agent.ts'
-import { buildCatalog, type ToolMode } from './core/tools.ts'
-import { historyFromMessages } from './history.ts'
+import { dshSystemSections } from './core/dsh-prompt.ts'
+import { buildCatalog, type ToolMode, type ToolNames } from './core/tools.ts'
+import { historyFromMessages, systemText } from './history.ts'
 import { repairToolPaths, runtimeCwd } from './paths.ts'
 
 /** Route model id that resolves to the first configured model. */
@@ -54,6 +55,8 @@ export interface AdapterSettings {
   readonly models: readonly ModelConfig[]
   readonly harness: HarnessConfig
   readonly toolMode: ToolMode
+  /** dsh: DSH tool names and DSH's system prompt (filtered); trained: the agent-tool-v3 names and the Go-aligned prompt. */
+  readonly toolNames: ToolNames
   readonly excludeTools: readonly string[]
   readonly includeDeveloper: boolean
   readonly loopGuard: boolean
@@ -203,8 +206,10 @@ export class RwkvAdapter extends LlmAdapter {
         answerMaxTokens: Math.min(this.settings.harness.answerMaxTokens, options.maxTokens),
       },
     }
-    const catalog = buildCatalog(options.tools ?? [], { mode: this.settings.toolMode, exclude: this.settings.excludeTools })
-    const history = historyFromMessages(options.messages, catalog, { includeDeveloper: this.settings.includeDeveloper })
+    const names = this.settings.toolNames
+    const catalog = buildCatalog(options.tools ?? [], { mode: this.settings.toolMode, names, exclude: this.settings.excludeTools })
+    const history = historyFromMessages(options.messages, catalog, { includeDeveloper: this.settings.includeDeveloper, names })
+    const systemHead = names === 'dsh' ? dshSystemSections(options.system ?? systemText(options.messages)) : undefined
 
     // Bridge the harness callbacks to this async generator.
     const queue: StreamChunk[] = []
@@ -240,6 +245,7 @@ export class RwkvAdapter extends LlmAdapter {
         tools: catalog,
         config: harness,
         generator: this.client(config),
+        ...systemHead ? { systemHead } : {},
         ...options.signal ? { signal: options.signal } : {},
         ...sessionId ? { sessionId } : {},
         hooks: {

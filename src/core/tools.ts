@@ -24,6 +24,8 @@ export interface WireTool {
   readonly dshName: string
   /** JSON Schema used for lenient scalar coercion of model arguments. */
   readonly schema?: Record<string, unknown>
+  /** Shown under its DSH name with DSH arguments (names: 'dsh'). */
+  readonly native?: boolean
   toDsh(args: Args): Args
   fromDsh(args: Args): Args
 }
@@ -181,6 +183,8 @@ export function resolveTool(tools: readonly WireTool[], name: string): { tool: W
   const target = tools.find(tool => tool.name.toLowerCase() === lower)
     ?? tools.find(tool => tool.name === TOOL_NAME_ALIASES[lower])
     ?? tools.find(tool => tool.dshName.toLowerCase() === lower)
+    // DSH-named catalog: the trained names (read_file, ...) and their aliases.
+    ?? tools.find(tool => BUILTIN_MAPPINGS[tool.dshName]?.wireName === (TOOL_NAME_ALIASES[lower] ?? lower))
   return target ? { tool: target, aliased: true } : undefined
 }
 
@@ -202,15 +206,23 @@ const ARGUMENT_ALIASES: Readonly<Record<string, Readonly<Record<string, readonly
   web_search: { query: ['q', 'keywords', 'search', 'search_query'] },
 }
 
-/**
- * Renames alias keys to the tool's own keys when the own key is absent
- * (edit_file with Claude's old_string/new_string, read_file with file_path,
- * ...). read_file's DSH-style offset/limit become start_line/end_line.
- * Returns the args unchanged (same object) when nothing applied.
- */
-export function normalizeArguments(tool: WireTool, args: Args): Args {
-  const aliases = ARGUMENT_ALIASES[tool.name]
-  if (aliases === undefined) return args
+/** The same table for DSH-named tools: trained and Claude-style keys → DSH keys. */
+const NATIVE_ARGUMENT_ALIASES: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  read: { file_path: ['path', 'filepath', 'file', 'filename', 'file_name'], offset: ['start_line', 'line_start', 'from_line'] },
+  write: { file_path: ['path', 'filepath', 'file', 'filename', 'file_name'], content: ['text', 'file_text', 'contents', 'data', 'code'] },
+  edit: {
+    file_path: ['path', 'filepath', 'file', 'filename', 'file_name'],
+    old_string: ['old_text', 'old_str', 'old', 'search', 'find', 'original'],
+    new_string: ['new_text', 'new_str', 'new', 'replace', 'replacement', 'updated'],
+  },
+  glob: { pattern: ['glob'], path: ['directory', 'dir', 'folder', 'dir_path'] },
+  grep: { pattern: ['query', 'text', 'search', 'keyword', 'regex'], path: ['file_path', 'directory', 'dir'] },
+  bash: { command: ['cmd', 'script', 'code', 'shell'] },
+  web_fetch: { url: ['link', 'href', 'page'] },
+  web_search: { queries: ['query', 'q', 'keywords', 'search', 'search_query'] },
+}
+
+function renameAliases(args: Args, aliases: Readonly<Record<string, readonly string[]>>): Args | undefined {
   let out: Args | undefined
   for (const [canonical, others] of Object.entries(aliases)) {
     if (args[canonical] !== undefined && args[canonical] !== '') continue
@@ -220,6 +232,46 @@ export function normalizeArguments(tool: WireTool, args: Args): Args {
     out[canonical] = args[found]
     delete out[found]
   }
+  return out
+}
+
+/** DSH-named tools: alias keys, end_line → limit, a lone query string → queries, a bash description. */
+function normalizeNativeArguments(tool: WireTool, args: Args): Args {
+  const aliases = NATIVE_ARGUMENT_ALIASES[tool.dshName]
+  if (aliases === undefined) return args
+  let out = renameAliases(args, aliases)
+  const current = out ?? args
+  const loose = (value: unknown) => int(typeof value === 'string' ? Number(value.trim()) : value)
+  if (tool.dshName === 'read' && current.end_line !== undefined) {
+    const start = loose(current.offset) ?? 1
+    const end = loose(current.end_line)
+    out ??= { ...args }
+    delete out.end_line
+    if (end !== undefined && current.limit === undefined) out.limit = Math.max(1, end - start + 1)
+  }
+  if (tool.dshName === 'web_search' && typeof current.queries === 'string') {
+    out ??= { ...args }
+    out.queries = [current.queries]
+  }
+  if (tool.dshName === 'bash' && str(current.description) === undefined && str(current.command) !== undefined) {
+    const firstLine = String(current.command).split('\n')[0] ?? ''
+    out ??= { ...args }
+    out.description = firstLine.length > 60 ? `${firstLine.slice(0, 57)}...` : firstLine
+  }
+  return out ?? args
+}
+
+/**
+ * Renames alias keys to the tool's own keys when the own key is absent
+ * (edit_file with Claude's old_string/new_string, read_file with file_path,
+ * ...). read_file's DSH-style offset/limit become start_line/end_line.
+ * Returns the args unchanged (same object) when nothing applied.
+ */
+export function normalizeArguments(tool: WireTool, args: Args): Args {
+  if (tool.native === true) return normalizeNativeArguments(tool, args)
+  const aliases = ARGUMENT_ALIASES[tool.name]
+  if (aliases === undefined) return args
+  let out = renameAliases(args, aliases)
   if (tool.name === 'read_file' && args.start_line === undefined && args.offset !== undefined) {
     const loose = (value: unknown) => int(typeof value === 'string' ? Number(value.trim()) : value)
     const start = loose(args.offset)
@@ -243,9 +295,14 @@ export const EXIT_TOOL_ENTRY = {
 
 export type ToolMode = 'mapped' | 'passthrough'
 
+/** trained: the agent-tool-v3 names and arguments (read_file, ...); dsh: DSH's own names, descriptions and arguments. */
+export type ToolNames = 'trained' | 'dsh'
+
 export interface CatalogOptions {
   /** mapped: only DSH tools with a built-in RWKV mapping; passthrough: every offered tool, unmapped ones with a flat schema. */
   readonly mode: ToolMode
+  /** Defaults to trained. */
+  readonly names?: ToolNames
   /** Wire or DSH names to hide; applied after the mode filter. */
   readonly exclude?: readonly string[]
 }
@@ -279,7 +336,19 @@ export function buildCatalog(offered: readonly DshToolSchema[], options: Catalog
   const tools: WireTool[] = []
   for (const tool of offered) {
     const mapping = BUILTIN_MAPPINGS[tool.name]
-    if (mapping !== undefined) {
+    if (mapping !== undefined && options.names === 'dsh') {
+      if (exclude.has(tool.name)) continue
+      tools.push({
+        name: tool.name,
+        description: tool.description,
+        arguments: flatPlaceholder(tool.parameters),
+        dshName: tool.name,
+        schema: tool.parameters,
+        native: true,
+        toDsh: args => args,
+        fromDsh: args => args,
+      })
+    } else if (mapping !== undefined) {
       if (exclude.has(tool.name) || exclude.has(mapping.wireName)) continue
       tools.push({
         name: mapping.wireName,
@@ -331,6 +400,6 @@ export function coerceArguments(args: Args, schema: Record<string, unknown> | un
 }
 
 export function toolAccessDescription(tools: readonly WireTool[]): string {
-  const mutating = tools.some(tool => ['write_file', 'edit_file', 'bash'].includes(tool.name))
+  const mutating = tools.some(tool => ['write', 'edit', 'bash'].includes(tool.dshName))
   return mutating ? 'isolated tools, including the explicitly listed mutation tools' : 'read-only tools'
 }

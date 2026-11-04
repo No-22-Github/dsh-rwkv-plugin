@@ -57,10 +57,20 @@ function thinkingControl(mode: ThinkingMode): string {
     : 'Never mix commentary with a tool call. Do not emit <think>, Markdown fences around tool JSON, or role labels.'
 }
 
-/** G1Protocol.Instructions with align=qwen36, control=bare, abstain=no-tool, plus the task contract. */
-export function systemPrompt(tools: readonly WireTool[], mode: ThinkingMode, taskContract?: string): string {
-  let prompt = `You are a local-first assistant with ${toolAccessDescription(tools)}. ${POLICY_UNTRUSTED_DATA}\n`
-  prompt += toolChoiceGuidance(tools)
+/**
+ * G1Protocol.Instructions with align=qwen36, control=bare, abstain=no-tool, plus the task contract.
+ * With `head` (DSH's own system prompt, names: 'dsh') that text replaces the
+ * trained opener and tool-choice guidance; the action protocol and the tool
+ * catalog follow unchanged.
+ */
+export function systemPrompt(tools: readonly WireTool[], mode: ThinkingMode, taskContract?: string, head?: string): string {
+  let prompt: string
+  if (head !== undefined && head.trim() !== '') {
+    prompt = `${head.trim()}\n`
+  } else {
+    prompt = `You are a local-first assistant with ${toolAccessDescription(tools)}. ${POLICY_UNTRUSTED_DATA}\n`
+    prompt += toolChoiceGuidance(tools)
+  }
   prompt += `
 Choose one action:
 - If new tool evidence is needed, output exactly one tool call and nothing else:

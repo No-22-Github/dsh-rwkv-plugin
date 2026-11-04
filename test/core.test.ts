@@ -5,9 +5,10 @@ import type { GenerateRequest, GenerateResult, Generator } from '../src/backend/
 import { LoopGuard, splitAtStop, v1Root } from '../src/backend/generator.ts'
 import { decideStep, DEFAULT_HARNESS, type HarnessConfig } from '../src/core/agent.ts'
 import { parseAction } from '../src/core/parse.ts'
-import { transcriptEntries, POST_TOOL_REMINDER_THINK, type HistoryItem } from '../src/core/policy.ts'
+import { dshSystemSections } from '../src/core/dsh-prompt.ts'
+import { toolFailureReminder, transcriptEntries, POST_TOOL_REMINDER_THINK, type HistoryItem } from '../src/core/policy.ts'
 import { renderPrompt, systemPrompt } from '../src/core/prompt.ts'
-import { buildCatalog, coerceArguments, normalizeArguments, resolveTool, type WireTool } from '../src/core/tools.ts'
+import { buildCatalog, coerceArguments, normalizeArguments, resolveTool, type DshToolSchema, type WireTool } from '../src/core/tools.ts'
 
 const identity = (args: Record<string, unknown>) => args
 
@@ -236,4 +237,48 @@ test('file paths missing the last workspace component are repaired only when the
   assert.equal(repairToolPaths('edit', rel, cwd), rel)
   const cmd = { command: `cat ${join(root, 'task', 'a.py')}` }
   assert.equal(repairToolPaths('bash', cmd, cwd), cmd)
+})
+
+// ── RWKV Agent preset (toolNames: dsh) ─────────────────────────────────────
+
+const dshSchemas = JSON.parse(readFileSync(new URL('./fixtures/dsh-tool-schemas.json', import.meta.url), 'utf8')) as DshToolSchema[]
+const dshTools = buildCatalog(dshSchemas, { mode: 'mapped', names: 'dsh' })
+
+test('Standard system prompt keeps its 11 sections for the RWKV Agent tools and drops the other 10', () => {
+  const standard = readFileSync(new URL('./fixtures/dsh-standard-system-prompt.txt', import.meta.url), 'utf8')
+  assert.equal(standard.trim().split(/\n{2,}/).length, 21)
+  const kept = dshSystemSections(standard).split('\n\n')
+  assert.equal(kept.length, 11)
+  assert.equal(kept[0], 'You are an AI agent powered by DeepSeek Harness.')
+  for (const gone of ['apply_patch', 'job_output', 'create_goal', 'scheduled tasks', 'workflow tool', 'subagent', 'different working directories', 'present', 'checkout', 'Web GUI']) {
+    assert.ok(!kept.some(section => section.includes(gone)), gone)
+  }
+  for (const word of ['@', '[exit code: N]', 'read tool', 'with write', 'before editing', 'glob tool', 'grep tool', 'web_search results', 'web_fetch returns']) {
+    assert.ok(kept.some(section => section.includes(word)), word)
+  }
+  const prompt = systemPrompt(dshTools, 'full', undefined, kept.join('\n\n'))
+  assert.ok(prompt.startsWith('You are an AI agent powered by DeepSeek Harness.\n\nYou are a coding agent'))
+  assert.ok(prompt.includes('Choose one action:') && prompt.includes('<tools>[\n{"name":"bash"'))
+  assert.ok(!prompt.includes('read_file') && !prompt.includes('local-first'))
+})
+
+test('RWKV Agent catalog keeps DSH names and arguments; trained names and keys still resolve', () => {
+  assert.deepEqual(dshTools.map(tool => tool.name), ['bash', 'edit', 'glob', 'grep', 'read', 'web_fetch', 'web_search', 'write'])
+  const read = dshTools.find(tool => tool.name === 'read')!
+  assert.equal(read.description, 'Read a UTF-8 text file and return line-numbered content.')
+  assert.equal(read.arguments, '{"file_path":"Path to read, resolved by the filesystem backend","offset":"optional number","limit":"optional number"}')
+  assert.equal(resolveTool(dshTools, 'read_file')?.tool.name, 'read')
+  assert.equal(resolveTool(dshTools, 'list_files')?.tool.name, 'glob')
+  assert.equal(resolveTool(dshTools, 'search_text')?.tool.name, 'grep')
+  assert.equal(resolveTool(dshTools, 'str_replace')?.tool.name, 'edit')
+  assert.deepEqual(normalizeArguments(read, { path: 'a.py', start_line: 3, end_line: 4 }), { file_path: 'a.py', offset: 3, limit: 2 })
+  const plain = { file_path: 'a.py' }
+  assert.equal(normalizeArguments(read, plain), plain)
+  const edit = dshTools.find(tool => tool.name === 'edit')!
+  assert.deepEqual(normalizeArguments(edit, { path: 'a.py', old_text: 'x', new_text: 'y' }), { file_path: 'a.py', old_string: 'x', new_string: 'y' })
+  const search = dshTools.find(tool => tool.name === 'web_search')!
+  assert.deepEqual(normalizeArguments(search, { query: 'rwkv' }), { queries: ['rwkv'] })
+  const bash = dshTools.find(tool => tool.name === 'bash')!
+  assert.deepEqual(normalizeArguments(bash, { command: 'ls -la' }), { command: 'ls -la', description: 'ls -la' })
+  assert.match(toolFailureReminder('read', 'not found', false, dshTools), /use glob or grep before another read call/)
 })
