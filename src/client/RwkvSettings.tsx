@@ -68,7 +68,7 @@ const AGENT_FAST: Sampling = { temperature: 0.3, topK: 65536, topP: 0.5, presenc
 
 const RUN_DEFAULTS: RunSettings = {
   thinking: 'full',
-  historyEmptyThink: false,
+  historyEmptyThink: true,
   maxSteps: 12,
   maxConsecutiveFailures: 2,
   protocolRetries: 2,
@@ -419,7 +419,7 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
         <Field label="工具结果最多字符">{num('maxResultChars')}</Field>
       </div>
       <div className="rwkv-checks">
-        <Check label="历史空思考块（think-sft）" checked={draft.historyEmptyThink} disabled={disabled} onChange={value => update({ historyEmptyThink: value })} />
+        <Check label="历史空思考块（不回传思维链）" checked={draft.historyEmptyThink} disabled={disabled} onChange={value => update({ historyEmptyThink: value })} />
         <Check label="复读检测截断（loop-guard）" checked={draft.loopGuard} disabled={disabled} onChange={value => update({ loopGuard: value })} />
       </div>
 

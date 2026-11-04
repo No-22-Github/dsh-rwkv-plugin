@@ -3,7 +3,7 @@
 // workspace, against a real endpoint.
 //
 //   node scripts/smoke.ts irwkv http://100.64.0.5:8103 rwkv7-g1l-7.2b
-//   node scripts/smoke.ts lightning http://100.64.0.9:8000 rwkv7-g1l-7.2b-20261031-ctx34304 --adapter think-sft-mix-g1l --empty-think
+//   node scripts/smoke.ts lightning http://100.64.0.9:8000 rwkv7-g1l-7.2b-20261031-ctx34304 --adapter think-sft-mix-g1l
 //   add --task "..." to change the request, --off for agent-wire-v1.0 (no thinking)
 
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
@@ -19,16 +19,17 @@ import { buildCatalog, type Args } from '../src/core/tools.ts'
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
+  allowNegative: true,
   options: {
     adapter: { type: 'string' },
     task: { type: 'string', default: '读一下 config/app.json，告诉我服务监听的端口是多少，以及日志级别。' },
     off: { type: 'boolean', default: false },
-    'empty-think': { type: 'boolean', default: false },
+    'empty-think': { type: 'boolean', default: true },
   },
 })
 const [backend, baseURL, model] = positionals
 if (!backend || !baseURL || !model) {
-  console.error('usage: node scripts/smoke.ts <irwkv|lightning> <baseURL> <model> [--adapter id] [--task text] [--off] [--empty-think]')
+  console.error('usage: node scripts/smoke.ts <irwkv|lightning> <baseURL> <model> [--adapter id] [--task text] [--off] [--no-empty-think]')
   process.exit(2)
 }
 

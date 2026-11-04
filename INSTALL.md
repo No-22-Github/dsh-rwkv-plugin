@@ -65,7 +65,7 @@ node scripts/smoke.ts irwkv http://<host>:<port> <model-id>
 ```
 
 ```bash
-node scripts/smoke.ts lightning http://<host>:<port> <model-id> --adapter <adapter-id> --empty-think
+node scripts/smoke.ts lightning http://<host>:<port> <model-id> --adapter <adapter-id>
 ```
 
 `smoke.ts` 自己扮演 DSH 的外层循环，用临时目录里的假文件工具跑一道多步任务。

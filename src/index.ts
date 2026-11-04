@@ -67,7 +67,7 @@ const Model = z.object({
     serverPath: z.string().description('Path on the inference server registered when the id is not listed.'),
   }).description('rwkv_lightning: MiSS / LoRA / NoRA adapter.'),
   thinking: z.union(['off', 'full']).description('Overrides the global wire for this model.'),
-  historyEmptyThink: z.boolean().description('Overrides historyEmptyThink for this model (true for think-sft adapters).'),
+  historyEmptyThink: z.boolean().description('Overrides historyEmptyThink for this model.'),
 })
 
 export const Config = z.object({
