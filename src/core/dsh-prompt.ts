@@ -13,7 +13,8 @@ export const DROPPED_SECTION_OPENERS: readonly string[] = [
   'create_goal may infer goal intent', // goal
   'Only create or modify scheduled tasks', // schedule
   'Use the workflow tool ONLY', // workflow
-  'Start independent delegations with `subagent`', // subagent
+  // subagent; any delegation tool name (`subagent`, the bundle's `rwkv_agent`, ...)
+  'Start independent delegations with `',
   'Agents may use different working directories;', // subagent: shared files
   'Prefer showing the primary results within your final response', // present
   'The runtime context names the DeepSeek Harness implementation checkout.', // DSH checkout path
