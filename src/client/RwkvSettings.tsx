@@ -238,12 +238,25 @@ function ModelEditor(props: {
   onSave: (model: ModelDraft) => Promise<boolean>
 }) {
   const [draft, setDraft] = useState<ModelDraft>(props.initial)
+  // Model ID and display name follow the upstream model ID until edited by hand.
+  const [idLinked, setIdLinked] = useState(props.initial.id === '' || props.initial.id === props.initial.model)
+  const [nameLinked, setNameLinked] = useState(!props.initial.name || props.initial.name === props.initial.model)
   const [touched, setTouched] = useState(false)
   const [headersError, setHeadersError] = useState<string | undefined>()
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | undefined>()
   const set = <K extends keyof ModelDraft>(key: K, value: ModelDraft[K]) => {
     setDraft(current => ({ ...current, [key]: value }))
+    setTouched(true)
+    setFailure(undefined)
+  }
+  const setUpstream = (value: string) => {
+    setDraft(current => ({
+      ...current,
+      model: value,
+      ...idLinked ? { id: value.trim() } : {},
+      ...nameLinked ? { name: value.trim() } : {},
+    }))
     setTouched(true)
     setFailure(undefined)
   }
@@ -270,10 +283,10 @@ function ModelEditor(props: {
         />
       </Field>
       <div className="rwkv-grid">
-        <Field label="模型 ID"><TextInput value={draft.id} disabled={disabled} placeholder="g1l-7.2b" onChange={value => set('id', value)} /></Field>
-        <Field label="显示名"><TextInput value={draft.name} disabled={disabled} placeholder="RWKV · G1L 7.2B" onChange={value => set('name', value)} /></Field>
+        <Field label="上游模型 ID"><TextInput value={draft.model} disabled={disabled} placeholder="rwkv7-g1l-7.2b" onChange={setUpstream} /></Field>
         <Field label="服务地址"><TextInput value={draft.baseURL} disabled={disabled} placeholder="http://host:8000" onChange={value => set('baseURL', value)} /></Field>
-        <Field label="上游模型 ID"><TextInput value={draft.model} disabled={disabled} placeholder="rwkv7-g1l-7.2b" onChange={value => set('model', value)} /></Field>
+        <Field label="模型 ID"><TextInput value={draft.id} disabled={disabled} placeholder="默认同上游模型 ID" onChange={value => { setIdLinked(value.trim() === ''); set('id', value) }} /></Field>
+        <Field label="显示名"><TextInput value={draft.name} disabled={disabled} placeholder="默认同上游模型 ID" onChange={value => { setNameLinked(value.trim() === ''); set('name', value) }} /></Field>
       </div>
       {lightning ? (
         <AdapterPicker
