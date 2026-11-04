@@ -72,13 +72,6 @@ Never invent file content.
 
 名字、描述、参数都用 DSH 原样的，没有改成训练时的名字。参数不是以 JSON Schema 的形式给出的，而是压平成一行占位说明，例如 `{"file_path":"Path to read, …","offset":"optional number","limit":"optional number"}`。
 
-**代价：模型常漏必填参数。** 训练时的工具名和参数（`read_file` 的 `path`、`list_files` 的可选 `pattern`）和 DSH 的不一样。改用 DSH 原样参数后，桌面端实测已出现两类：
-
-- `write` 只给了 `content`（还照搬 bash 写了个 `description`），没给 `file_path`；
-- `glob` 只给了 `path`，没给必填的 `pattern`。
-
-这类调用会被 DSH 以 `invalid arguments: missing required property …` 拒绝，模型拿到失败结果后再重选。插件目前不替模型补缺的参数，只把写错名字的参数改回来（见 3.3 节第 2 条）。旧的训练格式里，`list_files` 不给 `pattern` 时插件会补成 `*`，现在的 DSH 原名模式没有这一步。
-
 Standard 预设里有、RWKV Agent 没挂的东西：
 
 - **AGENTS.md 等项目说明**（agent-instructions）、**当前时间**（time-context）
