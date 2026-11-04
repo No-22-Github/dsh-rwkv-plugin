@@ -14,7 +14,7 @@
       config:
         id: rwkv
         name: RWKV Agent
-        description: 专为 RWKV-7 G1 模型准备：只带 bash、读写改文件、找文件、搜内容、网页搜索和抓取 8 个工具，工具名与 DSH 一致；系统提示词沿用标准模式，删去本模式用不到的工具、后台任务和界面说明。
+        description: 专为 RWKV-7 G1 模型准备：只带终端、文件和网页 8 个工具，提示词精简自标准模式。
         order: 9
         plugins:
           # Same persona as the Standard preset.
