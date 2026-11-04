@@ -59,6 +59,8 @@ Never invent file content.
 
 保留的两段作为一条附注放在用户消息之后，不会被当成本轮任务。额外的约束可以写在插件设置的 `taskContract` 里，会附在 System 块末尾。
 
+注意：裁剪只发生在插件拼 RWKV 提示词这一步，DSH 自己的会话记录不受影响。所以会话「轨迹」页的「上下文」一行仍会显示全部 5 段，「初始系统提示词」也是删段之前的全文。要看 RWKV 实际收到了什么，见第 6 节。
+
 ## 2. 工具：只有 8 个
 
 | 工具 | 说明 |
@@ -69,6 +71,13 @@ Never invent file content.
 | web_search / web_fetch | 网页搜索、抓取网页 |
 
 名字、描述、参数都用 DSH 原样的，没有改成训练时的名字。参数不是以 JSON Schema 的形式给出的，而是压平成一行占位说明，例如 `{"file_path":"Path to read, …","offset":"optional number","limit":"optional number"}`。
+
+**代价：模型常漏必填参数。** 训练时的工具名和参数（`read_file` 的 `path`、`list_files` 的可选 `pattern`）和 DSH 的不一样。改用 DSH 原样参数后，桌面端实测已出现两类：
+
+- `write` 只给了 `content`（还照搬 bash 写了个 `description`），没给 `file_path`；
+- `glob` 只给了 `path`，没给必填的 `pattern`。
+
+这类调用会被 DSH 以 `invalid arguments: missing required property …` 拒绝，模型拿到失败结果后再重选。插件目前不替模型补缺的参数，只把写错名字的参数改回来（见 3.3 节第 2 条）。旧的训练格式里，`list_files` 不给 `pattern` 时插件会补成 `*`，现在的 DSH 原名模式没有这一步。
 
 Standard 预设里有、RWKV Agent 没挂的东西：
 
@@ -172,3 +181,16 @@ Standard 预设里有、RWKV Agent 没挂的东西：
 
 - 工具都由 DSH 执行，沙箱、审批和工具结果的保存和原生接入一样。
 - 会话历史存在 DSH 里，可以中途和别的模型互相切换；别的模型留下的工具调用会按 RWKV 能看懂的样子重新呈现。
+
+## 6. 排查：怎么看 RWKV 实际收到的内容
+
+DSH 界面里看到的都是 DSH 自己的记录，和 RWKV 实际收到的不完全一样：
+
+| 界面上看到的 | RWKV 实际收到的 |
+|---|---|
+| 「初始系统提示词」：DSH 拼好的全文 | 删掉 10 段后的 11 段，加动作协议和工具清单 |
+| 「上下文」：5 段运行时上下文 | 只有工作目录和沙箱策略两段，作为附注 |
+| 工具 schema：完整 JSON Schema | 压平的一行占位说明，只有 8 个工具 |
+| 助手的思维链 | 多次生成拼在一起，中间的重问标着 `[harness: …]` |
+
+要看原始内容，在设置 → RWKV → 运行参数 → 自定义设置里填 **轨迹目录**（配置项 `traceDir`）。之后每次生成都会往 `<trace 目录>/<会话 id>.jsonl` 追加一行，包含发给 RWKV 的提示词原文（`prompt`）、模型原始输出（`output`）、停止原因和插件对这次输出的判定（`action`，例如 `tool write`、`final`、`error decode`）。思维链里出现 `[harness: re-ask]` 这类标记时，可以在这里查到被重问的那次输出原本写了什么。
