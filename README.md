@@ -16,3 +16,4 @@
 
 - DSH 的运行时上下文只转给 RWKV 工作目录和文件沙箱策略两段，审批策略、DSH 源码路径、Web GUI 地址不发；额外约束写在 `taskContract`。
 - 重复调用的「重试一次」按单次请求计，跨请求不记忆。
+- **DSH 的问题：预设管不住全局注册的东西。** 在 DSH 里全局注册的工具（`working_directory`、`load_workspace_dependencies`、本插件的 `rwkv_agent`）、系统提示词段（DSH 源码 checkout 路径、Web GUI、`rwkv_agent` 委派说明）和运行时上下文，不管选哪个模式都会带上，RWKV Agent 预设没法把它们排除掉。插件只能在拼 RWKV 提示词时自己过滤：只留 8 个工具、删掉这些段、上下文只留两段。所以会话「轨迹」页看到的工具、系统提示词和上下文都比 RWKV 实际收到的多，要看实际内容请用轨迹目录（见 [docs/vs-native.md](docs/vs-native.md) 第 6 节）。
