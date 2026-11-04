@@ -17,6 +17,7 @@ import { LightningClient } from './backend/lightning.ts'
 import { decideStep, type GenerationTrace, type HarnessConfig } from './core/agent.ts'
 import { buildCatalog, type ToolMode } from './core/tools.ts'
 import { historyFromMessages } from './history.ts'
+import { repairToolPaths, runtimeCwd } from './paths.ts'
 
 /** Route model id that resolves to the first configured model. */
 export const DEFAULT_MODEL_ID = 'default'
@@ -290,7 +291,7 @@ export class RwkvAdapter extends LlmAdapter {
       yield { type: 'block-end', index, block: { type: 'text', text: decision.text } }
     } else {
       const id = brandString<ToolCallId>(`call_${randomUUID().replace(/-/g, '').slice(0, 24)}`)
-      const argumentsText = JSON.stringify(decision.tool.toDsh(decision.args))
+      const argumentsText = JSON.stringify(repairToolPaths(decision.tool.dshName, decision.tool.toDsh(decision.args), runtimeCwd(history)))
       yield { type: 'block-start', index, blockType: 'tool-call' }
       yield { type: 'tool-call-delta', index, id, name: decision.tool.dshName, argumentsDelta: argumentsText }
       yield { type: 'block-end', index, block: { type: 'tool-call', id, name: decision.tool.dshName, arguments: argumentsText } }

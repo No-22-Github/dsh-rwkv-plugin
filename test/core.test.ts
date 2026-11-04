@@ -7,7 +7,7 @@ import { decideStep, DEFAULT_HARNESS, type HarnessConfig } from '../src/core/age
 import { parseAction } from '../src/core/parse.ts'
 import { transcriptEntries, POST_TOOL_REMINDER_THINK, type HistoryItem } from '../src/core/policy.ts'
 import { renderPrompt, systemPrompt } from '../src/core/prompt.ts'
-import { buildCatalog, coerceArguments, type WireTool } from '../src/core/tools.ts'
+import { buildCatalog, coerceArguments, normalizeArguments, resolveTool, type WireTool } from '../src/core/tools.ts'
 
 const identity = (args: Record<string, unknown>) => args
 
@@ -77,16 +77,18 @@ test('tool catalog maps DSH tools to trained names and back', () => {
 
 class ScriptedGenerator implements Generator {
   readonly prompts: string[] = []
-  private readonly outputs: string[]
+  private readonly outputs: (string | { text: string; finish: 'length' })[]
 
-  constructor(outputs: string[]) {
+  constructor(outputs: (string | { text: string; finish: 'length' })[]) {
     this.outputs = [...outputs]
   }
 
   generate(request: GenerateRequest): Promise<GenerateResult> {
     this.prompts.push(request.prompt)
-    const text = this.outputs.shift()
-    if (text === undefined) throw new Error('no scripted output left')
+    const next = this.outputs.shift()
+    if (next === undefined) throw new Error('no scripted output left')
+    if (typeof next !== 'string') return Promise.resolve({ text: next.text, finish: next.finish, completionTokens: 4096 })
+    const text = next
     const stop = text.includes('<tool_call>') ? '</tool_call>' : undefined
     return Promise.resolve({ text, finish: 'stop', ...stop ? { stop } : {}, completionTokens: 10 })
   }
@@ -156,4 +158,82 @@ test('client stops hold back a split stop; loop guard trips on repetition', () =
   assert.ok(tripped)
   assert.equal(v1Root('http://h:8000/v1/batch/completions'), 'http://h:8000/v1')
   assert.equal(v1Root('http://h:8103'), 'http://h:8103/v1')
+})
+
+const editTools = buildCatalog([
+  { name: 'read', description: '', parameters: {} },
+  { name: 'edit', description: '', parameters: {} },
+  { name: 'bash', description: '', parameters: {} },
+], { mode: 'mapped' })
+
+test('tool names resolve case-insensitively and by alias; Claude-style argument keys are renamed', async () => {
+  assert.equal(resolveTool(editTools, 'Bash')?.tool.name, 'bash')
+  assert.equal(resolveTool(editTools, 'str_replace')?.tool.name, 'edit_file')
+  assert.equal(resolveTool(editTools, 'edit')?.tool.name, 'edit_file')
+  assert.equal(resolveTool(editTools, 'nope'), undefined)
+  const read = resolveTool(editTools, 'read_file')!.tool
+  assert.deepEqual(normalizeArguments(read, { file_path: 'a.py', offset: '3', limit: '2' }), { path: 'a.py', start_line: 3, end_line: 4 })
+  const plain = { path: 'a.py' }
+  assert.equal(normalizeArguments(read, plain), plain)
+
+  const generator = new ScriptedGenerator([
+    '>Fix it.</think><tool_call>{"name":"Edit","arguments":{"file_path":"/workspace/a.py","old_string":"x = 1","new_string":"x = 2"}}',
+  ])
+  const step = await decideStep({ history: afterRead, tools: editTools, config: harness, generator })
+  assert.equal(step.decision.type, 'tool')
+  if (step.decision.type === 'tool') {
+    assert.equal(step.decision.tool.dshName, 'edit')
+    assert.deepEqual(step.decision.tool.toDsh(step.decision.args), { file_path: 'a.py', old_string: 'x = 1', new_string: 'x = 2' })
+    assert.deepEqual(step.decision.repairs, ['tool_name_alias', 'argument_alias'])
+  }
+})
+
+test('a think that runs out of budget is closed in place and the model continues with its action', async () => {
+  const generator = new ScriptedGenerator([
+    { text: '>Check the cases again. Check the cases again.', finish: 'length' },
+    '<tool_call>{"name":"bash","arguments":{"command":"python3 a.py"}}',
+  ])
+  const step = await decideStep({ history: afterRead, tools: editTools, config: harness, generator })
+  assert.equal(step.decision.type, 'tool')
+  assert.equal(generator.prompts.length, 2)
+  assert.ok(generator.prompts[1]!.endsWith('Check the cases again.\n</think>\n'))
+})
+
+test('closeout after unparseable output runs a valid tool call; a policy closeout still refuses it', async () => {
+  const generator = new ScriptedGenerator([
+    '>a</think>', '>b</think>', '>c</think>',
+    '>Now I know.</think><tool_call>{"name":"edit_file","arguments":{"path":"a.py","old_text":"x = 1","new_text":"x = 2"}}',
+  ])
+  const step = await decideStep({ history: afterRead, tools: editTools, config: harness, generator })
+  assert.equal(step.decision.type, 'tool')
+  assert.ok(step.decision.type === 'tool' && step.decision.repairs.includes('answer_stage_tool'))
+  assert.match(generator.prompts[3]!, /Tool execution is complete and tools are now unavailable/)
+})
+
+test('file paths missing the last workspace component are repaired only when the repair exists', async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { repairToolPaths, runtimeCwd } = await import('../src/paths.ts')
+  const root = mkdtempSync(join(tmpdir(), 'rwkv-paths-'))
+  const cwd = join(root, 'task', 'ws')
+  mkdirSync(cwd, { recursive: true })
+  writeFileSync(join(cwd, 'a.py'), 'x = 1\n')
+  const history: HistoryItem[] = [{ kind: 'note', text: `Current working directory: "${cwd}".` }]
+  assert.equal(runtimeCwd(history), cwd)
+  // Dropped "ws": repaired. A wrong directory with the right file name: repaired.
+  assert.deepEqual(repairToolPaths('read', { file_path: join(root, 'task', 'a.py') }, cwd), { file_path: join(cwd, 'a.py') })
+  assert.deepEqual(repairToolPaths('edit', { file_path: '/workspace2/a.py', old_string: 'x' }, cwd), { file_path: join(cwd, 'a.py'), old_string: 'x' })
+  // An existing directory (the parent) is a real path: left alone.
+  const parent = { pattern: '*', path: join(root, 'task') }
+  assert.equal(repairToolPaths('glob', parent, cwd), parent)
+  // Correct, relative, new-file and non-file-tool arguments pass through unchanged.
+  const ok = { file_path: join(cwd, 'a.py') }
+  assert.equal(repairToolPaths('read', ok, cwd), ok)
+  const fresh = { file_path: join(root, 'task', 'new.py'), content: '' }
+  assert.equal(repairToolPaths('write', fresh, cwd), fresh)
+  const rel = { file_path: 'a.py' }
+  assert.equal(repairToolPaths('edit', rel, cwd), rel)
+  const cmd = { command: `cat ${join(root, 'task', 'a.py')}` }
+  assert.equal(repairToolPaths('bash', cmd, cwd), cmd)
 })

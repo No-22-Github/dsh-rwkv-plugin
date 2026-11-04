@@ -4,7 +4,7 @@
 //
 //   node scripts/headless.ts --backend irwkv --base-url http://host:8000 \
 //     --model rwkv7-g1l-7.2b [--home DIR] [--max-steps 12] [--thinking full|off] \
-//     [--adapter ID] [--empty-think] [--installed] "task text"   (or `-` / stdin)
+//     [--adapter ID] [--empty-think] [--installed] [--trace-dir DIR] "task text"   (or `-` / stdin)
 //
 // --installed: the plugin was added to --home's headless profile with
 // `dsh plugin --profile headless add <dir>` (how a container runs it); only
@@ -36,6 +36,7 @@ const { values, positionals } = parseArgs({
     home: { type: 'string' },
     dsh: { type: 'string' },
     installed: { type: 'boolean', default: false },
+    'trace-dir': { type: 'string' },
   },
 })
 if (!values['base-url'] || !values.model) {
@@ -63,6 +64,8 @@ if (values.dsh) {
 } else {
   command = ['dsh']
 }
+const [bin, ...binArgs] = command
+if (!bin) throw new Error('empty --dsh command')
 const entry = fromSource ? join(pluginRoot, 'src/index.ts') : join(pluginRoot, 'lib/index.js')
 if (!values.installed && !existsSync(entry)) throw new Error(`plugin entry missing: ${entry} (run npm run build?)`)
 if (values.installed && !values.home) throw new Error('--installed needs --home (the DSH_HOME the plugin was added to)')
@@ -94,6 +97,7 @@ writeFileSync(join(profileDir, 'cordis.patch.yml'), [
   `${indent}providers: [ rwkv ]`,
   `${indent}thinking: ${json(values.thinking)}`,
   `${indent}maxSteps: ${Number(values['max-steps'])}`,
+  ...(values['trace-dir'] ? [`${indent}traceDir: ${json(resolve(values['trace-dir']))}`] : []),
   `${indent}models:`,
   ...modelRows.map(row => `${indent}  ${row}`),
   '- id: session-title-llm',
@@ -110,14 +114,14 @@ writeFileSync(join(profileDir, 'cordis.patch.yml'), [
 ].join('\n'))
 
 // Older DSH releases (npm 0.2.1-rc.5) have no --approval-policy flag.
-const help = spawnSync(command[0], [...command.slice(1), '--profile', 'headless', '--help'], {
+const help = spawnSync(bin, [...binArgs, '--profile', 'headless', '--help'], {
   encoding: 'utf8', env: { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' },
 })
 const approval = /--approval-policy/.test(help.stdout ?? '') ? ['--approval-policy', 'never'] : []
 
 const task = positionals.join(' ')
-const args = [...command.slice(1), '--profile', 'headless', '--json', ...approval, task === '' ? '-' : task]
-const child = spawn(command[0], args, {
+const args = [...binArgs, '--profile', 'headless', '--json', ...approval, task === '' ? '-' : task]
+const child = spawn(bin, args, {
   stdio: 'inherit',
   // Eval runs never report session content upstream, even on a feedback path.
   env: { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' },

@@ -33,7 +33,7 @@ import {
   type TurnState,
 } from './policy.ts'
 import { reconstructOutput, recordToolCall, renderPrompt, systemPrompt, toolResponse, type Entry, type ThinkingMode } from './prompt.ts'
-import { coerceArguments, type Args, type WireTool } from './tools.ts'
+import { coerceArguments, normalizeArguments, resolveTool, type Args, type WireTool } from './tools.ts'
 
 export const DECISION_STOPS = ['</tool_call>', '\nUser:', '\nSystem:', '\nTool:'] as const
 
@@ -152,6 +152,8 @@ class ThinkSplitter {
 }
 
 const MAX_THINK_STOP_RESUMES = 4
+/** Extra tokens after force-closing a think that ran out of budget. */
+const THINK_CLOSE_TOKENS = 1024
 
 function describe(action: Action): string {
   switch (action.type) {
@@ -223,6 +225,18 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       spent += next.completionTokens ?? Math.ceil(next.text.length / 3)
       result = { ...next, text }
     }
+    // The think used the whole budget (G1 loops re-checking the same facts):
+    // close it where it stopped and let the model state its action, instead
+    // of a re-ask that regenerates the same overlong think from scratch.
+    if (result.finish === 'length' && opening !== '' && thinkOpen(opening + text)) {
+      const closed = `${text.trimEnd()}\n</think>\n`
+      onDelta?.('\n</think>\n')
+      const next = await input.generator.generate({ ...request, prompt: prompt + closed, maxTokens: THINK_CLOSE_TOKENS }, onDelta)
+      generations++
+      text = closed + next.text
+      spent += next.completionTokens ?? Math.ceil(next.text.length / 3)
+      result = { ...next, text }
+    }
     completionTokens += spent
     return { output: reconstructOutput(text, config.thinking), result: { ...result, text }, prompt }
   }
@@ -236,8 +250,13 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
 
   const done = (decision: Decision): StepResult => ({ decision, promptTokens, completionTokens, generations })
 
-  /** The forced closeout: tools withdrawn, plain-text answer from the evidence so far. */
-  const answerStage = async (entries: readonly Entry[], prelude: readonly string[]): Promise<StepResult> => {
+  /**
+   * The forced closeout: tools withdrawn, plain-text answer from the evidence
+   * so far. allowTools: the closeout came from unparseable output, not from a
+   * policy (step limit, repeated call), so a valid tool call the model still
+   * makes is run instead of being thrown away.
+   */
+  const answerStage = async (entries: readonly Entry[], prelude: readonly string[], allowTools = false): Promise<StepResult> => {
     const staged: Entry[] = [
       ...entries,
       ...prelude.map(text => ({ role: 'user' as const, text })),
@@ -257,6 +276,12 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       const action = parseAction(opener ? `${opener}${output}` : output, result.finish)
       traced('answer', prompt, output, result, action)
       lastOutput = opener ? `${opener}${output}` : output
+      if (allowTools && action.type === 'tool' && state.steps < config.maxSteps) {
+        const gated = gateToolCall(action, state, tools, config, true)
+        if (gated.type === 'run') {
+          return done({ type: 'tool', tool: gated.tool, args: gated.args, repairs: [...action.repairs, ...gated.repairs, 'answer_stage_tool'] })
+        }
+      }
       if (action.type === 'final' && !action.text.toLowerCase().includes('<tool_call')) {
         const text = cleanFinalText(action.text)
         if (text !== '') return done({ type: 'final', text, via: 'answer-stage' })
@@ -289,11 +314,11 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       }
       case 'exit':
         if (action.answer !== '') return done({ type: 'final', text: action.answer, via: 'exit' })
-        return answerStage([...base, ...extra], [EMPTY_EXIT_REASK])
+        return answerStage([...base, ...extra], [EMPTY_EXIT_REASK], true)
       case 'tool': {
         const gated = gateToolCall(action, state, tools, config, duplicateRetryUsed)
         if (gated.type === 'run') {
-          return done({ type: 'tool', tool: gated.tool, args: gated.args, repairs: action.repairs })
+          return done({ type: 'tool', tool: gated.tool, args: gated.args, repairs: [...action.repairs, ...gated.repairs] })
         }
         if (gated.type === 'closeout') return answerStage([...base, ...extra], [gated.reminder])
         if (gated.type === 'duplicate-retry') duplicateRetryUsed = true
@@ -310,7 +335,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
     // Unparseable or empty output: one correction per retry, no echo of a
     // truncated think (it would be re-read and continued).
     if (++protocolRetries > config.protocolRetries) {
-      return state.steps > 0 ? answerStage([...base, ...extra], []) : done({
+      return state.steps > 0 ? answerStage([...base, ...extra], [], true) : done({
         type: 'final',
         text: answerFallbackSummary(state.task, state.results),
         via: 'summary',
@@ -319,11 +344,11 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
     const kind = action.type === 'error' ? action.kind : 'empty'
     extra.push({ role: 'user', text: correction(kind) })
   }
-  return answerStage([...base, ...extra], [])
+  return answerStage([...base, ...extra], [], true)
 }
 
 type Gate =
-  | { readonly type: 'run'; readonly tool: WireTool; readonly args: Args }
+  | { readonly type: 'run'; readonly tool: WireTool; readonly args: Args; readonly repairs: readonly string[] }
   | { readonly type: 'closeout'; readonly reminder: string }
   | { readonly type: 'duplicate-retry' | 'rejected'; readonly receipt: Entry[] }
 
@@ -334,8 +359,8 @@ function gateToolCall(
   config: HarnessConfig,
   duplicateRetryUsed: boolean,
 ): Gate {
-  const tool = tools.find(item => item.name === action.name)
-  if (tool === undefined) {
+  const resolved = resolveTool(tools, action.name)
+  if (resolved === undefined) {
     const error = `unknown tool "${action.name}"`
     return {
       type: 'rejected',
@@ -346,7 +371,13 @@ function gateToolCall(
       ],
     }
   }
-  const args = coerceArguments(action.args, tool.schema)
+  const { tool } = resolved
+  const normalized = normalizeArguments(tool, action.args)
+  const repairs = [
+    ...resolved.aliased ? ['tool_name_alias'] : [],
+    ...normalized !== action.args ? ['argument_alias'] : [],
+  ]
+  const args = coerceArguments(normalized, tool.schema)
   const key = callKey(tool.name, args)
   if (state.successKeys.has(key)) {
     // harness v26: the first repeat of a successful call gets one more decision.
@@ -369,5 +400,5 @@ function gateToolCall(
       ],
     }
   }
-  return { type: 'run', tool, args }
+  return { type: 'run', tool, args, repairs }
 }

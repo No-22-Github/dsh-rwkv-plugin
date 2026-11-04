@@ -158,6 +158,81 @@ export const BUILTIN_MAPPINGS: Readonly<Record<string, ToolMapping>> = {
   },
 }
 
+/**
+ * Other names the model uses for the wire tools: DSH's own names, Claude Code
+ * / OpenAI-agent habits, and capitalised forms ("Bash"). Matched after an
+ * exact, then a case-insensitive, lookup fails.
+ */
+const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
+  read: 'read_file', view: 'read_file', cat: 'read_file', open_file: 'read_file',
+  write: 'write_file', create_file: 'write_file', save_file: 'write_file',
+  edit: 'edit_file', str_replace: 'edit_file', replace: 'edit_file', replace_in_file: 'edit_file',
+  glob: 'list_files', ls: 'list_files', list_dir: 'list_files', list_directory: 'list_files',
+  grep: 'search_text', search: 'search_text', search_files: 'search_text',
+  shell: 'bash', run: 'bash', terminal: 'bash', execute_command: 'bash', run_command: 'bash',
+  fetch: 'web_fetch', search_web: 'web_search',
+}
+
+/** The offered tool a model-written name refers to, and whether an alias was needed. */
+export function resolveTool(tools: readonly WireTool[], name: string): { tool: WireTool; aliased: boolean } | undefined {
+  const exact = tools.find(tool => tool.name === name)
+  if (exact) return { tool: exact, aliased: false }
+  const lower = name.trim().toLowerCase().replace(/^functions\./, '')
+  const target = tools.find(tool => tool.name.toLowerCase() === lower)
+    ?? tools.find(tool => tool.name === TOOL_NAME_ALIASES[lower])
+    ?? tools.find(tool => tool.dshName.toLowerCase() === lower)
+  return target ? { tool: target, aliased: true } : undefined
+}
+
+const PATH_ALIASES = ['file_path', 'filepath', 'file', 'filename', 'file_name']
+
+/** Canonical argument key → other keys the model writes for it, per wire tool. */
+const ARGUMENT_ALIASES: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  read_file: { path: PATH_ALIASES, start_line: ['line_start', 'from_line'], end_line: ['line_end', 'to_line'] },
+  write_file: { path: PATH_ALIASES, content: ['text', 'file_text', 'contents', 'data', 'code'] },
+  edit_file: {
+    path: PATH_ALIASES,
+    old_text: ['old_string', 'old_str', 'old', 'search', 'find', 'original'],
+    new_text: ['new_string', 'new_str', 'new', 'replace', 'replacement', 'updated'],
+  },
+  list_files: { path: ['directory', 'dir', 'folder', 'dir_path'], pattern: ['glob'] },
+  search_text: { query: ['pattern', 'text', 'search', 'keyword', 'regex'], path: ['file_path', 'directory', 'dir'] },
+  bash: { command: ['cmd', 'script', 'code', 'shell'] },
+  web_fetch: { url: ['link', 'href', 'page'] },
+  web_search: { query: ['q', 'keywords', 'search', 'search_query'] },
+}
+
+/**
+ * Renames alias keys to the tool's own keys when the own key is absent
+ * (edit_file with Claude's old_string/new_string, read_file with file_path,
+ * ...). read_file's DSH-style offset/limit become start_line/end_line.
+ * Returns the args unchanged (same object) when nothing applied.
+ */
+export function normalizeArguments(tool: WireTool, args: Args): Args {
+  const aliases = ARGUMENT_ALIASES[tool.name]
+  if (aliases === undefined) return args
+  let out: Args | undefined
+  for (const [canonical, others] of Object.entries(aliases)) {
+    if (args[canonical] !== undefined && args[canonical] !== '') continue
+    const found = others.find(key => args[key] !== undefined && args[key] !== '')
+    if (found === undefined) continue
+    out ??= { ...args }
+    out[canonical] = args[found]
+    delete out[found]
+  }
+  if (tool.name === 'read_file' && args.start_line === undefined && args.offset !== undefined) {
+    const loose = (value: unknown) => int(typeof value === 'string' ? Number(value.trim()) : value)
+    const start = loose(args.offset)
+    const limit = loose(args.limit)
+    out ??= { ...args }
+    delete out.offset
+    delete out.limit
+    if (start !== undefined) out.start_line = start
+    if (start !== undefined && limit !== undefined) out.end_line = start + limit - 1
+  }
+  return out ?? args
+}
+
 export const EXIT_TOOL_NAME = 'no_tool'
 
 export const EXIT_TOOL_ENTRY = {
