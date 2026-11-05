@@ -38,6 +38,8 @@ export interface Settings {
   excludeTools: string[]
   includeDeveloper: boolean
   loopGuard: boolean
+  outputRepairs: boolean
+  guards: boolean
   traceDir: string
 }
 
@@ -99,6 +101,10 @@ export const Config = z.object({
   excludeTools: z.array(z.string()).default([]).description('Tool names (DSH or RWKV) hidden from the model.').volatile(),
   includeDeveloper: z.boolean().default(false).description('Show DSH developer/context messages to the model as user notes.').volatile(),
   loopGuard: z.boolean().default(true).description('Client-side repetition cut-off.').volatile(),
+  outputRepairs: z.boolean().default(DEFAULT_HARNESS.outputRepairs)
+    .description('Fix near-miss output: parser repairs, tool name / argument aliases, scalar coercion, DSH value repairs, path repair. Off: exact protocol form only, arguments reach DSH as written.').volatile(),
+  guards: z.boolean().default(DEFAULT_HARNESS.guards)
+    .description('Harness interventions: format re-asks, duplicate / failure gates, over-budget think close, answer-stage re-asks and fallbacks. Off: the model\'s output stands.').volatile(),
   traceDir: z.string().default('').description('Write every generation (prompt bytes + raw output) as JSONL here.').volatile(),
 })
 
@@ -115,6 +121,8 @@ function settingsOf(config: Config): AdapterSettings {
       answerMaxTokens: config.answerMaxTokens.get(),
       maxResultChars: config.maxResultChars.get(),
       sampling: config.sampling.get(),
+      outputRepairs: config.outputRepairs.get(),
+      guards: config.guards.get(),
       ...config.taskContract.get() ? { taskContract: config.taskContract.get() } : {},
     },
     toolMode: config.toolMode.get(),

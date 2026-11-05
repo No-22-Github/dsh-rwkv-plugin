@@ -343,3 +343,49 @@ test('DSH-named tools: value shapes 7B writes from other harnesses are repaired 
   const args = { path: 'src' }
   assert.equal(repairNativeValues(trained, args).args, args)
 })
+
+test('outputRepairs off: near-miss output is a shape error, names and arguments pass through as written', async () => {
+  // OpenAI wrapper parses with a repair; strict mode refuses it.
+  const wrapped = '<tool_call>{"type":"function","function":{"name":"read_file","arguments":{"path":"b.txt"}}}</tool_call>'
+  assert.equal(parseAction(wrapped, 'stop').type, 'tool')
+  assert.equal(parseAction(wrapped, 'stop', { strict: true }).type, 'error')
+  assert.equal(parseAction('Let me read it.\n<tool_call>{"name":"read_file","arguments":{"path":"b.txt"}}</tool_call>', 'stop', { strict: true }).type, 'error')
+  assert.equal(parseAction('<tool_call>{"name":"read_file","arguments":{"path":"b.txt"}}</tool_call>', 'stop', { strict: true }).type, 'tool')
+
+  const strict: HarnessConfig = { ...harness, outputRepairs: false }
+  const traces: string[] = []
+  const generator = new ScriptedGenerator(['>Need lines.</think><tool_call>{"name":"read_file","arguments":{"path":"b.txt","start_line":"5"}}'])
+  const step = await decideStep({ history: afterRead, tools, config: strict, generator, hooks: { trace: trace => traces.push(`${trace.outcome}:${trace.repairs.join(',')}`) } })
+  assert.equal(step.decision.type, 'tool')
+  // "5" stays a string: DSH (or the mapping) reports it, the plugin does not coerce.
+  assert.deepEqual(step.decision.type === 'tool' && step.decision.args, { path: 'b.txt', start_line: '5' })
+  assert.deepEqual(traces, ['run:'])
+
+  // An alias name is an unknown tool, not a rename.
+  const aliased = new ScriptedGenerator(['>x</think><tool_call>{"name":"cat","arguments":{"path":"b.txt"}}', '>ok</think>done'])
+  const after = await decideStep({ history: afterRead, tools, config: strict, generator: aliased })
+  assert.match(aliased.prompts[1]!, /unknown tool \\"cat\\"/)
+  assert.deepEqual(after.decision, { type: 'final', text: 'done', via: 'model' })
+})
+
+test('guards off: no duplicate gate, no re-ask; unparseable output becomes the answer as written', async () => {
+  const bare: HarnessConfig = { ...harness, guards: false }
+  const repeat = new ScriptedGenerator(['>again</think><tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}'])
+  const ran = await decideStep({ history: afterRead, tools, config: bare, generator: repeat })
+  assert.equal(ran.decision.type, 'tool')
+  assert.equal(repeat.prompts.length, 1)
+
+  const broken = new ScriptedGenerator(['>x</think><tool_call>{"name":"read_file","arguments":{"path":'])
+  const outcomes: string[] = []
+  const answered = await decideStep({ history: afterRead, tools, config: bare, generator: broken, hooks: { trace: trace => outcomes.push(trace.outcome) } })
+  assert.equal(broken.prompts.length, 1)
+  assert.equal(answered.decision.type === 'final' && answered.decision.via, 'raw')
+  assert.match(answered.decision.type === 'final' ? answered.decision.text : '', /<tool_call>/)
+  assert.deepEqual(outcomes, ['raw'])
+
+  // With guards on the same output is re-asked.
+  const guarded = new ScriptedGenerator(['>x</think><tool_call>{"name":"read_file","arguments":{"path":', '>ok</think>BUDGET-READY'])
+  const fixed = await decideStep({ history: afterRead, tools, config: harness, generator: guarded })
+  assert.equal(guarded.prompts.length, 2)
+  assert.deepEqual(fixed.decision, { type: 'final', text: 'BUDGET-READY', via: 'model' })
+})

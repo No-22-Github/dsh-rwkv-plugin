@@ -188,7 +188,28 @@ function parseLegacyXMLCall(value: string): Action | undefined {
   return callAction({ name, args, repairs: ['legacy_xml_call'] })
 }
 
-export function parseAction(value: string, finish: FinishReason): Action {
+export interface ParseOptions {
+  /**
+   * Accept only the exact protocol form: no near-miss repairs. A call that
+   * needs one, or a final answer that still carries a tool envelope, is a
+   * shape error.
+   */
+  readonly strict?: boolean
+}
+
+export function parseAction(value: string, finish: FinishReason, options: ParseOptions = {}): Action {
+  const action = parseLenient(value, finish)
+  if (options.strict !== true) return action
+  if ((action.type === 'tool' || action.type === 'exit') && action.repairs.length > 0) {
+    return { type: 'error', kind: 'shape', message: `tool call needs repair: ${action.repairs.join(',')}` }
+  }
+  if (action.type === 'final' && /<tool_calls?>/.test(action.text)) {
+    return { type: 'error', kind: 'shape', message: 'tool call not at the start of the output' }
+  }
+  return action
+}
+
+function parseLenient(value: string, finish: FinishReason): Action {
   const recovered = recoverPreamble(value, finish)
   if (recovered !== undefined) return recovered
   let candidate = stripLeadingThinkBlocks(value.trim())
@@ -225,7 +246,7 @@ export function parseAction(value: string, finish: FinishReason): Action {
     if (candidate.startsWith(open)) {
       const { content } = envelopeContent(candidate, open, `</${open.slice(1)}`)
       if (content !== '') {
-        const inner = parseAction(content, finish)
+        const inner = parseLenient(content, finish)
         if (inner.type === 'tool' || inner.type === 'exit') {
           return { ...inner, repairs: ['envelope_recovered', ...inner.repairs] }
         }

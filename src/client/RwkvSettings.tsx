@@ -59,6 +59,8 @@ interface RunSettings {
   excludeTools: string[]
   includeDeveloper: boolean
   loopGuard: boolean
+  outputRepairs: boolean
+  guards: boolean
   traceDir: string
 }
 
@@ -81,6 +83,8 @@ const RUN_DEFAULTS: RunSettings = {
   excludeTools: [],
   includeDeveloper: false,
   loopGuard: true,
+  outputRepairs: true,
+  guards: true,
   traceDir: '',
 }
 
@@ -421,6 +425,8 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
       <div className="rwkv-checks">
         <Check label="历史空思考块（不回传思维链）" checked={draft.historyEmptyThink} disabled={disabled} onChange={value => update({ historyEmptyThink: value })} />
         <Check label="复读检测截断（loop-guard）" checked={draft.loopGuard} disabled={disabled} onChange={value => update({ loopGuard: value })} />
+        <Check label="修正模型输出（格式、工具名、参数、路径）" checked={draft.outputRepairs} disabled={disabled} onChange={value => update({ outputRepairs: value })} />
+        <Check label="插件干预（重问、重复拦截、强制收尾）" checked={draft.guards} disabled={disabled} onChange={value => update({ guards: value })} />
       </div>
 
       <div className="rwkv-block">

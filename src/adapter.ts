@@ -231,11 +231,12 @@ export class RwkvAdapter extends LlmAdapter {
     }
     const sessionId = options.sessionId === undefined ? undefined : String(options.sessionId)
     const traceFile = this.settings.traceDir ? join(this.settings.traceDir, `${sessionId ?? 'no-session'}.jsonl`) : undefined
-    const writeTrace = (trace: GenerationTrace) => {
+    const writeLine = (record: Record<string, unknown>) => {
       if (traceFile === undefined) return
-      const line = `${JSON.stringify({ at: new Date().toISOString(), model: config.id, purpose: options.purpose, ...trace })}\n`
+      const line = `${JSON.stringify({ at: new Date().toISOString(), model: config.id, purpose: options.purpose, ...record })}\n`
       void mkdir(this.settings.traceDir!, { recursive: true }).then(() => appendFile(traceFile, line)).catch(() => {})
     }
+    const writeTrace = (trace: GenerationTrace) => writeLine({ ...trace })
 
     let settled = false
     const work = (async () => {
@@ -291,17 +292,32 @@ export class RwkvAdapter extends LlmAdapter {
       index = 1
     }
     const { decision } = step
+    const repairs = decision.type === 'tool' ? [...decision.repairs] : []
     if (decision.type === 'final') {
       yield { type: 'block-start', index, blockType: 'text' }
       yield { type: 'text-delta', index, text: decision.text }
       yield { type: 'block-end', index, block: { type: 'text', text: decision.text } }
     } else {
       const id = brandString<ToolCallId>(`call_${randomUUID().replace(/-/g, '').slice(0, 24)}`)
-      const argumentsText = JSON.stringify(repairToolPaths(decision.tool.dshName, decision.tool.toDsh(decision.args), runtimeCwd(history)))
+      const dshArgs = decision.tool.toDsh(decision.args)
+      const pathed = harness.outputRepairs ? repairToolPaths(decision.tool.dshName, dshArgs, runtimeCwd(history)) : dshArgs
+      if (pathed !== dshArgs) repairs.push('path_repaired')
+      const argumentsText = JSON.stringify(pathed)
       yield { type: 'block-start', index, blockType: 'tool-call' }
       yield { type: 'tool-call-delta', index, id, name: decision.tool.dshName, argumentsDelta: argumentsText }
       yield { type: 'block-end', index, block: { type: 'tool-call', id, name: decision.tool.dshName, arguments: argumentsText } }
     }
+    // One record per DSH request: what was handed to DSH and what it took to get there.
+    writeLine({
+      stage: 'step',
+      decision: decision.type === 'tool' ? `tool ${decision.tool.dshName}` : `final ${decision.via}`,
+      repairs,
+      generations: step.generations,
+      /** Generation attempts (first try + re-asks); think resumes are not attempts. */
+      attempts,
+      outputRepairs: harness.outputRepairs,
+      guards: harness.guards,
+    })
     yield {
       type: 'usage',
       usage: {
