@@ -94,6 +94,7 @@ function SessionRow(props: { item: SessionSummary; selected: boolean; onSelect: 
           <span className="rwkv-session-meta">
             {new Date(item.modified).toLocaleString()} · {item.models.join(', ')} · {item.steps} 次请求 · {item.generations} 次生成
             {item.touchedGenerations > 0 ? ` · ${item.touchedGenerations} 次用到兜底` : ''}
+            {item.persisted ? '' : ' · 仅在内存'}
           </span>
         </button>
       </div>
@@ -145,7 +146,7 @@ function Traces(props: { recording: boolean }) {
     <>
       <div className="rwkv-block">
         <div className="rwkv-block-head">
-          <span className="rwkv-block-title">兜底统计（所有已记录的会话，不含会话标题这类附带请求）</span>
+          <span className="rwkv-block-title">兜底统计（内存和磁盘里的全部会话，不含会话标题这类附带请求）</span>
           <button type="button" className="rwkv-link" onClick={() => setReload(value => value + 1)}>刷新</button>
         </div>
         <StatsCard stats={data.stats} />
@@ -163,7 +164,7 @@ function Traces(props: { recording: boolean }) {
           最后一次生成的完整 RWKV 文本（text），以及把历史步骤的真实思考填回去的版本（textWithThinks，记录完整时才有）。
         </p>
         {error ? <p className="rwkv-error">{error}</p> : null}
-        {data.sessions.length === 0 ? <p className="rwkv-hint">这个目录里还没有轨迹。</p> : (
+        {data.sessions.length === 0 ? <p className="rwkv-hint">还没有轨迹。用 RWKV 模型跑一轮任务后这里会出现。</p> : (
           <ul className="rwkv-sessions">
             {data.sessions.map(item => (
               <SessionRow key={item.session} item={item} selected={selected.has(item.session)} onSelect={value => select(item.session, value)} />
@@ -209,15 +210,15 @@ export function DeveloperCard(props: {
       <summary className="rwkv-head rwkv-developer-summary">
         <span className="rwkv-identity"><span className="rwkv-name">开发者</span></span>
         <span className="rwkv-meta">
-          {settings.recordTraces ? '正在记录轨迹' : '不记录轨迹'}
+          {settings.recordTraces ? '轨迹保存到磁盘' : '轨迹只在内存'}
           {settings.outputRepairs ? '' : ' · 修正已关'}
           {settings.guards ? '' : ' · 干预已关'}
         </span>
       </summary>
       <div className="rwkv-developer-body">
         <Toggle
-          label="记录原始轨迹" checked={settings.recordTraces} disabled={off} onChange={value => { void set('recordTraces', value) }}
-          hint="每次生成都记一行：发给 RWKV 的提示词原文、原始输出、插件怎么处理的、用了哪些修复。每个会话一个文件。对话视图里会多出一个 RWKV 标签页逐帧显示。"
+          label="把轨迹保存到磁盘" checked={settings.recordTraces} disabled={off} onChange={value => { void set('recordTraces', value) }}
+          hint="轨迹（发给 RWKV 的提示词原文、原始输出、插件怎么处理的、用了哪些修复）一直记在内存里，对话视图的 RWKV 标签页和下面的统计、导出都能用，DSH 重启后清空。勾选后同时写进轨迹目录，每个会话一个文件。"
         />
         <label className="rwkv-field">
           <span className="rwkv-label">轨迹目录</span>

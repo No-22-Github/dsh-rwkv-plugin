@@ -5,11 +5,10 @@
 // client-connection admitted the request with the same cookie and origin
 // checks as every DSH API call.
 
-import { existsSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { BackendError } from './backend/generator.ts'
 import { LightningClient, MAX_ADAPTER_UPLOAD_BYTES } from './backend/lightning.ts'
-import { exportTask, listSessions, readTrace, tracePath, traceStats } from './traces.ts'
+import { allSessions, exportTask, sessionRecords, traceStats } from './traces.ts'
 
 export const ADAPTER_ROUTE = '/api/rwkv/adapters'
 
@@ -107,6 +106,7 @@ export const TRACE_EXPORT_ROUTE = '/api/rwkv/trace-export'
 export interface TraceRouteSettings {
   /** Directory the traces are read from (the configured one or the default). */
   readonly dir: string
+  /** Whether new traces are also written to dir (they are always kept in memory). */
   readonly recording: boolean
 }
 
@@ -129,33 +129,28 @@ export function handleTraceRoute(request: IncomingMessage, response: ServerRespo
   try {
     if (url.pathname === TRACE_EXPORT_ROUTE) {
       const wanted = (url.searchParams.get('sessions') ?? '').split(',').map(item => item.trim()).filter(Boolean)
-      const sessions = wanted.length > 0 ? wanted : listSessions(dir).map(item => item.session)
+      const sessions = wanted.length > 0 ? wanted : allSessions(dir).map(item => item.session)
       response.writeHead(200, {
         'content-type': 'application/x-ndjson; charset=utf-8',
         'content-disposition': `attachment; filename="rwkv-traces-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.jsonl"`,
         'cache-control': 'no-store',
       })
       for (const session of sessions) {
-        const path = tracePath(dir, session)
-        if (path === undefined || !existsSync(path)) continue
-        response.write(`${JSON.stringify(exportTask(session, readTrace(path)))}\n`)
+        const records = sessionRecords(dir, session)
+        if (records.length === 0) continue
+        response.write(`${JSON.stringify(exportTask(session, records))}\n`)
       }
       response.end()
       return true
     }
     const session = decodeURIComponent(url.pathname.slice(TRACE_ROUTE.length + 1))
     if (session === '') {
-      const sessions = listSessions(dir)
-      const records = sessions.flatMap(item => readTrace(tracePath(dir, item.session)!))
+      const sessions = allSessions(dir)
+      const records = sessions.flatMap(item => sessionRecords(dir, item.session))
       send(response, 200, { dir, recording, sessions, stats: traceStats(records) })
       return true
     }
-    const path = tracePath(dir, session)
-    if (path === undefined || !existsSync(path)) {
-      send(response, 200, { dir, recording, session, records: [] })
-      return true
-    }
-    const records = readTrace(path)
+    const records = sessionRecords(dir, session)
     const index = url.searchParams.get('index')
     if (index !== null) {
       const record = records[Number(index)]

@@ -2,7 +2,7 @@
 // tools: session list, per-generation frames, crutch statistics and the
 // export of whole tasks. Pure reading; the adapter is the only writer.
 
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 
@@ -124,6 +124,8 @@ export interface SessionSummary {
   readonly session: string
   readonly modified: string
   readonly bytes: number
+  /** A file in the trace directory exists for it (otherwise memory only). */
+  readonly persisted: boolean
   readonly task: string
   readonly models: readonly string[]
   readonly generations: number
@@ -133,6 +135,25 @@ export interface SessionSummary {
   readonly touchedSteps: number
 }
 
+function summarize(session: string, records: readonly TraceRecord[], modified: string, bytes: number, persisted: boolean): SessionSummary {
+  const agent = records.filter(isAgent)
+  const generations = agent.filter(isGeneration)
+  const steps = agent.filter(record => record.stage === 'step')
+  return {
+    session,
+    modified,
+    bytes,
+    persisted,
+    task: taskPreview(records),
+    models: [...new Set(agent.map(record => record.model ?? '?'))],
+    generations: generations.length,
+    steps: steps.length,
+    touchedGenerations: generations.filter(record => record.outcome !== undefined && !cleanGeneration(record)).length,
+    touchedSteps: steps.filter(record => !cleanStep(record)).length,
+  }
+}
+
+/** Sessions on disk only. */
 export function listSessions(dir: string): SessionSummary[] {
   let names: string[]
   try {
@@ -144,23 +165,72 @@ export function listSessions(dir: string): SessionSummary[] {
   for (const name of names) {
     const path = join(dir, name)
     const info = statSync(path)
-    const records = readTrace(path)
-    const agent = records.filter(isAgent)
-    const generations = agent.filter(isGeneration)
-    const steps = agent.filter(record => record.stage === 'step')
-    sessions.push({
-      session: basename(name, '.jsonl'),
-      modified: info.mtime.toISOString(),
-      bytes: info.size,
-      task: taskPreview(records),
-      models: [...new Set(agent.map(record => record.model ?? '?'))],
-      generations: generations.length,
-      steps: steps.length,
-      touchedGenerations: generations.filter(record => record.outcome !== undefined && !cleanGeneration(record)).length,
-      touchedSteps: steps.filter(record => !cleanStep(record)).length,
-    })
+    sessions.push(summarize(basename(name, '.jsonl'), readTrace(path), info.mtime.toISOString(), info.size, true))
   }
   return sessions.sort((a, b) => b.modified.localeCompare(a.modified))
+}
+
+/**
+ * Traces of this DSH process, kept in memory whether or not they are written
+ * to disk, so the RWKV tab works without recording. Bounded: the least
+ * recently written sessions are dropped past the session or size limit.
+ */
+export class MemoryTraces {
+  private readonly sessions = new Map<string, { records: TraceRecord[]; chars: number; modified: string }>()
+  private total = 0
+  private readonly maxSessions: number
+  private readonly maxChars: number
+
+  constructor(maxSessions = 100, maxChars = 100_000_000) {
+    this.maxSessions = maxSessions
+    this.maxChars = maxChars
+  }
+
+  add(session: string, record: TraceRecord): void {
+    const chars = JSON.stringify(record).length
+    const entry = this.sessions.get(session) ?? { records: [], chars: 0, modified: '' }
+    this.sessions.delete(session)
+    entry.records.push(record)
+    entry.chars += chars
+    entry.modified = record.at ?? new Date().toISOString()
+    this.sessions.set(session, entry)
+    this.total += chars
+    for (const [key, oldest] of this.sessions) {
+      if (this.sessions.size <= 1 || (this.sessions.size <= this.maxSessions && this.total <= this.maxChars)) break
+      this.sessions.delete(key)
+      this.total -= oldest.chars
+    }
+  }
+
+  get(session: string): TraceRecord[] | undefined {
+    return this.sessions.get(session)?.records
+  }
+
+  list(): SessionSummary[] {
+    return [...this.sessions].map(([session, entry]) => summarize(session, entry.records, entry.modified, entry.chars, false))
+  }
+}
+
+export const memoryTraces = new MemoryTraces()
+
+/** One session's records: from disk or memory, whichever holds more (memory starts with this process). */
+export function sessionRecords(dir: string, session: string, memory: MemoryTraces = memoryTraces): TraceRecord[] {
+  const path = tracePath(dir, session)
+  const disk = path !== undefined && existsSync(path) ? readTrace(path) : []
+  const live = memory.get(session) ?? []
+  return live.length > disk.length ? [...live] : disk
+}
+
+/** Disk and memory sessions together, newest first. */
+export function allSessions(dir: string, memory: MemoryTraces = memoryTraces): SessionSummary[] {
+  const byId = new Map(listSessions(dir).map(item => [item.session, item]))
+  for (const item of memory.list()) {
+    const disk = byId.get(item.session)
+    if (disk === undefined || item.generations + item.steps > disk.generations + disk.steps) {
+      byId.set(item.session, { ...item, persisted: disk !== undefined })
+    }
+  }
+  return [...byId.values()].sort((a, b) => b.modified.localeCompare(a.modified))
 }
 
 const WITHHELD_THINK = '<think'

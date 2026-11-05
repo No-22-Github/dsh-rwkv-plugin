@@ -1,89 +1,248 @@
-// One session's generations as frames: what the model wrote, what the
-// harness did with it (outcome) and which repairs it needed. Shared by the
-// RWKV conversation tab and the developer section of the settings page.
+// One session's raw trace as a ledger in the style of DSH's Trajectory view:
+// a row per generation (kind tag, one-line preview, repair chips), a thin row
+// per DSH request saying what was handed to DSH, a rail with request labels,
+// and an inspector panel for the selected generation. Shared by the RWKV
+// conversation tab and the developer section of the settings page.
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { fetchRecord, isGeneration, OUTCOME_LABEL, REPAIR_LABEL, touched, type TraceRecord } from './traces-api.ts'
+
+/** Short tag per outcome, like the native role tags. */
+const OUTCOME_TAG: Record<string, string> = {
+  'run': '调用',
+  'final': '作答',
+  're-ask': '重问',
+  'duplicate-retry': '重复',
+  'closeout': '收尾',
+  'rejected unknown-tool': '拒绝',
+  'rejected blocked': '拒绝',
+  'empty-exit': '空答',
+  'raw': '原样',
+}
+
+type Tone = 'clean' | 'touched' | 'error' | 'neutral'
+
+function toneOf(record: TraceRecord): Tone {
+  if (record.outcome === undefined) return 'neutral'
+  if (record.outcome === 'raw' || record.outcome.startsWith('rejected')) return 'error'
+  return touched(record) ? 'touched' : 'clean'
+}
+
+/** The part after a leading think block. */
+function afterThink(output: string): string {
+  const text = output.trimStart()
+  if (!text.startsWith('<think')) return text
+  const end = text.indexOf('</think>')
+  return end < 0 ? '' : text.slice(end + '</think>'.length).trim()
+}
+
+function thinkOf(output: string): string {
+  const text = output.trimStart()
+  if (!text.startsWith('<think')) return ''
+  const end = text.indexOf('</think>')
+  return text.slice(text.indexOf('>') + 1, end < 0 ? undefined : end).trim()
+}
+
+/** One-line preview: the call as name + arguments, else the answer text. */
+function Preview(props: { record: TraceRecord }) {
+  const output = props.record.output ?? ''
+  const action = afterThink(output)
+  const call = /<tool_calls?>\s*([\s\S]*)/.exec(action)
+  if (call !== null) {
+    let name = ''
+    let payload = call[1]!.replace(/<\/tool_calls?>\s*$/, '').trim()
+    try {
+      const parsed = JSON.parse(payload) as { name?: unknown; arguments?: unknown; function?: { name?: unknown; arguments?: unknown } }
+      const inner = parsed.function ?? parsed
+      if (typeof inner.name === 'string') {
+        name = inner.name
+        payload = JSON.stringify(inner.arguments ?? {})
+      }
+    } catch {
+      // Unparseable call: show it as written.
+    }
+    return (
+      <span className="rl-text">
+        {name ? <span className="rl-call-name">{name}</span> : null}
+        <span className="rl-call-payload">{payload}</span>
+      </span>
+    )
+  }
+  const text = action || thinkOf(output)
+  return <span className={`rl-text${action ? '' : ' rl-dim'}`}>{text.replace(/\s+/g, ' ') || '（空输出）'}</span>
+}
+
+interface Row {
+  readonly index: number
+  readonly record: TraceRecord
+  readonly request: number
+  readonly generation: number
+  readonly first: boolean
+}
 
 function time(at: string | undefined): string {
   if (at === undefined) return ''
   const date = new Date(at)
-  return Number.isNaN(date.getTime()) ? at : date.toLocaleTimeString()
+  return Number.isNaN(date.getTime()) ? at : `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`
 }
 
-function Frame(props: { session: string; index: number; record: TraceRecord; number: number }) {
-  const { record } = props
-  const [open, setOpen] = useState(false)
-  const [prompt, setPrompt] = useState<string | undefined>()
-  const [error, setError] = useState('')
-  const outcome = record.outcome
-  const kind = outcome === undefined ? 'old' : touched(record) ? (outcome === 'raw' ? 'raw' : 'touched') : 'clean'
-  const loadPrompt = async () => {
-    setError('')
-    try {
-      setPrompt((await fetchRecord(props.session, props.index)).record.prompt ?? '')
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
-    }
-  }
+function KeyValue(props: { label: string; children: React.ReactNode }) {
   return (
-    <li className={`rwkv-frame rwkv-frame-${kind}`}>
-      <button type="button" className="rwkv-frame-head" aria-expanded={open} onClick={() => setOpen(value => !value)}>
-        <span className="rwkv-frame-no">#{props.number}</span>
-        <span className="rwkv-frame-stage">{record.stage === 'answer' ? '收尾' : '决策'}</span>
-        <span className={`rwkv-badge rwkv-badge-${kind}`}>{outcome === undefined ? record.action ?? '旧记录' : OUTCOME_LABEL[outcome] ?? outcome}</span>
-        {(record.repairs ?? []).map(repair => (
-          <span key={repair} className="rwkv-chip" title={repair}>{REPAIR_LABEL[repair] ?? repair}</span>
-        ))}
-        {record.purpose ? <span className="rwkv-chip">{record.purpose}</span> : null}
-        <span className="rwkv-frame-meta">{record.finish === 'length' ? '写满上限 · ' : ''}{record.model} · {time(record.at)}</span>
-      </button>
-      {open ? (
-        <div className="rwkv-frame-body">
-          <div className="rwkv-frame-label">模型原始输出{record.action ? ` · 解析为 ${record.action}` : ''}</div>
-          <pre className="rwkv-pre">{record.output ?? ''}</pre>
-          {prompt === undefined ? (
-            <button type="button" className="rwkv-link" onClick={() => { void loadPrompt() }}>
-              看发给模型的提示词{record.promptChars ? `（${record.promptChars.toLocaleString()} 字符）` : ''}
-            </button>
-          ) : (
-            <>
-              <div className="rwkv-frame-label">发给模型的提示词</div>
-              <pre className="rwkv-pre rwkv-pre-prompt">{prompt}</pre>
-            </>
-          )}
-          {error ? <p className="rwkv-error">{error}</p> : null}
-        </div>
-      ) : null}
-    </li>
+    <>
+      <span className="rl-kv-key">{props.label}</span>
+      <span className="rl-kv-value">{props.children}</span>
+    </>
   )
 }
 
-/** Request summaries (stage step) separate the frames of one DSH request from the next. */
-function StepLine(props: { record: TraceRecord }) {
-  const { record } = props
+function Inspector(props: { session: string; row: Row; step: TraceRecord | undefined; onClose: () => void }) {
+  const { row, step } = props
+  const { record } = row
+  const [tab, setTab] = useState<'overview' | 'output' | 'prompt'>('overview')
+  const [prompt, setPrompt] = useState<string | undefined>()
+  const [error, setError] = useState('')
+  useEffect(() => {
+    setPrompt(undefined)
+    setError('')
+  }, [row.index])
+  useEffect(() => {
+    if (tab !== 'prompt' || prompt !== undefined) return
+    let stopped = false
+    fetchRecord(props.session, row.index)
+      .then(body => { if (!stopped) setPrompt(body.record.prompt ?? '') })
+      .catch((cause: unknown) => { if (!stopped) setError(cause instanceof Error ? cause.message : String(cause)) })
+    return () => { stopped = true }
+  }, [tab, prompt, props.session, row.index])
+  const tone = toneOf(record)
   const repairs = record.repairs ?? []
+  const think = thinkOf(record.output ?? '')
   return (
-    <li className="rwkv-step">
-      <span>↳ 交给 DSH：{record.decision}</span>
-      {record.attempts !== undefined && record.attempts > 1 ? <span>· 生成 {record.attempts} 次</span> : null}
-      {repairs.length > 0 ? <span>· 修复 {repairs.map(repair => REPAIR_LABEL[repair] ?? repair).join('、')}</span> : null}
-      {record.outputRepairs === false ? <span className="rwkv-chip">修正关</span> : null}
-      {record.guards === false ? <span className="rwkv-chip">干预关</span> : null}
-    </li>
+    <aside className="rl-inspector" aria-label="生成详情">
+      <div className="rl-inspector-head">
+        <span className={`rl-tag rl-tone-${tone}`}>{OUTCOME_TAG[record.outcome ?? ''] ?? '生成'}</span>
+        <span className="rl-inspector-title">请求 {row.request} · 第 {row.generation} 次生成{record.stage === 'answer' ? ' · 收尾阶段' : ''}</span>
+        <button type="button" className="rl-icon" aria-label="关闭" onClick={props.onClose}>×</button>
+      </div>
+      <div className="rl-tabs" role="tablist">
+        {([['overview', '概述'], ['output', '原始输出'], ['prompt', '提示词']] as const).map(([id, label]) => (
+          <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => setTab(id)}>{label}</button>
+        ))}
+      </div>
+      <div className="rl-inspector-body">
+        {tab === 'overview' ? (
+          <>
+            <div className="rl-kv">
+              <KeyValue label="插件处理">{record.outcome === undefined ? `${record.action ?? '—'}（旧记录，没有判定）` : OUTCOME_LABEL[record.outcome] ?? record.outcome}</KeyValue>
+              <KeyValue label="用到的修复">
+                {repairs.length === 0 ? '无' : (
+                  <span className="rl-chips">{repairs.map(repair => <span key={repair} className="rl-chip" title={repair}>{REPAIR_LABEL[repair] ?? repair}</span>)}</span>
+                )}
+              </KeyValue>
+              <KeyValue label="解析为"><code>{record.action ?? '—'}</code></KeyValue>
+              <KeyValue label="停止原因">{record.finish === 'length' ? '写满 token 上限' : record.finish ?? '—'}{record.stop ? `（${record.stop}）` : ''}</KeyValue>
+              {step ? <KeyValue label="交给 DSH"><code>{step.decision}</code>{step.attempts && step.attempts > 1 ? ` · 这次请求生成了 ${step.attempts} 次` : ''}</KeyValue> : null}
+              {step && (step.outputRepairs === false || step.guards === false) ? (
+                <KeyValue label="开关">{step.outputRepairs === false ? '修正模型输出：关 ' : ''}{step.guards === false ? '插件干预：关' : ''}</KeyValue>
+              ) : null}
+              <KeyValue label="模型">{record.model ?? '—'}</KeyValue>
+              {record.purpose ? <KeyValue label="用途">{record.purpose}</KeyValue> : null}
+              <KeyValue label="时间">{time(record.at)}</KeyValue>
+            </div>
+            {think ? (
+              <>
+                <div className="rl-section-title">思考</div>
+                <div className="rl-prose">{think}</div>
+              </>
+            ) : null}
+            <div className="rl-section-title">动作</div>
+            <pre className="rl-pre">{afterThink(record.output ?? '') || '（无）'}</pre>
+          </>
+        ) : tab === 'output' ? (
+          <pre className="rl-pre rl-pre-full">{record.output ?? ''}</pre>
+        ) : error ? <p className="rwkv-error">{error}</p> : prompt === undefined ? <p className="rwkv-hint">加载中…</p> : (
+          <pre className="rl-pre rl-pre-full">{prompt}</pre>
+        )}
+      </div>
+    </aside>
   )
 }
 
 export function TraceFrames(props: { session: string; records: readonly TraceRecord[]; onlyTouched: boolean; showSide: boolean }) {
-  let number = 0
-  const rows = props.records.flatMap((record, index) => {
-    if (!props.showSide && record.purpose !== undefined) return []
-    if (record.stage === 'step') return props.onlyTouched ? [] : [<StepLine key={index} record={record} />]
-    if (!isGeneration(record)) return []
-    number++
-    if (props.onlyTouched && !touched(record)) return []
-    return [<Frame key={index} session={props.session} index={index} record={record} number={number} />]
+  const [selected, setSelected] = useState<number | undefined>()
+  const rows: Row[] = []
+  const steps = new Map<number, TraceRecord>()
+  let request = 1
+  let generation = 0
+  props.records.forEach((record, index) => {
+    if (!props.showSide && record.purpose !== undefined) return
+    if (record.stage === 'step') {
+      steps.set(request, record)
+      rows.push({ index, record, request, generation, first: false })
+      request++
+      generation = 0
+      return
+    }
+    if (!isGeneration(record)) return
+    generation++
+    rows.push({ index, record, request, generation, first: generation === 1 })
   })
-  if (rows.length === 0) return <p className="rwkv-hint">{props.onlyTouched ? '这个会话里没有用到兜底的生成。' : '这个会话还没有记录。'}</p>
-  return <ol className="rwkv-frames">{rows}</ol>
+  const visible = props.onlyTouched ? rows.filter(row => row.record.stage !== 'step' && touched(row.record)) : rows
+  const current = rows.find(row => row.index === selected)
+  if (visible.length === 0) {
+    return <p className="rl-empty">{props.onlyTouched ? '这个会话里没有用到兜底的生成。' : '这个会话还没有 RWKV 记录。'}</p>
+  }
+  return (
+    <div className="rl-ledger">
+      <div className="rl-scroll">
+      <table className="rl-table">
+        <colgroup><col className="rl-event-col" /><col /></colgroup>
+        <tbody>
+          {visible.map(row => {
+            if (row.record.stage === 'step') {
+              const repairs = row.record.repairs ?? []
+              return (
+                <tr key={row.index} className="rl-step-row">
+                  <td className="rl-event"><span className="rl-rail" /></td>
+                  <td className="rl-content">
+                    <span className="rl-step">
+                      → 交给 DSH <code>{row.record.decision}</code>
+                      {row.record.attempts && row.record.attempts > 1 ? ` · 生成 ${row.record.attempts} 次` : ''}
+                      {repairs.length > 0 ? ` · 修复 ${repairs.map(repair => REPAIR_LABEL[repair] ?? repair).join('、')}` : ''}
+                    </span>
+                  </td>
+                </tr>
+              )
+            }
+            const tone = toneOf(row.record)
+            const repairs = row.record.repairs ?? []
+            return (
+              <tr
+                key={row.index} tabIndex={0} data-selected={row.index === selected} data-turn-start={row.first && !props.onlyTouched}
+                onClick={() => setSelected(current => current === row.index ? undefined : row.index)}
+                onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelected(row.index) } }}
+              >
+                <td className="rl-event">
+                  <span className={`rl-rail rl-rail-${tone}`} />
+                  {row.first || props.onlyTouched ? <span className="rl-turn-label">请求 {row.request}</span> : null}
+                  <span className={`rl-tag rl-tone-${tone}`} title={row.record.outcome === undefined ? '旧记录' : OUTCOME_LABEL[row.record.outcome] ?? row.record.outcome}>
+                    {row.record.outcome === undefined ? '生成' : OUTCOME_TAG[row.record.outcome] ?? row.record.outcome}
+                  </span>
+                </td>
+                <td className="rl-content">
+                  <span className="rl-content-inner">
+                    {row.record.stage === 'answer' ? <span className="rl-chip rl-chip-muted">收尾阶段</span> : null}
+                    {row.record.finish === 'length' ? <span className="rl-chip rl-chip-warn">写满上限</span> : null}
+                    <Preview record={row.record} />
+                    {repairs.map(repair => <span key={repair} className="rl-chip rl-chip-warn" title={repair}>{REPAIR_LABEL[repair] ?? repair}</span>)}
+                  </span>
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+      </div>
+      {current ? <Inspector session={props.session} row={current} step={steps.get(current.request)} onClose={() => setSelected(undefined)} /> : null}
+    </div>
+  )
 }

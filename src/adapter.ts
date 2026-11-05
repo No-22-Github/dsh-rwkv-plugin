@@ -18,6 +18,7 @@ import { decideStep, type GenerationTrace, type HarnessConfig } from './core/age
 import { dshSystemSections } from './core/dsh-prompt.ts'
 import { buildCatalog, type ToolMode, type ToolNames } from './core/tools.ts'
 import { historyFromMessages, systemText } from './history.ts'
+import { memoryTraces } from './traces.ts'
 import { repairToolPaths, runtimeCwd } from './paths.ts'
 
 /** Pending appends per trace file, so records keep their order. */
@@ -235,9 +236,12 @@ export class RwkvAdapter extends LlmAdapter {
     const sessionId = options.sessionId === undefined ? undefined : String(options.sessionId)
     const traceFile = this.settings.traceDir ? join(this.settings.traceDir, `${sessionId ?? 'no-session'}.jsonl`) : undefined
     const traceDir = this.settings.traceDir
-    const writeLine = (record: Record<string, unknown>) => {
+    const writeLine = (fields: Record<string, unknown>) => {
+      const record = { at: new Date().toISOString(), model: config.id, purpose: options.purpose, ...fields }
+      // Always kept in memory for the RWKV tab; written to disk only when recording is on.
+      memoryTraces.add(sessionId ?? 'no-session', record)
       if (traceFile === undefined || traceDir === undefined) return
-      const line = `${JSON.stringify({ at: new Date().toISOString(), model: config.id, purpose: options.purpose, ...record })}\n`
+      const line = `${JSON.stringify(record)}\n`
       // One append chain per file: a request summary must land after the generations it summarizes.
       const previous = traceWrites.get(traceFile) ?? Promise.resolve()
       const next = previous.then(() => mkdir(traceDir, { recursive: true })).then(() => appendFile(traceFile, line)).catch(() => {})

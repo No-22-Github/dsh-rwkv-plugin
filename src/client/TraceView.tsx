@@ -1,30 +1,34 @@
 // "RWKV" tab in the conversation view ring: the current session's raw trace
-// frame by frame, with the frames where a crutch acted marked. DSH's own
-// Trajectory tab shows DSH's record (repaired calls, merged reasoning); this
-// one shows what RWKV received and wrote per generation.
+// as a ledger, laid out like DSH's Trajectory tab. DSH's own Trajectory shows
+// DSH's record (repaired calls, merged reasoning); this one shows what RWKV
+// received and wrote per generation and where the plugin stepped in.
 
 import { useEffect, useState } from 'react'
 import { TraceFrames } from './TraceFrames.tsx'
-import { fetchSession, isGeneration, touched, type TraceRecord } from './traces-api.ts'
+import { fetchSession, isGeneration, percent, touched, type TraceRecord } from './traces-api.ts'
 
-const POLL_MS = 3000
+const POLL_MS = 2500
 
 export function RwkvTraceView(props: { session: string }) {
   const [records, setRecords] = useState<TraceRecord[] | undefined>()
-  const [recording, setRecording] = useState(true)
+  const [recording, setRecording] = useState(false)
   const [error, setError] = useState('')
   const [onlyTouched, setOnlyTouched] = useState(false)
   const [showSide, setShowSide] = useState(false)
   useEffect(() => {
+    setRecords(undefined)
     let stopped = false
     let timer: ReturnType<typeof setTimeout> | undefined
+    let first = true
     const load = async () => {
-      if (document.visibilityState === 'visible') {
+      // The first load always runs; polling pauses while the page is hidden.
+      if (first || document.visibilityState === 'visible') {
+        first = false
         try {
           const body = await fetchSession(props.session)
           if (stopped) return
           setRecording(body.recording)
-          // Same length: nothing new was appended, keep the rendered rows.
+          // Same length: nothing new was appended, keep the rendered rows (and the selection).
           setRecords(current => current !== undefined && current.length === body.records.length ? current : body.records)
           setError('')
         } catch (cause) {
@@ -41,18 +45,26 @@ export function RwkvTraceView(props: { session: string }) {
   }, [props.session])
 
   const generations = (records ?? []).filter(record => isGeneration(record) && record.purpose === undefined)
-  const hit = generations.filter(touched).length
+  const judged = generations.filter(record => record.outcome !== undefined)
+  const hit = judged.filter(touched).length
   return (
-    <div className="rwkv-section rwkv-view">
-      <div className="rwkv-view-bar">
-        <span className="rwkv-name">RWKV 原始轨迹</span>
-        <span className="rwkv-meta">{generations.length} 次生成 · {hit} 次用到兜底</span>
-        <label className="rwkv-check"><input type="checkbox" checked={onlyTouched} onChange={event => setOnlyTouched(event.target.checked)} />只看用到兜底的生成</label>
-        <label className="rwkv-check"><input type="checkbox" checked={showSide} onChange={event => setShowSide(event.target.checked)} />显示会话标题等附带请求</label>
+    <div className="rl-root">
+      <div className="rl-toolbar">
+        <div className="rl-toggles">
+          <button type="button" className="rl-toggle" aria-pressed={onlyTouched} onClick={() => setOnlyTouched(value => !value)}>只看兜底</button>
+          <button type="button" className="rl-toggle" aria-pressed={showSide} onClick={() => setShowSide(value => !value)}>附带请求</button>
+        </div>
+        <span className="rl-summary">
+          {generations.length} 次生成 · {hit} 次用到兜底{judged.length > 0 ? ` · 原样可用 ${percent(judged.length - hit, judged.length)}` : ''}
+        </span>
       </div>
-      {recording ? null : <p className="rwkv-hint">轨迹记录已关闭，新的生成不会出现在这里。在设置 → RWKV → 开发者里打开。</p>}
-      {error ? <p className="rwkv-error">{error}</p> : null}
-      {records === undefined ? <p className="rwkv-hint">加载中…</p> : (
+      {error ? <p className="rl-notice rwkv-error">{error}</p> : null}
+      {records !== undefined && records.length > 0 && !recording ? (
+        <p className="rl-notice">轨迹只在内存里，DSH 重启后清空。要保存到磁盘，去设置 → RWKV → 开发者勾选。</p>
+      ) : null}
+      {records === undefined ? <p className="rl-empty">加载中…</p> : records.length === 0 ? (
+        <p className="rl-empty">这个会话没有 RWKV 记录：它没用 RWKV 模型，或者是在这次启动 DSH 之前跑的（没保存到磁盘）。</p>
+      ) : (
         <TraceFrames session={props.session} records={records} onlyTouched={onlyTouched} showSide={showSide} />
       )}
     </div>

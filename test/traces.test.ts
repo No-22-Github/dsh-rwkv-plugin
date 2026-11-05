@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { handleTraceRoute } from '../src/routes.ts'
-import { exportTask, joinGeneration, listSessions, traceStats, transcriptWithThinks, type TraceRecord } from '../src/traces.ts'
+import { allSessions, exportTask, joinGeneration, listSessions, MemoryTraces, sessionRecords, traceStats, transcriptWithThinks, type TraceRecord } from '../src/traces.ts'
 
 const SYSTEM = 'System: rules\n\nUser: 读 a.txt\n\nAssistant: <think'
 // Request 1: a repaired call. Request 2: one re-ask, then the answer.
@@ -70,4 +70,20 @@ test('trace routes: list, one session without prompts, one record with its promp
   const exported = call('/api/rwkv/trace-export').body.trim().split('\n')
   assert.equal(exported.length, 1)
   assert.equal(JSON.parse(exported[0]!).session, 'session-1')
+})
+
+test('memory traces: kept per session, oldest sessions dropped past the limit; disk or memory, whichever holds more', () => {
+  const memory = new MemoryTraces(2, 1_000_000)
+  memory.add('a', { stage: 'decision', outcome: 'run', at: '1' })
+  memory.add('b', { stage: 'decision', outcome: 'run', at: '2' })
+  memory.add('a', { stage: 'step', decision: 'tool read', attempts: 1, at: '3' })
+  memory.add('c', { stage: 'decision', outcome: 'final', at: '4' })
+  assert.equal(memory.get('b'), undefined)
+  assert.equal(memory.get('a')!.length, 2)
+  const dir = mkdtempSync(join(tmpdir(), 'rwkv-traces-'))
+  writeFileSync(join(dir, 'c.jsonl'), `${JSON.stringify({ stage: 'decision', at: '0' })}\n${JSON.stringify({ stage: 'step', at: '0' })}\n`)
+  assert.equal(sessionRecords(dir, 'c', memory).length, 2)
+  assert.equal(sessionRecords(dir, 'a', memory).length, 2)
+  const listed = allSessions(dir, memory)
+  assert.deepEqual(listed.map(item => [item.session, item.persisted]).sort(), [['a', false], ['c', true]])
 })

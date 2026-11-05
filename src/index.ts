@@ -108,7 +108,7 @@ export const Config = z.object({
   guards: z.boolean().default(DEFAULT_HARNESS.guards)
     .description('Harness interventions: format re-asks, duplicate / failure gates, over-budget think close, answer-stage re-asks and fallbacks. Off: the model\'s output stands.').volatile(),
   recordTraces: z.boolean().default(false)
-    .description('Write every generation (prompt bytes + raw output, outcome, repairs) as JSONL, one file per session.').volatile(),
+    .description('Also write traces (prompt bytes + raw output, outcome, repairs) to traceDir as JSONL, one file per session. They are always kept in memory for the RWKV tab.').volatile(),
   traceDir: z.string().default('').description('Trace directory; empty = $DSH_HOME/rwkv-traces (~/.dsh/rwkv-traces).').volatile(),
 })
 

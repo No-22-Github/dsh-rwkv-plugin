@@ -37,6 +37,7 @@ export interface SessionSummary {
   readonly session: string
   readonly modified: string
   readonly bytes: number
+  readonly persisted: boolean
   readonly task: string
   readonly models: readonly string[]
   readonly generations: number

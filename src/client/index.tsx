@@ -54,30 +54,13 @@ export function apply(ctx: Context): void {
     label: () => 'RWKV',
     inject: () => ({ form, explain }),
   }, RwkvSettings))), 'rwkv-llm: settings section')
-  // The RWKV tab beside Chat / Trajectory exists while trace recording is on.
-  ctx.effect(() => services.configForms.whileServed([NAMESPACE], () => {
-    let dispose: (() => void) | undefined
-    const sync = () => {
-      const value = form.getSnapshot().value as { recordTraces?: unknown } | undefined
-      const on = value?.recordTraces === true
-      if (on && dispose === undefined) {
-        dispose = services.slots.inject('conversation.view', () => services.slots.register({
-          name: 'conversation.view',
-          id: 'rwkv-trace',
-          order: 45,
-          label: () => 'RWKV',
-          inject: (sessionId: string) => ({ session: String(sessionId) }),
-        }, RwkvTraceView))
-      } else if (!on && dispose !== undefined) {
-        dispose()
-        dispose = undefined
-      }
-    }
-    sync()
-    const unsubscribe = form.subscribe(sync)
-    return () => {
-      unsubscribe()
-      dispose?.()
-    }
-  }), 'rwkv-llm: trace view')
+  // The RWKV tab beside Chat / Trajectory: the Host keeps traces in memory
+  // whether or not they are written to disk, so it is always there.
+  ctx.effect(() => services.configForms.whileServed([NAMESPACE], () => services.slots.inject('conversation.view', () => services.slots.register({
+    name: 'conversation.view',
+    id: 'rwkv-trace',
+    order: 45,
+    label: () => 'RWKV',
+    inject: (sessionId: string) => ({ session: String(sessionId) }),
+  }, RwkvTraceView))), 'rwkv-llm: trace view')
 }
