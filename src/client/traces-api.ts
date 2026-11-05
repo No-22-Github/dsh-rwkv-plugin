@@ -21,6 +21,17 @@ export interface TraceRecord {
   readonly generations?: number
   readonly outputRepairs?: boolean
   readonly guards?: boolean
+  /** Step records: the arguments DSH received (long strings cut) and how they differ from the model's. */
+  readonly args?: Record<string, unknown>
+  readonly changes?: readonly ArgumentChange[]
+}
+
+export interface ArgumentChange {
+  readonly key: string
+  readonly kind: 'changed' | 'added' | 'removed' | 'renamed'
+  readonly from?: string
+  readonly before?: unknown
+  readonly after?: unknown
 }
 
 export interface ModelStats {

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { handleTraceRoute } from '../src/routes.ts'
-import { allSessions, exportTask, joinGeneration, listSessions, MemoryTraces, sessionRecords, traceStats, transcriptWithThinks, type TraceRecord } from '../src/traces.ts'
+import { allSessions, argumentChanges, clipArguments, exportTask, joinGeneration, listSessions, MemoryTraces, sessionRecords, traceStats, transcriptWithThinks, type TraceRecord } from '../src/traces.ts'
 
 const SYSTEM = 'System: rules\n\nUser: 读 a.txt\n\nAssistant: <think'
 // Request 1: a repaired call. Request 2: one re-ask, then the answer.
@@ -86,4 +86,18 @@ test('memory traces: kept per session, oldest sessions dropped past the limit; d
   assert.equal(sessionRecords(dir, 'a', memory).length, 2)
   const listed = allSessions(dir, memory)
   assert.deepEqual(listed.map(item => [item.session, item.persisted]).sort(), [['a', false], ['c', true]])
+})
+
+test('argument changes: changed, added, removed, and a removed + added pair of equal values as a rename', () => {
+  assert.deepEqual(
+    argumentChanges({ file_path: 'a', offset: 0, include: '*', old_text: 'x' }, { file_path: 'a', offset: 1, old_string: 'x', description: 'd' }),
+    [
+      { key: 'offset', kind: 'changed', before: 0, after: 1 },
+      { key: 'old_string', kind: 'renamed', from: 'old_text', after: 'x' },
+      { key: 'description', kind: 'added', after: 'd' },
+      { key: 'include', kind: 'removed', before: '*' },
+    ],
+  )
+  assert.deepEqual(argumentChanges({ a: 1 }, { a: 1 }), [])
+  assert.equal(clipArguments({ content: 'x'.repeat(10) }, 4).content, 'xxxx…（共 10 字符）')
 })

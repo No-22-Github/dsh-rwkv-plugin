@@ -18,7 +18,7 @@ import { decideStep, type GenerationTrace, type HarnessConfig } from './core/age
 import { dshSystemSections } from './core/dsh-prompt.ts'
 import { buildCatalog, type ToolMode, type ToolNames } from './core/tools.ts'
 import { historyFromMessages, systemText } from './history.ts'
-import { memoryTraces } from './traces.ts'
+import { argumentChanges, clipArguments, memoryTraces, type ArgumentChange } from './traces.ts'
 import { repairToolPaths, runtimeCwd } from './paths.ts'
 
 /** Pending appends per trace file, so records keep their order. */
@@ -305,6 +305,7 @@ export class RwkvAdapter extends LlmAdapter {
     }
     const { decision } = step
     const repairs = decision.type === 'tool' ? [...decision.repairs] : []
+    let handed: { args: Record<string, unknown>; changes: ArgumentChange[] } | undefined
     if (decision.type === 'final') {
       yield { type: 'block-start', index, blockType: 'text' }
       yield { type: 'text-delta', index, text: decision.text }
@@ -315,6 +316,15 @@ export class RwkvAdapter extends LlmAdapter {
       const pathed = harness.outputRepairs ? repairToolPaths(decision.tool.dshName, dshArgs, runtimeCwd(history)) : dshArgs
       if (pathed !== dshArgs) repairs.push('path_repaired')
       const argumentsText = JSON.stringify(pathed)
+      handed = {
+        args: clipArguments(pathed),
+        // Model's arguments vs the repaired ones (same names), then the path repair on the DSH side.
+        changes: [...argumentChanges(decision.rawArgs, decision.args), ...argumentChanges(dshArgs, pathed)].map(change => ({
+          ...change,
+          ...'before' in change ? { before: clipArguments({ value: change.before }, 200).value } : {},
+          ...'after' in change ? { after: clipArguments({ value: change.after }, 200).value } : {},
+        })),
+      }
       yield { type: 'block-start', index, blockType: 'tool-call' }
       yield { type: 'tool-call-delta', index, id, name: decision.tool.dshName, argumentsDelta: argumentsText }
       yield { type: 'block-end', index, block: { type: 'tool-call', id, name: decision.tool.dshName, arguments: argumentsText } }
@@ -324,6 +334,7 @@ export class RwkvAdapter extends LlmAdapter {
       stage: 'step',
       decision: decision.type === 'tool' ? `tool ${decision.tool.dshName}` : `final ${decision.via}`,
       repairs,
+      ...handed ? { args: handed.args, changes: handed.changes } : {},
       generations: step.generations,
       /** Generation attempts (first try + re-asks); think resumes are not attempts. */
       attempts,

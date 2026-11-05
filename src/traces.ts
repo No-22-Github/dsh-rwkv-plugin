@@ -299,3 +299,42 @@ export function exportTask(session: string, records: readonly TraceRecord[]): Re
     records,
   }
 }
+
+/** One argument difference between what the model wrote and what DSH received. */
+export interface ArgumentChange {
+  readonly key: string
+  readonly kind: 'changed' | 'added' | 'removed' | 'renamed'
+  /** For renamed: the key the model wrote. */
+  readonly from?: string
+  readonly before?: unknown
+  readonly after?: unknown
+}
+
+const sameValue = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
+
+/** Field-level differences, with a removed + added pair of equal values reported as one rename. */
+export function argumentChanges(before: Record<string, unknown>, after: Record<string, unknown>): ArgumentChange[] {
+  const changes: ArgumentChange[] = []
+  const removed = Object.keys(before).filter(key => !(key in after))
+  const added = Object.keys(after).filter(key => !(key in before))
+  for (const key of Object.keys(after)) {
+    if (key in before && !sameValue(before[key], after[key])) changes.push({ key, kind: 'changed', before: before[key], after: after[key] })
+  }
+  for (const key of added) {
+    const source = removed.find(old => sameValue(before[old], after[key]))
+    if (source !== undefined) {
+      removed.splice(removed.indexOf(source), 1)
+      changes.push({ key, kind: 'renamed', from: source, after: after[key] })
+    } else {
+      changes.push({ key, kind: 'added', after: after[key] })
+    }
+  }
+  for (const key of removed) changes.push({ key, kind: 'removed', before: before[key] })
+  return changes
+}
+
+/** Arguments for a trace record: long strings (file content) cut so memory and files stay small. */
+export function clipArguments(args: Record<string, unknown>, limit = 2000): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(args).map(([key, value]) =>
+    [key, typeof value === 'string' && value.length > limit ? `${value.slice(0, limit)}…（共 ${value.length} 字符）` : value]))
+}

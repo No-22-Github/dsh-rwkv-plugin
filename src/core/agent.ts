@@ -98,7 +98,14 @@ export const DEFAULT_HARNESS: HarnessConfig = {
 export type FinalVia = 'model' | 'exit' | 'answer-stage' | 'salvage' | 'summary' | 'raw'
 
 export type Decision =
-  | { readonly type: 'tool'; readonly tool: WireTool; readonly args: Args; readonly repairs: readonly string[] }
+  | {
+    readonly type: 'tool'
+    readonly tool: WireTool
+    readonly args: Args
+    /** The arguments as the model wrote them, before any repair. */
+    readonly rawArgs: Args
+    readonly repairs: readonly string[]
+  }
   | { readonly type: 'final'; readonly text: string; readonly via: FinalVia }
 
 export interface GenerationTrace {
@@ -314,7 +321,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
         const gated = gateToolCall(action, state, tools, config, true)
         if (gated.type === 'run') {
           traced('answer', prompt, output, result, action, 'run', gated.repairs)
-          return done({ type: 'tool', tool: gated.tool, args: gated.args, repairs: [...action.repairs, ...gated.repairs, 'answer_stage_tool'] })
+          return done({ type: 'tool', tool: gated.tool, args: gated.args, rawArgs: action.args, repairs: [...action.repairs, ...gated.repairs, 'answer_stage_tool'] })
         }
       }
       if (action.type === 'final' && !action.text.toLowerCase().includes('<tool_call')) {
@@ -370,7 +377,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
         const gated = gateToolCall(action, state, tools, config, duplicateRetryUsed)
         if (gated.type === 'run') {
           note('run', gated.repairs)
-          return done({ type: 'tool', tool: gated.tool, args: gated.args, repairs: [...action.repairs, ...gated.repairs] })
+          return done({ type: 'tool', tool: gated.tool, args: gated.args, rawArgs: action.args, repairs: [...action.repairs, ...gated.repairs] })
         }
         note(gated.type === 'rejected' ? `rejected ${gated.reason}` : gated.type)
         if (gated.type === 'closeout') return answerStage([...base, ...extra], [gated.reminder])

@@ -5,7 +5,58 @@
 // conversation tab and the developer section of the settings page.
 
 import { useEffect, useState } from 'react'
-import { fetchRecord, isGeneration, OUTCOME_LABEL, REPAIR_LABEL, touched, type TraceRecord } from './traces-api.ts'
+import { fetchRecord, isGeneration, OUTCOME_LABEL, REPAIR_LABEL, touched, type ArgumentChange, type TraceRecord } from './traces-api.ts'
+
+const SHORT_VALUE = 16
+const MAX_CHANGES = 3
+
+function valueText(value: unknown): string {
+  return typeof value === 'string' ? JSON.stringify(value) : JSON.stringify(value) ?? String(value)
+}
+
+/** One change in a few characters: offset 0→1, −include, +description, old_text→old_string, file_path 已改. */
+function changeText(change: ArgumentChange): string {
+  switch (change.kind) {
+    case 'removed': return `−${change.key}`
+    case 'added': return `+${change.key}`
+    case 'renamed': return `${change.from}→${change.key}`
+    case 'changed': {
+      const before = valueText(change.before)
+      const after = valueText(change.after)
+      return before.length + after.length > SHORT_VALUE * 2 ? `${change.key} 已改` : `${change.key} ${before}→${after}`
+    }
+  }
+}
+
+function changeTitle(change: ArgumentChange): string {
+  switch (change.kind) {
+    case 'removed': return `删掉 ${change.key}=${valueText(change.before)}`
+    case 'added': return `补上 ${change.key}=${valueText(change.after)}`
+    case 'renamed': return `参数名 ${change.from} 改成 ${change.key}`
+    case 'changed': return `${change.key}：${valueText(change.before)} → ${valueText(change.after)}`
+  }
+}
+
+/** The DSH request line: what DSH got, and only the fields the plugin changed. */
+function HandedLine(props: { record: TraceRecord }) {
+  const { record } = props
+  const changes = record.changes ?? []
+  const decision = (record.decision ?? '').replace(/^tool /, '')
+  return (
+    <span className="rl-step">
+      → 交给 DSH <code>{decision}</code>
+      {changes.slice(0, MAX_CHANGES).map((change, index) => (
+        <span key={index} className="rl-change" title={changeTitle(change)}>{changeText(change)}</span>
+      ))}
+      {record.changes === undefined ? (record.repairs ?? []).map(repair => (
+        // Records written before the changes field: name the repairs instead.
+        <span key={repair} className="rl-change" title={repair}>{REPAIR_LABEL[repair] ?? repair}</span>
+      )) : null}
+      {changes.length > MAX_CHANGES ? <span className="rl-change" title={changes.slice(MAX_CHANGES).map(changeTitle).join('\n')}>+{changes.length - MAX_CHANGES}</span> : null}
+      {record.attempts && record.attempts > 1 ? <span className="rl-step-note">生成 {record.attempts} 次</span> : null}
+    </span>
+  )
+}
 
 /** Short tag per outcome, like the native role tags. */
 const OUTCOME_TAG: Record<string, string> = {
@@ -141,6 +192,11 @@ function Inspector(props: { session: string; row: Row; step: TraceRecord | undef
               <KeyValue label="解析为"><code>{record.action ?? '—'}</code></KeyValue>
               <KeyValue label="停止原因">{record.finish === 'length' ? '写满 token 上限' : record.finish ?? '—'}{record.stop ? `（${record.stop}）` : ''}</KeyValue>
               {step ? <KeyValue label="交给 DSH"><code>{step.decision}</code>{step.attempts && step.attempts > 1 ? ` · 这次请求生成了 ${step.attempts} 次` : ''}</KeyValue> : null}
+              {step?.changes && step.changes.length > 0 ? (
+                <KeyValue label="插件改的参数">
+                  <span className="rl-change-list">{step.changes.map((change, index) => <span key={index}>{changeTitle(change)}</span>)}</span>
+                </KeyValue>
+              ) : null}
               {step && (step.outputRepairs === false || step.guards === false) ? (
                 <KeyValue label="开关">{step.outputRepairs === false ? '修正模型输出：关 ' : ''}{step.guards === false ? '插件干预：关' : ''}</KeyValue>
               ) : null}
@@ -154,8 +210,14 @@ function Inspector(props: { session: string; row: Row; step: TraceRecord | undef
                 <div className="rl-prose">{think}</div>
               </>
             ) : null}
-            <div className="rl-section-title">动作</div>
+            <div className="rl-section-title">模型写的动作</div>
             <pre className="rl-pre">{afterThink(record.output ?? '') || '（无）'}</pre>
+            {step?.args && (record.outcome === 'run') ? (
+              <>
+                <div className="rl-section-title">DSH 收到的参数</div>
+                <pre className="rl-pre">{JSON.stringify(step.args, null, 2)}</pre>
+              </>
+            ) : null}
           </>
         ) : tab === 'output' ? (
           <pre className="rl-pre rl-pre-full">{record.output ?? ''}</pre>
@@ -199,17 +261,10 @@ export function TraceFrames(props: { session: string; records: readonly TraceRec
         <tbody>
           {visible.map(row => {
             if (row.record.stage === 'step') {
-              const repairs = row.record.repairs ?? []
               return (
                 <tr key={row.index} className="rl-step-row">
                   <td className="rl-event"><span className="rl-rail" /></td>
-                  <td className="rl-content">
-                    <span className="rl-step">
-                      → 交给 DSH <code>{row.record.decision}</code>
-                      {row.record.attempts && row.record.attempts > 1 ? ` · 生成 ${row.record.attempts} 次` : ''}
-                      {repairs.length > 0 ? ` · 修复 ${repairs.map(repair => REPAIR_LABEL[repair] ?? repair).join('、')}` : ''}
-                    </span>
-                  </td>
+                  <td className="rl-content"><HandedLine record={row.record} /></td>
                 </tr>
               )
             }
