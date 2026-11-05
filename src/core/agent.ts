@@ -33,7 +33,7 @@ import {
   type TurnState,
 } from './policy.ts'
 import { reconstructOutput, recordToolCall, renderPrompt, systemPrompt, toolResponse, type Entry, type ThinkingMode } from './prompt.ts'
-import { coerceArguments, normalizeArguments, resolveTool, type Args, type WireTool } from './tools.ts'
+import { coerceArguments, normalizeArguments, repairNativeValues, resolveTool, type Args, type WireTool } from './tools.ts'
 
 export const DECISION_STOPS = ['</tool_call>', '\nUser:', '\nSystem:', '\nTool:'] as const
 
@@ -379,7 +379,9 @@ function gateToolCall(
     ...resolved.aliased ? ['tool_name_alias'] : [],
     ...normalized !== action.args ? ['argument_alias'] : [],
   ]
-  const args = coerceArguments(normalized, tool.schema)
+  const repaired = repairNativeValues(tool, coerceArguments(normalized, tool.schema))
+  const args = repaired.args
+  repairs.push(...repaired.repairs)
   const key = callKey(tool.name, args)
   if (state.successKeys.has(key)) {
     // harness v26: the first repeat of a successful call gets one more decision.

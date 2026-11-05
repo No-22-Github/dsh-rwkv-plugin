@@ -262,6 +262,49 @@ function normalizeNativeArguments(tool: WireTool, args: Args): Args {
 }
 
 /**
+ * DSH-named tools, after scalar coercion: value shapes 7B writes from other
+ * harnesses' habits that DSH would reject. Keys outside the DSH schema
+ * (Claude Code's grep output_mode, ...) are dropped; glob without a pattern
+ * (list_files{path}) lists everything; read offset 0 (0-based habit) is line 1;
+ * a pattern array becomes one pattern. The same object when nothing applied.
+ */
+export function repairNativeValues(tool: WireTool, args: Args): { args: Args; repairs: string[] } {
+  if (tool.native !== true || tool.schema === undefined) return { args, repairs: [] }
+  const properties = (tool.schema.properties ?? {}) as Record<string, unknown>
+  const repairs: string[] = []
+  let out: Args | undefined
+  const edit = () => (out ??= { ...args })
+  const unknown = Object.keys(args).filter(key => !(key in properties))
+  if (unknown.length > 0) {
+    for (const key of unknown) delete edit()[key]
+    repairs.push('unknown_arguments_dropped')
+  }
+  const current = () => out ?? args
+  if ((tool.dshName === 'grep' || tool.dshName === 'glob') && Array.isArray(current().pattern)) {
+    const parts = (current().pattern as unknown[]).filter((part): part is string => typeof part === 'string' && part !== '')
+    if (parts.length > 0) {
+      edit().pattern = tool.dshName === 'grep' ? parts.join('|') : parts[0]
+      repairs.push('pattern_array')
+    }
+  }
+  if (tool.dshName === 'glob' && str(current().pattern) === undefined) {
+    edit().pattern = '*'
+    repairs.push('glob_default_pattern')
+  }
+  if (tool.dshName === 'read') {
+    for (const key of ['offset', 'limit']) {
+      const value = current()[key]
+      if (typeof value === 'number' && value < 1) {
+        if (key === 'offset') edit().offset = 1
+        else delete edit().limit
+        repairs.push(`${key}_below_one`)
+      }
+    }
+  }
+  return { args: out ?? args, repairs }
+}
+
+/**
  * Renames alias keys to the tool's own keys when the own key is absent
  * (edit_file with Claude's old_string/new_string, read_file with file_path,
  * ...). read_file's DSH-style offset/limit become start_line/end_line.

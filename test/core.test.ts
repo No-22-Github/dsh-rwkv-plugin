@@ -7,10 +7,10 @@ import { decideStep, DEFAULT_HARNESS, type HarnessConfig } from '../src/core/age
 import { parseAction } from '../src/core/parse.ts'
 import { dshSystemSections } from '../src/core/dsh-prompt.ts'
 import { analyzeTurn, toolFailureReminder, transcriptEntries, POST_TOOL_REMINDER_THINK, type HistoryItem } from '../src/core/policy.ts'
-import { renderPrompt, systemPrompt } from '../src/core/prompt.ts'
+import { promptJSON, recordToolCall, renderPrompt, systemPrompt, toolResponse } from '../src/core/prompt.ts'
 import { historyFromMessages } from '../src/history.ts'
 import { runtimeCwd } from '../src/paths.ts'
-import { buildCatalog, coerceArguments, normalizeArguments, resolveTool, type DshToolSchema, type WireTool } from '../src/core/tools.ts'
+import { buildCatalog, coerceArguments, normalizeArguments, repairNativeValues, resolveTool, type DshToolSchema, type WireTool } from '../src/core/tools.ts'
 
 const identity = (args: Record<string, unknown>) => args
 
@@ -41,7 +41,9 @@ test('renders the bytes of a real Go harness prompt (agent-wire-think-v1.0)', ()
   ], { thinking: 'full' })
   // The plugin's bash sentence drops the sandbox wording (DSH bash is not the RWKV-Agent sandbox).
   const guidance = (text: string) => text.split('\n').filter(line => !line.startsWith('bash runs in ')).join('\n')
-  assert.equal(guidance(prompt), guidance(golden))
+  // Go escapes < > & in JSON; the plugin writes them raw (G1 copies the escapes into its arguments).
+  const unescaped = golden.replace(/\\u003c/g, '<').replace(/\\u003e/g, '>').replace(/\\u0026/g, '&')
+  assert.equal(guidance(prompt), guidance(unescaped))
 })
 
 test('parser repairs: preamble, OpenAI wrapper, extra braces, stringified args, unclosed think', () => {
@@ -312,4 +314,32 @@ test('runtime context keeps only the working directory and sandbox policy, as a 
   ])
   assert.equal(analyzeTurn(history).task, '帮我写一个 HTML 简历模板')
   assert.equal(runtimeCwd(history), '/Users/me/ws')
+})
+
+test('history JSON keeps < > & raw: no \\u003c for the model to copy into HTML arguments', () => {
+  const html = '<p class="a">x & y</p>'
+  assert.equal(recordToolCall('write', { file_path: 'a.html', content: html }), `<tool_call>{"name":"write","arguments":{"file_path":"a.html","content":${JSON.stringify(html)}}}</tool_call>`)
+  assert.ok(!toolResponse('read', true, `1: ${html}`).includes('\\u003c'))
+  assert.equal(promptJSON('a\u2028b'), '"a\\u2028b"')
+})
+
+test('DSH-named tools: value shapes 7B writes from other harnesses are repaired after coercion', () => {
+  const byName = (name: string) => dshTools.find(tool => tool.name === name)!
+  const grep = byName('grep')
+  // <tool_calls> + OpenAI wrapper + Claude Code's output_mode, from a 7B rollout.
+  assert.deepEqual(repairNativeValues(grep, { pattern: 'parse_duration', path: 'src', output_mode: 'content' }),
+    { args: { pattern: 'parse_duration', path: 'src' }, repairs: ['unknown_arguments_dropped'] })
+  assert.deepEqual(repairNativeValues(grep, { pattern: ['get_val', 'get_value'] }).args, { pattern: 'get_val|get_value' })
+  // list_files{path} habit: glob has no pattern.
+  assert.deepEqual(repairNativeValues(byName('glob'), { path: 'src/' }),
+    { args: { path: 'src/', pattern: '*' }, repairs: ['glob_default_pattern'] })
+  const read = byName('read')
+  assert.deepEqual(repairNativeValues(read, coerceArguments({ file_path: 'a.py', offset: '0', limit: '20' }, read.schema)).args,
+    { file_path: 'a.py', offset: 1, limit: 20 })
+  const plain = { file_path: 'a.py', offset: 3 }
+  assert.equal(repairNativeValues(read, plain).args, plain)
+  // Trained-name tools keep their own path.
+  const trained = buildCatalog(dshSchemas, { mode: 'mapped' }).find(tool => tool.name === 'list_files')!
+  const args = { path: 'src' }
+  assert.equal(repairNativeValues(trained, args).args, args)
 })
