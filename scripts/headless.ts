@@ -1,6 +1,6 @@
 // One-shot headless run: RWKV as the root DSH agent, configured from flags
-// instead of a hand-edited ~/.dsh profile. Used by eval runners (workspace
-// runner, Harbor backend); stdout is DSH's `--json` event stream.
+// instead of a hand-edited ~/.dsh profile. The entry eval harnesses call (the
+// rwkv-agent-eval Harbor backend); stdout is DSH's `--json` event stream.
 //
 //   node scripts/headless.ts --backend irwkv --base-url http://host:8000 \
 //     --model rwkv7-g1l-7.2b [--home DIR] [--max-steps 12] [--thinking full|off] \
