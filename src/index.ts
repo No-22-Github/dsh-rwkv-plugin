@@ -8,7 +8,8 @@ import z from '@deepseek-ai/schemastery'
 import { RwkvAdapter, type AdapterSettings, type ModelConfig } from './adapter.ts'
 import { DEFAULT_HARNESS } from './core/agent.ts'
 import type { ToolMode, ToolNames } from './core/tools.ts'
-import { handleAdapterRoute } from './routes.ts'
+import { handleAdapterRoute, handleTraceRoute } from './routes.ts'
+import { defaultTraceDir } from './traces.ts'
 
 export const name = 'rwkv-llm'
 export const inject = ['llm']
@@ -40,6 +41,7 @@ export interface Settings {
   loopGuard: boolean
   outputRepairs: boolean
   guards: boolean
+  recordTraces: boolean
   traceDir: string
 }
 
@@ -105,8 +107,14 @@ export const Config = z.object({
     .description('Fix near-miss output: parser repairs, tool name / argument aliases, scalar coercion, DSH value repairs, path repair. Off: exact protocol form only, arguments reach DSH as written.').volatile(),
   guards: z.boolean().default(DEFAULT_HARNESS.guards)
     .description('Harness interventions: format re-asks, duplicate / failure gates, over-budget think close, answer-stage re-asks and fallbacks. Off: the model\'s output stands.').volatile(),
-  traceDir: z.string().default('').description('Write every generation (prompt bytes + raw output) as JSONL here.').volatile(),
+  recordTraces: z.boolean().default(false)
+    .description('Write every generation (prompt bytes + raw output, outcome, repairs) as JSONL, one file per session.').volatile(),
+  traceDir: z.string().default('').description('Trace directory; empty = $DSH_HOME/rwkv-traces (~/.dsh/rwkv-traces).').volatile(),
 })
+
+function traceDirOf(config: Config): string {
+  return config.traceDir.get().trim() || defaultTraceDir()
+}
 
 function settingsOf(config: Config): AdapterSettings {
   return {
@@ -130,7 +138,7 @@ function settingsOf(config: Config): AdapterSettings {
     excludeTools: config.excludeTools.get(),
     includeDeveloper: config.includeDeveloper.get(),
     loopGuard: config.loopGuard.get(),
-    ...config.traceDir.get() ? { traceDir: config.traceDir.get() } : {},
+    ...config.recordTraces.get() ? { traceDir: traceDirOf(config) } : {},
     log: message => console.log(`[rwkv-llm] ${message}`),
   }
 }
@@ -157,6 +165,7 @@ export function apply(ctx: Context, config: Config): void {
     listener: (request: IncomingMessage, response: ServerResponse, next: () => Promise<void>) => Promise<void>,
   ) => () => void
   on.call(ctx, 'connection/request', async (request, response, next) => {
+    if (handleTraceRoute(request, response, () => ({ dir: traceDirOf(config), recording: config.recordTraces.get() }))) return
     if (!await handleAdapterRoute(request, response)) await next()
   })
 }

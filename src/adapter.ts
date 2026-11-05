@@ -20,6 +20,9 @@ import { buildCatalog, type ToolMode, type ToolNames } from './core/tools.ts'
 import { historyFromMessages, systemText } from './history.ts'
 import { repairToolPaths, runtimeCwd } from './paths.ts'
 
+/** Pending appends per trace file, so records keep their order. */
+const traceWrites = new Map<string, Promise<void>>()
+
 /** Route model id that resolves to the first configured model. */
 export const DEFAULT_MODEL_ID = 'default'
 
@@ -231,10 +234,15 @@ export class RwkvAdapter extends LlmAdapter {
     }
     const sessionId = options.sessionId === undefined ? undefined : String(options.sessionId)
     const traceFile = this.settings.traceDir ? join(this.settings.traceDir, `${sessionId ?? 'no-session'}.jsonl`) : undefined
+    const traceDir = this.settings.traceDir
     const writeLine = (record: Record<string, unknown>) => {
-      if (traceFile === undefined) return
+      if (traceFile === undefined || traceDir === undefined) return
       const line = `${JSON.stringify({ at: new Date().toISOString(), model: config.id, purpose: options.purpose, ...record })}\n`
-      void mkdir(this.settings.traceDir!, { recursive: true }).then(() => appendFile(traceFile, line)).catch(() => {})
+      // One append chain per file: a request summary must land after the generations it summarizes.
+      const previous = traceWrites.get(traceFile) ?? Promise.resolve()
+      const next = previous.then(() => mkdir(traceDir, { recursive: true })).then(() => appendFile(traceFile, line)).catch(() => {})
+      traceWrites.set(traceFile, next)
+      void next.then(() => { if (traceWrites.get(traceFile) === next) traceWrites.delete(traceFile) })
     }
     const writeTrace = (trace: GenerationTrace) => writeLine({ ...trace })
 

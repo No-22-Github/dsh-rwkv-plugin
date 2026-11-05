@@ -5,6 +5,7 @@
 
 import { useState, useSyncExternalStore, type ReactNode } from 'react'
 import { AdapterPicker } from './AdapterPicker.tsx'
+import { DEVELOPER_DEFAULTS, DeveloperCard, type DeveloperSettings } from './DeveloperPanel.tsx'
 
 interface ConfigFormSnapshot {
   status: 'loading' | 'ready' | 'unavailable'
@@ -59,12 +60,9 @@ interface RunSettings {
   excludeTools: string[]
   includeDeveloper: boolean
   loopGuard: boolean
-  outputRepairs: boolean
-  guards: boolean
-  traceDir: string
 }
 
-type RwkvConfig = RunSettings & { models: ModelDraft[] }
+type RwkvConfig = RunSettings & DeveloperSettings & { models: ModelDraft[] }
 
 const AGENT_FAST: Sampling = { temperature: 0.3, topK: 65536, topP: 0.5, presencePenalty: 0.5, frequencyPenalty: 0.1, penaltyDecay: 0.996 }
 
@@ -83,15 +81,12 @@ const RUN_DEFAULTS: RunSettings = {
   excludeTools: [],
   includeDeveloper: false,
   loopGuard: true,
-  outputRepairs: true,
-  guards: true,
-  traceDir: '',
 }
 
 const RUN_FIELDS = Object.keys(RUN_DEFAULTS) as (keyof RunSettings)[]
 
 function normalize(value: unknown): RwkvConfig {
-  const config = { ...RUN_DEFAULTS, models: [], ...(typeof value === 'object' && value !== null ? value as Partial<RwkvConfig> : {}) }
+  const config = { ...RUN_DEFAULTS, ...DEVELOPER_DEFAULTS, models: [], ...(typeof value === 'object' && value !== null ? value as Partial<RwkvConfig> : {}) }
   return { ...config, sampling: { ...AGENT_FAST, ...config.sampling }, models: (config.models ?? []).map(model => ({ ...model })) }
 }
 
@@ -124,7 +119,7 @@ function isHttpUrl(value: string): boolean {
 
 // ── field primitives ──────────────────────────────────────────────────────
 
-function Field(props: { label: string; hint?: ReactNode; wide?: boolean; children: ReactNode }) {
+export function Field(props: { label: string; hint?: ReactNode; wide?: boolean; children: ReactNode }) {
   return (
     <label className={props.wide ? 'rwkv-field rwkv-wide' : 'rwkv-field'}>
       <span className="rwkv-label">{props.label}</span>
@@ -134,7 +129,7 @@ function Field(props: { label: string; hint?: ReactNode; wide?: boolean; childre
   )
 }
 
-function TextInput(props: { value: string | undefined; onChange: (value: string) => void; placeholder?: string; type?: string; disabled?: boolean }) {
+export function TextInput(props: { value: string | undefined; onChange: (value: string) => void; placeholder?: string; type?: string; disabled?: boolean }) {
   return (
     <input
       className="rwkv-input" type={props.type ?? 'text'} value={props.value ?? ''} placeholder={props.placeholder}
@@ -179,7 +174,7 @@ function Segment<T extends string>(props: { value: T; options: readonly (readonl
   )
 }
 
-function Check(props: { checked: boolean; onChange: (value: boolean) => void; label: string; disabled?: boolean }) {
+export function Check(props: { checked: boolean; onChange: (value: boolean) => void; label: string; disabled?: boolean }) {
   return (
     <label className="rwkv-check">
       <input type="checkbox" checked={props.checked} disabled={props.disabled} onChange={event => props.onChange(event.target.checked)} />
@@ -425,8 +420,6 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
       <div className="rwkv-checks">
         <Check label="历史空思考块（不回传思维链）" checked={draft.historyEmptyThink} disabled={disabled} onChange={value => update({ historyEmptyThink: value })} />
         <Check label="复读检测截断（loop-guard）" checked={draft.loopGuard} disabled={disabled} onChange={value => update({ loopGuard: value })} />
-        <Check label="修正模型输出（格式、工具名、参数、路径）" checked={draft.outputRepairs} disabled={disabled} onChange={value => update({ outputRepairs: value })} />
-        <Check label="插件干预（重问、重复拦截、强制收尾）" checked={draft.guards} disabled={disabled} onChange={value => update({ guards: value })} />
       </div>
 
       <div className="rwkv-block">
@@ -472,9 +465,6 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
         <div className="rwkv-details-body">
           <Field label="任务契约">
             <textarea className="rwkv-input rwkv-prose" value={draft.taskContract} disabled={disabled} onChange={event => update({ taskContract: event.target.value })} />
-          </Field>
-          <Field label="轨迹目录">
-            <TextInput value={draft.traceDir} disabled={disabled} placeholder="/path/to/traces" onChange={value => update({ traceDir: value })} />
           </Field>
         </div>
       </details>
@@ -581,6 +571,8 @@ export function RwkvSettings(props: { form: ConfigFormLike; explain?: (field: st
         </div>
         {editing === 'run' ? <RunEditor initial={config} disabled={disabled} onCancel={() => setEditing(undefined)} onSave={saveRun} /> : null}
       </div>
+
+      <DeveloperCard settings={config} disabled={disabled} write={write} />
     </div>
   )
 }

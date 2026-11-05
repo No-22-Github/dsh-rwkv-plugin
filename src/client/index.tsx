@@ -6,6 +6,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { RwkvSettings, type ConfigFormLike } from './RwkvSettings.tsx'
+import { RwkvTraceView } from './TraceView.tsx'
 import { mountStyles } from './styles.ts'
 
 /** Profile row id of the provider plugin, i.e. the settings namespace it is served under. */
@@ -53,4 +54,30 @@ export function apply(ctx: Context): void {
     label: () => 'RWKV',
     inject: () => ({ form, explain }),
   }, RwkvSettings))), 'rwkv-llm: settings section')
+  // The RWKV tab beside Chat / Trajectory exists while trace recording is on.
+  ctx.effect(() => services.configForms.whileServed([NAMESPACE], () => {
+    let dispose: (() => void) | undefined
+    const sync = () => {
+      const value = form.getSnapshot().value as { recordTraces?: unknown } | undefined
+      const on = value?.recordTraces === true
+      if (on && dispose === undefined) {
+        dispose = services.slots.inject('conversation.view', () => services.slots.register({
+          name: 'conversation.view',
+          id: 'rwkv-trace',
+          order: 45,
+          label: () => 'RWKV',
+          inject: (sessionId: string) => ({ session: String(sessionId) }),
+        }, RwkvTraceView))
+      } else if (!on && dispose !== undefined) {
+        dispose()
+        dispose = undefined
+      }
+    }
+    sync()
+    const unsubscribe = form.subscribe(sync)
+    return () => {
+      unsubscribe()
+      dispose?.()
+    }
+  }), 'rwkv-llm: trace view')
 }

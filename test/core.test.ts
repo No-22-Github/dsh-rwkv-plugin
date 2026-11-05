@@ -389,3 +389,9 @@ test('guards off: no duplicate gate, no re-ask; unparseable output becomes the a
   assert.equal(guarded.prompts.length, 2)
   assert.deepEqual(fixed.decision, { type: 'final', text: 'BUDGET-READY', via: 'model' })
 })
+
+test('a filled bash description is its own repair, not an argument alias', async () => {
+  const generator = new ScriptedGenerator(['>x</think><tool_call>{"name":"bash","arguments":{"command":"ls -la"}}'])
+  const step = await decideStep({ history: [{ kind: 'user', text: 'ls' }], tools: dshTools, config: harness, generator })
+  assert.deepEqual(step.decision.type === 'tool' && step.decision.repairs, ['bash_description_filled'])
+})

@@ -80,6 +80,50 @@ button.rwkv-option{cursor:pointer;padding-right:10px}
 .rwkv-upload{display:flex;flex-direction:column;gap:6px;padding-top:4px}
 .rwkv-upload-row{display:flex;align-items:center;gap:8px}
 @container (max-width:560px){.rwkv-grid,.rwkv-grid3{grid-template-columns:minmax(0,1fr)}}
+.rwkv-developer>summary{list-style:none;cursor:pointer}
+.rwkv-developer>summary::-webkit-details-marker{display:none}
+.rwkv-developer-body{display:flex;flex-direction:column;gap:12px;padding-top:4px}
+.rwkv-toggle{align-items:flex-start}
+.rwkv-toggle input{margin-top:4px}
+.rwkv-toggle-hint{display:block}
+.rwkv-dir{display:flex;gap:8px;align-items:center}
+.rwkv-dir .rwkv-btn{flex:none;white-space:nowrap}
+.rwkv-session-meta{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
+.rwkv-block-head .rwkv-actions .rwkv-btn{white-space:nowrap}
+.rwkv-actions{display:inline-flex;gap:6px;align-items:center}
+.rwkv-stats{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-module-platform)}
+.rwkv-stats-head{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:baseline}
+.rwkv-stat{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
+.rwkv-stat b{font-size:16px;margin-right:4px;color:var(--dsw-alias-label-primary)}
+.rwkv-counts{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.rwkv-count{display:inline-flex;gap:4px;align-items:baseline;padding:1px 8px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm);font-size:12px;line-height:18px}
+.rwkv-sessions,.rwkv-frames{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.rwkv-session{border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-lg);padding:6px 10px}
+.rwkv-session-head{display:flex;gap:8px;align-items:center}
+.rwkv-session-title{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0;border:none;background:transparent;padding:0;text-align:left;font:inherit;color:inherit;cursor:pointer}
+.rwkv-session-task{font-size:13px;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rwkv-session-body{display:flex;flex-direction:column;gap:8px;padding:8px 0 4px}
+.rwkv-frame{border-left:3px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1)}
+.rwkv-frame-touched{border-left-color:var(--dsw-alias-state-warning-primary,#d9822b)}
+.rwkv-frame-raw{border-left-color:var(--dsw-alias-state-error-primary)}
+.rwkv-frame-clean{border-left-color:var(--dsw-alias-state-success-primary)}
+.rwkv-frame-head{display:flex;flex-wrap:wrap;gap:6px;align-items:center;width:100%;padding:5px 8px;border:none;background:transparent;font:inherit;font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary);text-align:left;cursor:pointer}
+.rwkv-frame-no{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.rwkv-frame-stage{color:var(--dsw-alias-label-secondary)}
+.rwkv-frame-meta{margin-left:auto;color:var(--dsw-alias-label-tertiary)}
+.rwkv-badge{padding:0 6px;border-radius:var(--dsw-radius-xs);font-weight:500}
+.rwkv-badge-clean{color:var(--dsw-alias-state-success-primary)}
+.rwkv-badge-touched{color:var(--dsw-alias-state-warning-primary,#d9822b)}
+.rwkv-badge-raw{color:var(--dsw-alias-state-error-primary)}
+.rwkv-badge-old{color:var(--dsw-alias-label-tertiary)}
+.rwkv-chip{padding:0 6px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-xs);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}
+.rwkv-frame-body{display:flex;flex-direction:column;gap:6px;padding:0 8px 8px}
+.rwkv-frame-label{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
+.rwkv-pre{margin:0;max-height:360px;overflow:auto;padding:8px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-module-platform);font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:12px;line-height:18px;white-space:pre-wrap;word-break:break-word}
+.rwkv-pre-prompt{max-height:480px}
+.rwkv-step{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;padding:2px 8px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
+.rwkv-view{box-sizing:border-box;height:100%;overflow:auto;padding:12px 16px;display:flex;flex-direction:column;gap:10px;color:var(--dsw-alias-label-primary)}
+.rwkv-view-bar{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center}
 `
 
 /** Mounts the stylesheet once; returns its removal for plugin unload. */

@@ -463,11 +463,16 @@ function repairArguments(tool: WireTool, raw: Args, aliased: boolean): { args: A
   const normalized = normalizeArguments(tool, raw)
   const coerced = coerceArguments(normalized, tool.schema)
   const repaired = repairNativeValues(tool, coerced)
+  // DSH bash requires a description; a missing one is filled from the command.
+  const filled = tool.dshName === 'bash' && raw.description === undefined && normalized.description !== undefined
+  const renamed = normalized !== raw && (!filled || Object.keys(normalized).length !== Object.keys(raw).length + 1
+    || Object.keys(raw).some(key => !(key in normalized)))
   return {
     args: repaired.args,
     repairs: [
       ...aliased ? ['tool_name_alias'] : [],
-      ...normalized !== raw ? ['argument_alias'] : [],
+      ...renamed ? ['argument_alias'] : [],
+      ...filled ? ['bash_description_filled'] : [],
       ...JSON.stringify(coerced) !== JSON.stringify(normalized) ? ['scalar_coerced'] : [],
       ...repaired.repairs,
     ],
