@@ -55,10 +55,6 @@ interface RunSettings {
   answerMaxTokens: number
   maxResultChars: number
   sampling: Sampling
-  taskContract: string
-  toolMode: 'mapped' | 'passthrough'
-  excludeTools: string[]
-  includeDeveloper: boolean
   loopGuard: boolean
 }
 
@@ -76,10 +72,6 @@ const RUN_DEFAULTS: RunSettings = {
   answerMaxTokens: 4096,
   maxResultChars: 12000,
   sampling: AGENT_FAST,
-  taskContract: '',
-  toolMode: 'mapped',
-  excludeTools: [],
-  includeDeveloper: false,
   loopGuard: true,
 }
 
@@ -300,14 +292,14 @@ function ModelEditor(props: {
           <div className="rwkv-grid">
             <Field label={lightning ? '密码' : 'API 密钥'}><TextInput type="password" value={draft.apiKey} disabled={disabled} placeholder="留空表示不需要" onChange={value => set('apiKey', value)} /></Field>
             <Field label="上下文窗口"><NumberInput value={draft.contextWindow} disabled={disabled} placeholder="32768" onChange={value => set('contextWindow', value)} /></Field>
-            <Field label="思考格式">
+            <Field label="思考">
               <SelectInput
                 value={draft.thinking ?? ''} disabled={disabled}
-                options={[['', '跟随运行参数'], ['full', '开思考'], ['off', '不思考']] as const}
+                options={[['', '跟随运行参数'], ['full', '开启'], ['off', '关闭']] as const}
                 onChange={value => set('thinking', value || undefined)}
               />
             </Field>
-            <Field label="历史空思考块">
+            <Field label="历史步骤不带思考">
               <SelectInput
                 value={draft.historyEmptyThink === undefined ? '' : draft.historyEmptyThink ? 'on' : 'off'} disabled={disabled}
                 options={[['', '跟随运行参数'], ['on', '开'], ['off', '关']] as const}
@@ -373,9 +365,8 @@ function ModelCard(props: {
 // ── run parameters ────────────────────────────────────────────────────────
 
 function runSummary(run: RunSettings): string {
-  const sampling = same(run.sampling, AGENT_FAST) ? 'agent-fast' : `T ${run.sampling.temperature} · top_p ${run.sampling.topP}`
-  const tools = run.toolMode === 'mapped' ? '训练过的工具' : '全部工具'
-  return `${run.thinking === 'full' ? '开思考' : '不思考'} · 每轮 ${run.maxSteps} 步 · ${sampling} · ${tools}`
+  const sampling = same(run.sampling, AGENT_FAST) ? '推荐采样' : `T ${run.sampling.temperature} · top_p ${run.sampling.topP}`
+  return `思考${run.thinking === 'full' ? '开' : '关'} · 每轮 ${run.maxSteps} 步 · ${sampling}`
 }
 
 type NumericRunField = 'maxSteps' | 'maxConsecutiveFailures' | 'protocolRetries' | 'decisionMaxTokens' | 'answerMaxTokens' | 'maxResultChars'
@@ -402,10 +393,10 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
   }
   return (
     <div className="rwkv-editor">
-      <Field label="思考格式">
+      <Field label="思考">
         <Segment
           value={draft.thinking} disabled={disabled}
-          options={[['full', '开思考（agent-wire-think）'], ['off', '不思考（agent-wire）']] as const}
+          options={[['full', '开启'], ['off', '关闭']] as const}
           onChange={value => update({ thinking: value })}
         />
       </Field>
@@ -418,8 +409,8 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
         <Field label="工具结果最多字符">{num('maxResultChars')}</Field>
       </div>
       <div className="rwkv-checks">
-        <Check label="历史空思考块（不回传思维链）" checked={draft.historyEmptyThink} disabled={disabled} onChange={value => update({ historyEmptyThink: value })} />
-        <Check label="复读检测截断（loop-guard）" checked={draft.loopGuard} disabled={disabled} onChange={value => update({ loopGuard: value })} />
+        <Check label="历史步骤不带思考" checked={draft.historyEmptyThink} disabled={disabled} onChange={value => update({ historyEmptyThink: value })} />
+        <Check label="复读时截断生成" checked={draft.loopGuard} disabled={disabled} onChange={value => update({ loopGuard: value })} />
       </div>
 
       <div className="rwkv-block">
@@ -428,7 +419,7 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
           <button
             type="button" className="rwkv-link" disabled={disabled || same(draft.sampling, AGENT_FAST)}
             onClick={() => { update({ sampling: AGENT_FAST }); setSamplingKey(key => key + 1) }}
-          >恢复 agent-fast</button>
+          >恢复推荐参数</button>
         </div>
         <div className="rwkv-grid3">
           <Field label="temperature">{sampling('temperature')}</Field>
@@ -440,34 +431,6 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
         </div>
       </div>
 
-      <div className="rwkv-block">
-        <span className="rwkv-block-title">工具</span>
-        <div className="rwkv-grid">
-          <Field label="给模型看哪些工具">
-            <SelectInput
-              value={draft.toolMode} disabled={disabled}
-              options={[['mapped', '只给训练过的工具（推荐）'], ['passthrough', '全部工具']] as const}
-              onChange={value => update({ toolMode: value || 'mapped' })}
-            />
-          </Field>
-          <Field label="隐藏的工具">
-            <TextInput
-              value={draft.excludeTools.join(', ')} disabled={disabled} placeholder="bash, web_fetch"
-              onChange={value => update({ excludeTools: value.split(',').map(item => item.trim()).filter(Boolean) })}
-            />
-          </Field>
-        </div>
-        <Check label="把 DSH 的上下文消息（developer）也给模型看" checked={draft.includeDeveloper} disabled={disabled} onChange={value => update({ includeDeveloper: value })} />
-      </div>
-
-      <details className="rwkv-details">
-        <summary className="rwkv-summary">自定义设置</summary>
-        <div className="rwkv-details-body">
-          <Field label="任务契约">
-            <textarea className="rwkv-input rwkv-prose" value={draft.taskContract} disabled={disabled} onChange={event => update({ taskContract: event.target.value })} />
-          </Field>
-        </div>
-      </details>
       <EditorActions error={failure} busy={busy} canSave={!disabled} onCancel={props.onCancel} onSave={() => { void save() }} />
     </div>
   )
@@ -522,8 +485,8 @@ export function RwkvSettings(props: { form: ConfigFormLike; explain?: (field: st
 
   return (
     <div className="rwkv-section">
-      <h2 className="rwkv-title">RWKV</h2>
-      <p className="rwkv-intro">通过续写接口接入的 RWKV-7 G1 模型。每个模型都会出现在模型选择的「rwkv」下，也可以作为子 Agent 工具 rwkv_agent 的执行模型。</p>
+      <h2 className="rwkv-title">RWKV Agent</h2>
+      <p className="rwkv-intro">通过续写接口接入的 RWKV-7 G1 模型。每个模型都会出现在模型选择的「RWKV」下，也可以作为子 Agent 工具 rwkv_agent 的执行模型。</p>
       {disabled ? <p className="rwkv-hint">本部署的设置是只读的。</p> : null}
       {writeError ? <p className="rwkv-error">{writeError}</p> : null}
 

@@ -198,7 +198,7 @@ function Inspector(props: { session: string; row: Row; step: TraceRecord | undef
                 </KeyValue>
               ) : null}
               {step && (step.outputRepairs === false || step.guards === false) ? (
-                <KeyValue label="开关">{step.outputRepairs === false ? '修正模型输出：关 ' : ''}{step.guards === false ? '插件干预：关' : ''}</KeyValue>
+                <KeyValue label="开关">{step.outputRepairs === false ? '修正模型输出：关 ' : ''}{step.guards === false ? '插件修复：关' : ''}</KeyValue>
               ) : null}
               <KeyValue label="模型">{record.model ?? '—'}</KeyValue>
               {record.purpose ? <KeyValue label="用途">{record.purpose}</KeyValue> : null}

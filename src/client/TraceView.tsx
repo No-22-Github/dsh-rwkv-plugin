@@ -60,10 +60,10 @@ export function RwkvTraceView(props: { session: string }) {
       </div>
       {error ? <p className="rl-notice rwkv-error">{error}</p> : null}
       {records !== undefined && records.length > 0 && !recording ? (
-        <p className="rl-notice">轨迹只在内存里，DSH 重启后清空。要保存到磁盘，去设置 → RWKV → 开发者勾选。</p>
+        <p className="rl-notice">轨迹只在内存里，DSH 重启后清空。要落盘，去设置 → RWKV Agent → 开发者打开「原始运行轨迹落盘」。</p>
       ) : null}
       {records === undefined ? <p className="rl-empty">加载中…</p> : records.length === 0 ? (
-        <p className="rl-empty">这个会话没有 RWKV 记录：它没用 RWKV 模型，或者是在这次启动 DSH 之前跑的（没保存到磁盘）。</p>
+        <p className="rl-empty">这个会话没有 RWKV 记录：它没用 RWKV 模型，或者轨迹没有保存到磁盘、已被删除。</p>
       ) : (
         <TraceFrames session={props.session} records={records} onlyTouched={onlyTouched} showSide={showSide} />
       )}

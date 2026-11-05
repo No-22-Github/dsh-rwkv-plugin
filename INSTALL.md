@@ -12,7 +12,7 @@
 
    也可以填完整地址 `https://github.com/No-22-Github/dsh-rwkv-plugin.git`。点**安装**，装完后选**立即启用**。
 
-2. 打开**设置 → RWKV**，点**添加模型**，填入：
+2. 打开**设置 → RWKV Agent**，点**添加模型**，填入：
    - **后端**：`rwkv_lightning CUDA` 或 `iRWKV（vLLM）`
    - **服务地址**：推理服务的地址，填到端口即可，例如 `http://host:8000`
    - **上游模型 ID**：服务端 `/v1/models` 里的 id
@@ -44,7 +44,7 @@ cd deepseek-harness && pnpm dsh plugin --profile web add github:No-22-Github/dsh
 cd deepseek-harness && pnpm dsh web
 ```
 
-之后的配置和桌面版一样，在**设置 → RWKV** 里完成。
+之后的配置和桌面版一样，在**设置 → RWKV Agent** 里完成。
 
 ## 开发插件
 

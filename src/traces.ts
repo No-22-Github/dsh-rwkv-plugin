@@ -1,15 +1,106 @@
-// Raw trace files (traceDir/<session id>.jsonl) read back for the developer
-// tools: session list, per-generation frames, crutch statistics and the
-// export of whole tasks. Pure reading; the adapter is the only writer.
+// Raw RWKV traces read back for the developer tools: session list,
+// per-generation frames, crutch statistics, export and delete. Files sit next
+// to DSH's own session logs ($DSH_HOME/sessions/<workspace>/<session>/
+// rwkv-trace.jsonl) or in a custom directory (<dir>/<session>.jsonl). The
+// adapter is the only writer.
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 
-/** $DSH_HOME/rwkv-traces (~/.dsh/rwkv-traces): used when recording is on and no directory is set. */
-export function defaultTraceDir(): string {
-  const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
-  return join(home, 'rwkv-traces')
+export function dshHome(): string {
+  return process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
+}
+
+/** File name of the RWKV trace inside a DSH session directory. */
+export const SESSION_TRACE_FILE = 'rwkv-trace.jsonl'
+
+const SESSION_ID = /^[\w.-]+$/
+const validSession = (session: string) => SESSION_ID.test(session) && !session.includes('..')
+
+/** Session id → its DSH session directory; found once by scanning the workspace directories. */
+const sessionDirs = new Map<string, string>()
+
+function findSessionDir(root: string, session: string): string | undefined {
+  const cached = sessionDirs.get(session)
+  if (cached !== undefined && existsSync(cached)) return cached
+  let workspaces: string[]
+  try {
+    workspaces = readdirSync(root)
+  } catch {
+    return undefined
+  }
+  for (const workspace of workspaces) {
+    const dir = join(root, workspace, session)
+    if (existsSync(dir)) {
+      sessionDirs.set(session, dir)
+      return dir
+    }
+  }
+  return undefined
+}
+
+/** Where trace files are: next to the DSH session logs, or in a custom directory. */
+export class TraceLocation {
+  readonly customDir: string | undefined
+  readonly sessionsRoot: string
+
+  constructor(customDir?: string, sessionsRoot = join(dshHome(), 'sessions')) {
+    this.customDir = customDir?.trim() || undefined
+    this.sessionsRoot = sessionsRoot
+  }
+
+  /** Human-readable place, for the settings page. */
+  describe(): string {
+    const place = this.customDir ?? `${this.sessionsRoot}/<工作区>/<会话>/${SESSION_TRACE_FILE}`
+    const home = homedir()
+    return place.startsWith(`${home}/`) ? `~${place.slice(home.length)}` : place
+  }
+
+  /** The session's trace file; undefined while its DSH session directory does not exist yet. */
+  path(session: string): string | undefined {
+    if (!validSession(session)) return undefined
+    if (this.customDir !== undefined) return join(this.customDir, `${session}.jsonl`)
+    const dir = findSessionDir(this.sessionsRoot, session)
+    return dir === undefined ? undefined : join(dir, SESSION_TRACE_FILE)
+  }
+
+  /** Every existing trace file. */
+  list(): { session: string; path: string }[] {
+    const found: { session: string; path: string }[] = []
+    if (this.customDir !== undefined) {
+      try {
+        for (const name of readdirSync(this.customDir)) {
+          if (SESSION_FILE.test(name)) found.push({ session: basename(name, '.jsonl'), path: join(this.customDir, name) })
+        }
+      } catch {
+        // No directory yet.
+      }
+      return found
+    }
+    let workspaces: string[] = []
+    try {
+      workspaces = readdirSync(this.sessionsRoot)
+    } catch {
+      return found
+    }
+    for (const workspace of workspaces) {
+      let sessions: string[] = []
+      try {
+        sessions = readdirSync(join(this.sessionsRoot, workspace))
+      } catch {
+        continue
+      }
+      for (const session of sessions) {
+        const path = join(this.sessionsRoot, workspace, session, SESSION_TRACE_FILE)
+        if (existsSync(path)) {
+          sessionDirs.set(session, join(this.sessionsRoot, workspace, session))
+          found.push({ session, path })
+        }
+      }
+    }
+    return found
+  }
 }
 
 /** One generation (stage decision / answer) or one DSH request summary (stage step). */
@@ -53,11 +144,6 @@ export function readTrace(path: string): TraceRecord[] {
     .map(item => item.record)
 }
 
-/** Path of one session's trace, or undefined for ids that are not plain file names. */
-export function tracePath(dir: string, session: string): string | undefined {
-  const file = `${session}.jsonl`
-  return SESSION_FILE.test(file) ? join(dir, file) : undefined
-}
 
 const isGeneration = (record: TraceRecord) => record.stage === 'decision' || record.stage === 'answer'
 const isAgent = (record: TraceRecord) => record.purpose === undefined
@@ -154,20 +240,13 @@ function summarize(session: string, records: readonly TraceRecord[], modified: s
 }
 
 /** Sessions on disk only. */
-export function listSessions(dir: string): SessionSummary[] {
-  let names: string[]
-  try {
-    names = readdirSync(dir).filter(name => SESSION_FILE.test(name))
-  } catch {
-    return []
-  }
-  const sessions: SessionSummary[] = []
-  for (const name of names) {
-    const path = join(dir, name)
-    const info = statSync(path)
-    sessions.push(summarize(basename(name, '.jsonl'), readTrace(path), info.mtime.toISOString(), info.size, true))
-  }
-  return sessions.sort((a, b) => b.modified.localeCompare(a.modified))
+export function listSessions(location: TraceLocation): SessionSummary[] {
+  return location.list()
+    .map(({ session, path }) => {
+      const info = statSync(path)
+      return summarize(session, readTrace(path), info.mtime.toISOString(), info.size, true)
+    })
+    .sort((a, b) => b.modified.localeCompare(a.modified))
 }
 
 /**
@@ -206,6 +285,13 @@ export class MemoryTraces {
     return this.sessions.get(session)?.records
   }
 
+  delete(session: string): void {
+    const entry = this.sessions.get(session)
+    if (entry === undefined) return
+    this.sessions.delete(session)
+    this.total -= entry.chars
+  }
+
   list(): SessionSummary[] {
     return [...this.sessions].map(([session, entry]) => summarize(session, entry.records, entry.modified, entry.chars, false))
   }
@@ -214,16 +300,27 @@ export class MemoryTraces {
 export const memoryTraces = new MemoryTraces()
 
 /** One session's records: from disk or memory, whichever holds more (memory starts with this process). */
-export function sessionRecords(dir: string, session: string, memory: MemoryTraces = memoryTraces): TraceRecord[] {
-  const path = tracePath(dir, session)
+export function sessionRecords(location: TraceLocation, session: string, memory: MemoryTraces = memoryTraces): TraceRecord[] {
+  const path = location.path(session)
   const disk = path !== undefined && existsSync(path) ? readTrace(path) : []
   const live = memory.get(session) ?? []
   return live.length > disk.length ? [...live] : disk
 }
 
+/** Removes a session's RWKV trace (the file and the memory copy); DSH's own session log is not touched. */
+export function deleteTrace(location: TraceLocation, session: string, memory: MemoryTraces = memoryTraces): boolean {
+  if (!validSession(session)) return false
+  const path = location.path(session)
+  const existed = path !== undefined && existsSync(path)
+  if (existed) rmSync(path)
+  const inMemory = memory.get(session) !== undefined
+  memory.delete(session)
+  return existed || inMemory
+}
+
 /** Disk and memory sessions together, newest first. */
-export function allSessions(dir: string, memory: MemoryTraces = memoryTraces): SessionSummary[] {
-  const byId = new Map(listSessions(dir).map(item => [item.session, item]))
+export function allSessions(location: TraceLocation, memory: MemoryTraces = memoryTraces): SessionSummary[] {
+  const byId = new Map(listSessions(location).map(item => [item.session, item]))
   for (const item of memory.list()) {
     const disk = byId.get(item.session)
     if (disk === undefined || item.generations + item.steps > disk.generations + disk.steps) {

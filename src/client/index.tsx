@@ -51,7 +51,7 @@ export function apply(ctx: Context): void {
     name: 'settings.section',
     id: 'rwkv',
     order: 15,
-    label: () => 'RWKV',
+    label: () => 'RWKV Agent',
     inject: () => ({ form, explain }),
   }, RwkvSettings))), 'rwkv-llm: settings section')
   // The RWKV tab beside Chat / Trajectory: the Host keeps traces in memory

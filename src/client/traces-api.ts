@@ -83,6 +83,12 @@ export function fetchRecord(session: string, index: number) {
   return getJSON<{ record: TraceRecord }>(`${TRACE_ROUTE}/${encodeURIComponent(session)}?index=${index}`)
 }
 
+/** Removes the session's RWKV trace (file and memory copy); DSH's own session log stays. */
+export async function deleteSession(session: string): Promise<void> {
+  const response = await fetch(`${TRACE_ROUTE}/${encodeURIComponent(session)}`, { method: 'DELETE', credentials: 'same-origin' })
+  if (!response.ok) throw new Error(`删除失败：HTTP ${response.status}`)
+}
+
 /** Downloads whole tasks as JSONL; every session when the list is empty. */
 export async function downloadExport(sessions: readonly string[]): Promise<void> {
   const query = sessions.length > 0 ? `?sessions=${sessions.map(encodeURIComponent).join(',')}` : ''

@@ -8,7 +8,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { BackendError } from './backend/generator.ts'
 import { LightningClient, MAX_ADAPTER_UPLOAD_BYTES } from './backend/lightning.ts'
-import { allSessions, exportTask, sessionRecords, traceStats } from './traces.ts'
+import { allSessions, deleteTrace, exportTask, sessionRecords, traceStats, type TraceLocation } from './traces.ts'
 
 export const ADAPTER_ROUTE = '/api/rwkv/adapters'
 
@@ -104,39 +104,47 @@ export const TRACE_ROUTE = '/api/rwkv/traces'
 export const TRACE_EXPORT_ROUTE = '/api/rwkv/trace-export'
 
 export interface TraceRouteSettings {
-  /** Directory the traces are read from (the configured one or the default). */
-  readonly dir: string
-  /** Whether new traces are also written to dir (they are always kept in memory). */
+  /** Where trace files are (next to DSH's session logs, or a custom directory). */
+  readonly location: TraceLocation
+  /** Whether new traces are also written to disk (they are always kept in memory). */
   readonly recording: boolean
 }
 
 /**
- * Developer tools over the trace directory, GET only:
+ * Developer tools over the traces (memory and disk):
  *   /api/rwkv/traces                       session list + statistics over all sessions
  *   /api/rwkv/traces/<session>             the session's records, prompts left out (promptChars instead)
  *   /api/rwkv/traces/<session>?index=N     one record with its prompt
+ *   DELETE /api/rwkv/traces/<session>      remove the session's RWKV trace (never DSH's own session log)
  *   /api/rwkv/trace-export?sessions=a,b    whole tasks as JSONL (all sessions when the list is empty)
  */
 export function handleTraceRoute(request: IncomingMessage, response: ServerResponse, settings: () => TraceRouteSettings): boolean {
   const url = new URL(request.url ?? '/', 'http://host')
   const isList = url.pathname === TRACE_ROUTE || url.pathname.startsWith(`${TRACE_ROUTE}/`)
   if (!isList && url.pathname !== TRACE_EXPORT_ROUTE) return false
-  if (request.method !== 'GET') {
+  const { location, recording } = settings()
+  const dir = location.describe()
+  const deleting = request.method === 'DELETE' && isList && url.pathname.length > TRACE_ROUTE.length + 1
+  if (request.method !== 'GET' && !deleting) {
     send(response, 405, { error: 'method not allowed' })
     return true
   }
-  const { dir, recording } = settings()
   try {
+    if (deleting) {
+      const session = decodeURIComponent(url.pathname.slice(TRACE_ROUTE.length + 1))
+      send(response, 200, { session, deleted: deleteTrace(location, session) })
+      return true
+    }
     if (url.pathname === TRACE_EXPORT_ROUTE) {
       const wanted = (url.searchParams.get('sessions') ?? '').split(',').map(item => item.trim()).filter(Boolean)
-      const sessions = wanted.length > 0 ? wanted : allSessions(dir).map(item => item.session)
+      const sessions = wanted.length > 0 ? wanted : allSessions(location).map(item => item.session)
       response.writeHead(200, {
         'content-type': 'application/x-ndjson; charset=utf-8',
         'content-disposition': `attachment; filename="rwkv-traces-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.jsonl"`,
         'cache-control': 'no-store',
       })
       for (const session of sessions) {
-        const records = sessionRecords(dir, session)
+        const records = sessionRecords(location, session)
         if (records.length === 0) continue
         response.write(`${JSON.stringify(exportTask(session, records))}\n`)
       }
@@ -145,12 +153,12 @@ export function handleTraceRoute(request: IncomingMessage, response: ServerRespo
     }
     const session = decodeURIComponent(url.pathname.slice(TRACE_ROUTE.length + 1))
     if (session === '') {
-      const sessions = allSessions(dir)
-      const records = sessions.flatMap(item => sessionRecords(dir, item.session))
+      const sessions = allSessions(location)
+      const records = sessions.flatMap(item => sessionRecords(location, item.session))
       send(response, 200, { dir, recording, sessions, stats: traceStats(records) })
       return true
     }
-    const records = sessionRecords(dir, session)
+    const records = sessionRecords(location, session)
     const index = url.searchParams.get('index')
     if (index !== null) {
       const record = records[Number(index)]

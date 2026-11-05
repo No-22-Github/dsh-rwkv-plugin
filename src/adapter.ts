@@ -1,6 +1,7 @@
 import { appendFile, mkdir } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { existsSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import {
   LlmAdapter,
@@ -18,11 +19,13 @@ import { decideStep, type GenerationTrace, type HarnessConfig } from './core/age
 import { dshSystemSections } from './core/dsh-prompt.ts'
 import { buildCatalog, type ToolMode, type ToolNames } from './core/tools.ts'
 import { historyFromMessages, systemText } from './history.ts'
-import { argumentChanges, clipArguments, memoryTraces, type ArgumentChange } from './traces.ts'
+import { argumentChanges, clipArguments, memoryTraces, type ArgumentChange, type TraceLocation } from './traces.ts'
 import { repairToolPaths, runtimeCwd } from './paths.ts'
 
 /** Pending appends per trace file, so records keep their order. */
 const traceWrites = new Map<string, Promise<void>>()
+/** Trace files this process has started writing; the first write also flushes what memory held before. */
+const traceStarted = new Set<string>()
 
 /** Route model id that resolves to the first configured model. */
 export const DEFAULT_MODEL_ID = 'default'
@@ -64,8 +67,8 @@ export interface AdapterSettings {
   readonly excludeTools: readonly string[]
   readonly includeDeveloper: boolean
   readonly loopGuard: boolean
-  /** Directory for per-session JSONL traces of every generation (prompt bytes and raw output). */
-  readonly traceDir?: string
+  /** Where to write per-session JSONL traces (absent: memory only). */
+  readonly traces?: TraceLocation
   readonly log?: (message: string) => void
 }
 
@@ -234,14 +237,23 @@ export class RwkvAdapter extends LlmAdapter {
       push({ type: 'reasoning-delta', index: 0, text })
     }
     const sessionId = options.sessionId === undefined ? undefined : String(options.sessionId)
-    const traceFile = this.settings.traceDir ? join(this.settings.traceDir, `${sessionId ?? 'no-session'}.jsonl`) : undefined
-    const traceDir = this.settings.traceDir
+    const location = this.settings.traces
     const writeLine = (fields: Record<string, unknown>) => {
       const record = { at: new Date().toISOString(), model: config.id, purpose: options.purpose, ...fields }
+      const memoryKey = sessionId ?? 'no-session'
       // Always kept in memory for the RWKV tab; written to disk only when recording is on.
-      memoryTraces.add(sessionId ?? 'no-session', record)
-      if (traceFile === undefined || traceDir === undefined) return
-      const line = `${JSON.stringify(record)}\n`
+      memoryTraces.add(memoryKey, record)
+      // Next to the DSH session log; undefined until DSH has created the session directory.
+      const traceFile = sessionId === undefined ? undefined : location?.path(sessionId)
+      if (traceFile === undefined) return
+      const traceDir = dirname(traceFile)
+      let records: readonly unknown[] = [record]
+      if (!traceStarted.has(traceFile)) {
+        traceStarted.add(traceFile)
+        // A new file gets what memory collected before the directory existed (or before recording was on).
+        if (!existsSync(traceFile)) records = memoryTraces.get(memoryKey) ?? [record]
+      }
+      const line = records.map(item => `${JSON.stringify(item)}\n`).join('')
       // One append chain per file: a request summary must land after the generations it summarizes.
       const previous = traceWrites.get(traceFile) ?? Promise.resolve()
       const next = previous.then(() => mkdir(traceDir, { recursive: true })).then(() => appendFile(traceFile, line)).catch(() => {})

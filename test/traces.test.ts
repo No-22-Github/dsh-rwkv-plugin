@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { handleTraceRoute } from '../src/routes.ts'
-import { allSessions, argumentChanges, clipArguments, exportTask, joinGeneration, listSessions, MemoryTraces, sessionRecords, traceStats, transcriptWithThinks, type TraceRecord } from '../src/traces.ts'
+import { allSessions, argumentChanges, clipArguments, deleteTrace, exportTask, TraceLocation, joinGeneration, listSessions, MemoryTraces, sessionRecords, traceStats, transcriptWithThinks, type TraceRecord } from '../src/traces.ts'
 
 const SYSTEM = 'System: rules\n\nUser: 读 a.txt\n\nAssistant: <think'
 // Request 1: a repaired call. Request 2: one re-ask, then the answer.
@@ -47,8 +47,8 @@ test('export: last generation as one RWKV text, and the same text with the real 
 test('trace routes: list, one session without prompts, one record with its prompt, export', () => {
   const dir = mkdtempSync(join(tmpdir(), 'rwkv-traces-'))
   writeFileSync(join(dir, 'session-1.jsonl'), `${records.map(record => JSON.stringify(record)).join('\n')}\n{"broken`)
-  assert.equal(listSessions(dir)[0]!.task, '读 a.txt')
-  const call = (url: string) => {
+  assert.equal(listSessions(new TraceLocation(dir))[0]!.task, '读 a.txt')
+  const call = (url: string, method = 'GET') => {
     let status = 0
     let body = ''
     const response = {
@@ -57,7 +57,7 @@ test('trace routes: list, one session without prompts, one record with its promp
       write(chunk: string) { body += chunk },
       end(chunk?: string) { body += chunk ?? '' },
     } as unknown as ServerResponse
-    const handled = handleTraceRoute({ url, method: 'GET' } as IncomingMessage, response, () => ({ dir, recording: true }))
+    const handled = handleTraceRoute({ url, method } as IncomingMessage, response, () => ({ location: new TraceLocation(dir), recording: true }))
     return { handled, status, body }
   }
   assert.equal(call('/api/rwkv/adapters').handled, false)
@@ -70,6 +70,9 @@ test('trace routes: list, one session without prompts, one record with its promp
   const exported = call('/api/rwkv/trace-export').body.trim().split('\n')
   assert.equal(exported.length, 1)
   assert.equal(JSON.parse(exported[0]!).session, 'session-1')
+  assert.equal(call('/api/rwkv/traces', 'DELETE').status, 405)
+  assert.equal(JSON.parse(call('/api/rwkv/traces/session-1', 'DELETE').body).deleted, true)
+  assert.equal(listSessions(new TraceLocation(dir)).length, 0)
 })
 
 test('memory traces: kept per session, oldest sessions dropped past the limit; disk or memory, whichever holds more', () => {
@@ -82,9 +85,9 @@ test('memory traces: kept per session, oldest sessions dropped past the limit; d
   assert.equal(memory.get('a')!.length, 2)
   const dir = mkdtempSync(join(tmpdir(), 'rwkv-traces-'))
   writeFileSync(join(dir, 'c.jsonl'), `${JSON.stringify({ stage: 'decision', at: '0' })}\n${JSON.stringify({ stage: 'step', at: '0' })}\n`)
-  assert.equal(sessionRecords(dir, 'c', memory).length, 2)
-  assert.equal(sessionRecords(dir, 'a', memory).length, 2)
-  const listed = allSessions(dir, memory)
+  assert.equal(sessionRecords(new TraceLocation(dir), 'c', memory).length, 2)
+  assert.equal(sessionRecords(new TraceLocation(dir), 'a', memory).length, 2)
+  const listed = allSessions(new TraceLocation(dir), memory)
   assert.deepEqual(listed.map(item => [item.session, item.persisted]).sort(), [['a', false], ['c', true]])
 })
 
@@ -100,4 +103,25 @@ test('argument changes: changed, added, removed, and a removed + added pair of e
   )
   assert.deepEqual(argumentChanges({ a: 1 }, { a: 1 }), [])
   assert.equal(clipArguments({ content: 'x'.repeat(10) }, 4).content, 'xxxx…（共 10 字符）')
+})
+
+test('session traces sit next to the DSH session log; delete removes only the RWKV trace', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-sessions-'))
+  const sessionDir = join(root, '--Users-me-ws--', 'session-1')
+  mkdirSync(sessionDir, { recursive: true })
+  writeFileSync(join(sessionDir, 'session.v4.jsonl.zstd'), 'dsh log')
+  const location = new TraceLocation('', root)
+  assert.equal(location.path('session-1'), join(sessionDir, 'rwkv-trace.jsonl'))
+  assert.equal(location.path('session-missing'), undefined)
+  assert.equal(location.path('../etc'), undefined)
+  assert.deepEqual(location.list(), [])
+  writeFileSync(join(sessionDir, 'rwkv-trace.jsonl'), `${JSON.stringify({ stage: 'decision', outcome: 'run', at: '1' })}\n`)
+  assert.deepEqual(location.list().map(item => item.session), ['session-1'])
+  const memory = new MemoryTraces()
+  memory.add('session-1', { stage: 'decision', at: '1' })
+  assert.equal(deleteTrace(location, 'session-1', memory), true)
+  assert.equal(existsSync(join(sessionDir, 'rwkv-trace.jsonl')), false)
+  assert.equal(existsSync(join(sessionDir, 'session.v4.jsonl.zstd')), true)
+  assert.equal(memory.get('session-1'), undefined)
+  assert.equal(deleteTrace(location, 'session-1', memory), false)
 })
