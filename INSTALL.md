@@ -48,11 +48,17 @@ cd deepseek-harness && pnpm dsh web
 
 ## 开发插件
 
-改插件代码时，可以不安装、直接引用本地目录，改完重启 DSH 即生效：
+开发时也用插件包的方式加载，和桌面版走同一条路：预设、`rwkv_agent` 工具都来自仓库里的 [cordis.patch.yml](cordis.patch.yml)，不用再往配置里手抄。
 
 1. 克隆本仓库，放在 DSH 源码的同级目录，运行 `scripts/link-dsh.sh`（把 DSH 的包软链进来；DSH 不在同级目录时用 `DSH_ROOT=<路径>` 指定）。
-2. 把 [dev.cordis.yml](dev.cordis.yml) 里 `- insert:` 那一段复制到 `~/.dsh/profiles/web/cordis.patch.yml`。`rwkv-llm` 行的 `name` 改成本机插件的绝对路径，**必须写成 `file:///…/src/index.ts`**，否则设置页的保存会被拒。
-3. 改了 `src/` 后运行 `npm run build`，重新生成 `lib/index.js`（宿主侧）和 `lib/client.js`（设置页）。
+2. 在 DSH 源码目录里，把本地仓库链接到要用的配置（这里是 web）：
+
+   ```bash
+   pnpm dsh plugin --profile web add link:/绝对路径/dsh-rwkv-plugin
+   ```
+
+   这一步会把插件加进该配置的 `package.json`（依赖和 bundles）。之后在**设置 → RWKV Agent** 里添加模型，保存会写进 `~/.dsh/profiles/web/cordis.patch.yml` 里 `name: dsh-rwkv-plugin` 的那一行。
+3. 改了 `src/` 后运行 `npm run build`，重新生成 `lib/index.js`（宿主侧）和 `lib/client.js`（设置页和 RWKV 标签页），再重启 DSH。DSH 加载的是 `lib/`，不是 `src/`。
 
 不经过 DSH 的检查：
 

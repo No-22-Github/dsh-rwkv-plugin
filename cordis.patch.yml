@@ -1,6 +1,6 @@
 # Bundle layer applied when this package is installed into a profile
 # (Desktop: Plugins → Add plugin; CLI: `dsh plugin add`). It starts with no
-# models: add your endpoints in Settings → RWKV. `rwkv_agent` uses the model
+# models: add your endpoints in Settings → RWKV Agent. `rwkv_agent` uses the model
 # id `default`, which resolves to the first configured model.
 - insert:
     - id: rwkv-llm
