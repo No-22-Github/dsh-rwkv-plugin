@@ -4,7 +4,7 @@
 //
 //   node scripts/headless.ts --backend irwkv --base-url http://host:8000 \
 //     --model rwkv7-g1l-7.2b [--home DIR] [--max-steps 12] [--thinking full|off] \
-//     [--adapter ID] [--no-empty-think] [--installed] [--trace-dir DIR] "task text"   (or `-` / stdin)
+//     [--adapter ID] [--no-empty-think] [--installed] [--trace-dir DIR] [--session-id ID] "task text"   (or `-` / stdin)
 //
 // --installed: the plugin was added to --home's headless profile with
 // `dsh plugin --profile headless add <dir>` (how a container runs it); only
@@ -38,6 +38,8 @@ const { values, positionals } = parseArgs({
     dsh: { type: 'string' },
     installed: { type: 'boolean', default: false },
     'trace-dir': { type: 'string' },
+    // Continue an earlier run's session (multi-turn evals: one process per user turn).
+    'session-id': { type: 'string' },
   },
 })
 if (!values['base-url'] || !values.model) {
@@ -121,7 +123,8 @@ const help = spawnSync(bin, [...binArgs, '--profile', 'headless', '--help'], {
 const approval = /--approval-policy/.test(help.stdout ?? '') ? ['--approval-policy', 'never'] : []
 
 const task = positionals.join(' ')
-const args = [...binArgs, '--profile', 'headless', '--json', ...approval, task === '' ? '-' : task]
+const session = values['session-id'] ? ['--session-id', values['session-id']] : []
+const args = [...binArgs, '--profile', 'headless', '--json', ...approval, ...session, task === '' ? '-' : task]
 const child = spawn(bin, args, {
   stdio: 'inherit',
   // Eval runs never report session content upstream, even on a feedback path.
