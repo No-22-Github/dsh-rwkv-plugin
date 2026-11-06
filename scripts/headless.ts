@@ -4,7 +4,7 @@
 //
 //   node scripts/headless.ts --backend irwkv --base-url http://host:8000 \
 //     --model rwkv7-g1l-7.2b [--home DIR] [--max-steps 12] [--thinking full|off] \
-//     [--adapter ID] [--no-empty-think] [--installed] [--trace-dir DIR] [--session-id ID] "task text"   (or `-` / stdin)
+//     [--adapter ID] [--no-empty-think] [--installed] [--trace-dir DIR] [--session-id ID] [--model-id ID] [--extra-patch FILE] "task text"   (or `-` / stdin)
 //
 // --installed: the plugin was added to --home's headless profile with
 // `dsh plugin --profile headless add <dir>` (how a container runs it); only
@@ -16,7 +16,7 @@
 // The task runs in the current directory.
 
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -40,6 +40,11 @@ const { values, positionals } = parseArgs({
     'trace-dir': { type: 'string' },
     // Continue an earlier run's session (multi-turn evals: one process per user turn).
     'session-id': { type: 'string' },
+    // Model id shown to the model (the persona says "powered by the <id> model").
+    'model-id': { type: 'string', default: 'rwkv' },
+    // YAML rows appended to the generated cordis.patch.yml (eval overlays: extra
+    // plugins, web provider selection). Top-level list items, same indentation.
+    'extra-patch': { type: 'string' },
   },
 })
 if (!values['base-url'] || !values.model) {
@@ -77,9 +82,9 @@ const home = resolve(values.home ?? mkdtempSync(join(tmpdir(), 'dsh-rwkv-home-')
 const profileDir = join(home, 'profiles/headless')
 mkdirSync(profileDir, { recursive: true })
 const json = JSON.stringify // YAML is a superset of JSON, so quote every scalar this way.
-// One model, id `rwkv`; rows are written relative to the `models:` key.
+// One model, id --model-id (default `rwkv`); rows are written relative to the `models:` key.
 const modelRows = [
-  `- id: rwkv`,
+  `- id: ${json(values['model-id'])}`,
   `  name: ${json(`RWKV · ${values.model}`)}`,
   `  backend: ${json(values.backend)}`,
   `  baseURL: ${json(values['base-url'])}`,
@@ -112,7 +117,8 @@ writeFileSync(join(profileDir, 'cordis.patch.yml'), [
   "  name: '@deepseek-ai/dsh-agent-default-model'",
   '  config:',
   '    provider: rwkv',
-  '    model: rwkv',
+  `    model: ${json(values['model-id'])}`,
+  ...(values['extra-patch'] ? [readFileSync(resolve(values['extra-patch']), 'utf8').trimEnd()] : []),
   '',
 ].join('\n'))
 
