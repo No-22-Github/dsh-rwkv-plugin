@@ -1,16 +1,18 @@
-// Host routes behind the authenticated /api bridge for the settings page's
-// adapter list. The browser cannot reach the inference server (other origin,
-// often a Tailscale address), so the Host lists, uploads and deletes for it.
-// Handlers run on the `connection/request` waterfall, i.e. only after
-// client-connection admitted the request with the same cookie and origin
-// checks as every DSH API call.
+// Host routes behind the authenticated /api bridge for the settings page:
+// the models a server lists (to prefill the upstream model id) and the
+// rwkv_lightning initial states (list / upload / delete). The browser cannot
+// reach the inference server (other origin, often a Tailscale address), so
+// the Host relays for it. Handlers run on the `connection/request` waterfall,
+// i.e. only after client-connection admitted the request with the same
+// cookie and origin checks as every DSH API call.
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { BackendError } from './backend/generator.ts'
-import { LightningClient, MAX_ADAPTER_UPLOAD_BYTES } from './backend/lightning.ts'
+import { BackendError, listModels } from './backend/generator.ts'
+import { LightningClient, MAX_STATE_UPLOAD_BYTES } from './backend/lightning.ts'
 import { allSessions, deleteTrace, exportTask, sessionRecords, traceStats, type TraceLocation } from './traces.ts'
 
-export const ADAPTER_ROUTE = '/api/rwkv/adapters'
+export const MODEL_ROUTE = '/api/rwkv/models'
+export const STATE_ROUTE = '/api/rwkv/states'
 
 /** The draft model's connection, sent by the page so unsaved edits can be listed against. */
 interface Connection {
@@ -43,7 +45,7 @@ async function readBody(request: IncomingMessage): Promise<Buffer> {
   let size = 0
   for await (const chunk of request) {
     size += (chunk as Buffer).length
-    if (size > MAX_ADAPTER_UPLOAD_BYTES) throw new BackendError(`adapter file is over ${MAX_ADAPTER_UPLOAD_BYTES >> 20} MB`, 'PAYLOAD_TOO_LARGE', 413)
+    if (size > MAX_STATE_UPLOAD_BYTES) throw new BackendError(`state file is over ${MAX_STATE_UPLOAD_BYTES >> 20} MB`, 'PAYLOAD_TOO_LARGE', 413)
     chunks.push(chunk as Buffer)
   }
   return Buffer.concat(chunks)
@@ -54,48 +56,59 @@ function send(response: ServerResponse, status: number, body: unknown): void {
   response.end(JSON.stringify(body))
 }
 
+function failure(response: ServerResponse, error: unknown): void {
+  const status = error instanceof BackendError
+    ? error.code === 'STATES_UNSUPPORTED' ? 404 : error.status && error.status < 500 ? error.status : 502
+    : 502
+  const message = error instanceof BackendError && error.code === 'STATES_UNSUPPORTED'
+    ? '这个服务不支持上传 state（没有 /v1/state 接口）'
+    : error instanceof Error ? error.message : String(error)
+  if (!response.headersSent) send(response, status, { error: message })
+}
+
 /**
- * Serves one request when it belongs to {@link ADAPTER_ROUTE}; returns false
- * for any other path so the waterfall continues.
+ * Serves one request when it belongs to {@link MODEL_ROUTE} or
+ * {@link STATE_ROUTE}; returns false for any other path so the waterfall continues.
+ *   GET    /api/rwkv/models              { models: string[] }
+ *   GET    /api/rwkv/states              { states: StateInfo[] }
+ *   PUT    /api/rwkv/states?name=FILE    body = file bytes → { state: StateInfo }
+ *   DELETE /api/rwkv/states/<state id>
  */
-export async function handleAdapterRoute(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
+export async function handleServerRoute(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
   const url = new URL(request.url ?? '/', 'http://host')
-  if (url.pathname !== ADAPTER_ROUTE && !url.pathname.startsWith(`${ADAPTER_ROUTE}/`)) return false
-  const id = decodeURIComponent(url.pathname.slice(ADAPTER_ROUTE.length + 1))
+  const isModels = url.pathname === MODEL_ROUTE
+  const isStates = url.pathname === STATE_ROUTE || url.pathname.startsWith(`${STATE_ROUTE}/`)
+  if (!isModels && !isStates) return false
   try {
-    const client = clientFor(connectionOf(request))
-    if (request.method === 'GET' && id === '') {
-      const adapters = await client.listAdapters()
-      send(response, 200, {
-        adapters: adapters.map(adapter => {
-          const manifest = (adapter.manifest ?? {}) as Record<string, unknown>
-          return {
-            id: adapter.id,
-            method: typeof manifest.method === 'string' ? manifest.method : '',
-            rank: typeof manifest.rank === 'number' ? manifest.rank : undefined,
-            version: String(manifest.content_version ?? adapter.version ?? ''),
-          }
-        }),
+    const connection = connectionOf(request)
+    if (isModels) {
+      if (request.method !== 'GET') {
+        send(response, 405, { error: 'method not allowed' })
+        return true
+      }
+      const models = await listModels(connection.baseURL, {
+        ...connection.apiKey ? { apiKey: connection.apiKey } : {},
+        ...connection.headers ? { headers: connection.headers } : {},
       })
-    } else if (request.method === 'PUT' && id !== '') {
+      send(response, 200, { models })
+      return true
+    }
+    const id = decodeURIComponent(url.pathname.slice(STATE_ROUTE.length + 1))
+    const client = clientFor(connection)
+    if (request.method === 'GET' && id === '') {
+      send(response, 200, { states: await client.listStates() })
+    } else if (request.method === 'PUT' && id === '') {
       const body = await readBody(request)
-      const name = url.searchParams.get('name') || `${id}.pth`
-      const version = await client.uploadAdapterBlob(id, new Blob([new Uint8Array(body)]), name)
-      send(response, 200, { id, version })
+      const name = url.searchParams.get('name') || 'state.pth'
+      send(response, 200, { state: await client.uploadStateBlob(new Blob([new Uint8Array(body)]), name) })
     } else if (request.method === 'DELETE' && id !== '') {
-      await client.deleteAdapter(id)
+      await client.deleteState(id)
       send(response, 200, { id })
     } else {
       send(response, 405, { error: 'method not allowed' })
     }
   } catch (error) {
-    const status = error instanceof BackendError
-      ? error.code === 'ADAPTERS_UNSUPPORTED' ? 404 : error.status && error.status < 500 ? error.status : 502
-      : 502
-    const message = error instanceof BackendError && error.code === 'ADAPTERS_UNSUPPORTED'
-      ? '这个服务不支持 adapter（没有 /v1/adapters）'
-      : error instanceof Error ? error.message : String(error)
-    if (!response.headersSent) send(response, status, { error: message })
+    failure(response, error)
   }
   return true
 }

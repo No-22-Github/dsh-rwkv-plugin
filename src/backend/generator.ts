@@ -215,3 +215,20 @@ export function v1Root(baseURL: string): string {
   url.search = ''
   return url.toString().replace(/\/+$/, '')
 }
+
+/**
+ * Model ids the server lists (`GET /v1/models`; OpenAI shape). rwkv_lightning
+ * does not check the password there; iRWKV takes the bearer key.
+ */
+export async function listModels(baseURL: string, options: { apiKey?: string; headers?: Readonly<Record<string, string>> } = {}): Promise<string[]> {
+  const response = await fetch(`${v1Root(baseURL)}/models`, {
+    headers: { ...options.headers, ...options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {} },
+    signal: AbortSignal.timeout(10_000),
+  })
+  if (!response.ok) throw await responseError(response, options.apiKey)
+  const body = await response.json() as { data?: { id?: unknown; status?: unknown }[]; loaded?: unknown }
+  const ids = (body.data ?? []).flatMap(item => typeof item.id === 'string' ? [item.id] : [])
+  // Dynamic-loading servers mark the resident model; list it first.
+  const loaded = typeof body.loaded === 'string' ? body.loaded : undefined
+  return loaded && ids.includes(loaded) ? [loaded, ...ids.filter(id => id !== loaded)] : ids
+}

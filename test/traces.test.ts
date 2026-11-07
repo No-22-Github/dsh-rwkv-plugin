@@ -60,7 +60,7 @@ test('trace routes: list, one session without prompts, one record with its promp
     const handled = handleTraceRoute({ url, method } as IncomingMessage, response, () => ({ location: new TraceLocation(dir), recording: true }))
     return { handled, status, body }
   }
-  assert.equal(call('/api/rwkv/adapters').handled, false)
+  assert.equal(call('/api/rwkv/states').handled, false)
   const list = JSON.parse(call('/api/rwkv/traces').body) as { sessions: unknown[]; stats: unknown[] }
   assert.equal(list.sessions.length, 1)
   const session = JSON.parse(call('/api/rwkv/traces/session-1').body) as { records: TraceRecord[] & { promptChars?: number }[] }

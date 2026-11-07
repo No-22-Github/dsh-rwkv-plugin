@@ -8,7 +8,7 @@ import z from '@deepseek-ai/schemastery'
 import { RwkvAdapter, type AdapterSettings, type ModelConfig } from './adapter.ts'
 import { DEFAULT_HARNESS } from './core/agent.ts'
 import type { ToolMode, ToolNames } from './core/tools.ts'
-import { handleAdapterRoute, handleTraceRoute } from './routes.ts'
+import { handleServerRoute, handleTraceRoute } from './routes.ts'
 import { TraceLocation } from './traces.ts'
 
 export const name = 'rwkv-llm'
@@ -62,15 +62,7 @@ const Model = z.object({
   apiKey: z.string().description('iRWKV bearer key or rwkv_lightning password.'),
   headers: z.dict(z.string()).description('Extra request headers (Cloudflare Access service token).'),
   contextWindow: z.natural().description('Context window advertised to DSH.'),
-  stateId: z.string().description('rwkv_lightning: uploaded state id.'),
-  // Inner fields stay optional: schemastery validates them even when the
-  // whole adapter object is absent, so a required id fails every model
-  // without an adapter. A model without adapter.id runs on the base weights.
-  adapter: z.object({
-    id: z.string().description('Adapter id on the server; empty = no adapter.'),
-    file: z.string().description('Local adapter package uploaded when the server does not list the id.'),
-    serverPath: z.string().description('Path on the inference server registered when the id is not listed.'),
-  }).description('rwkv_lightning: MiSS / LoRA / NoRA adapter.'),
+  stateId: z.string().description('rwkv_lightning: initial state id from /v1/state/upload; empty = zero state.'),
   thinking: z.union(['off', 'full']).description('Overrides the global wire for this model.'),
   historyEmptyThink: z.boolean().description('Overrides historyEmptyThink for this model.'),
 })
@@ -150,18 +142,7 @@ function settingsOf(config: Config): AdapterSettings {
 export function apply(ctx: Context, config: Config): void {
   const adapter = new RwkvAdapter(() => settingsOf(config))
   ctx.llm.registerAdapter(config.providers, adapter)
-  // Check configured adapters in the background, now and after each settings
-  // save, so the first request does not wait for an upload.
-  const prepare = () => {
-    for (const model of config.models.get()) {
-      adapter.ensureAdapter(model).catch((error: unknown) => {
-        console.warn(`[rwkv-llm] adapter for model ${model.id} is not ready yet: ${error instanceof Error ? error.message : String(error)}`)
-      })
-    }
-  }
-  prepare()
-  ctx.on('loader/volatile-update', prepare)
-  // Adapter list / upload / delete for the settings page, behind the /api
+  // Server model list and state list / upload / delete for the settings page, behind the /api
   // bridge's authentication (client-connection runs this waterfall only for
   // admitted requests). Absent in compositions without a Web connection.
   const on = ctx.on as unknown as (
@@ -170,6 +151,6 @@ export function apply(ctx: Context, config: Config): void {
   ) => () => void
   on.call(ctx, 'connection/request', async (request, response, next) => {
     if (handleTraceRoute(request, response, () => ({ location: traceLocationOf(config), recording: config.recordTraces.get() }))) return
-    if (!await handleAdapterRoute(request, response)) await next()
+    if (!await handleServerRoute(request, response)) await next()
   })
 }

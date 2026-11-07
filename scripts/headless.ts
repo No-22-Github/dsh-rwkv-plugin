@@ -4,7 +4,7 @@
 //
 //   node scripts/headless.ts --backend irwkv --base-url http://host:8000 \
 //     --model rwkv7-g1l-7.2b [--home DIR] [--max-steps 12] [--thinking full|off] \
-//     [--adapter ID] [--no-empty-think] [--installed] [--trace-dir DIR] [--session-id ID] [--model-id ID] [--extra-patch FILE] "task text"   (or `-` / stdin)
+//     [--state ID] [--no-empty-think] [--installed] [--trace-dir DIR] [--session-id ID] [--model-id ID] [--extra-patch FILE] "task text"   (or `-` / stdin)
 //
 // --installed: the plugin was added to --home's headless profile with
 // `dsh plugin --profile headless add <dir>` (how a container runs it); only
@@ -29,7 +29,7 @@ const { values, positionals } = parseArgs({
     backend: { type: 'string', default: 'irwkv' },
     'base-url': { type: 'string' },
     model: { type: 'string' },
-    adapter: { type: 'string' },
+    state: { type: 'string' },
     'empty-think': { type: 'boolean', default: true },
     thinking: { type: 'string', default: 'full' },
     'max-steps': { type: 'string', default: '12' },
@@ -94,7 +94,7 @@ const modelRows = [
   `  contextWindow: ${Number(values['context-window'])}`,
 ]
 modelRows.push(`  historyEmptyThink: ${values['empty-think']}`)
-if (values.adapter) modelRows.push(`  adapter:`, `    id: ${json(values.adapter)}`)
+if (values.state) modelRows.push(`  stateId: ${json(values.state)}`)
 // Installed: patch the row the plugin's own bundle layer inserted (same id,
 // whole config replaced). Not installed: insert the row ourselves.
 const pluginRows = values.installed

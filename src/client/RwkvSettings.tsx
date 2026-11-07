@@ -3,8 +3,8 @@
 // parameters. Each editor saves on its own through the shared config form;
 // every field is volatile, so the next request already uses the saved value.
 
-import { useState, useSyncExternalStore, type ReactNode } from 'react'
-import { AdapterPicker } from './AdapterPicker.tsx'
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { normalizeBaseURL, StatePicker, useServerModels } from './StatePicker.tsx'
 import { DEVELOPER_DEFAULTS, DeveloperCard, type DeveloperSettings } from './DeveloperPanel.tsx'
 
 interface ConfigFormSnapshot {
@@ -31,7 +31,6 @@ interface ModelDraft {
   headers?: Record<string, string>
   contextWindow?: number
   stateId?: string
-  adapter?: { id?: string; file?: string; serverPath?: string }
   thinking?: 'off' | 'full'
   historyEmptyThink?: boolean
 }
@@ -89,11 +88,8 @@ function cleanModel(model: ModelDraft): ModelDraft {
   const result: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(model)) {
     if (value === '' || value === undefined) continue
-    if (key === 'adapter') {
-      const adapter = Object.fromEntries(Object.entries(value as object).filter(([, item]) => item !== '' && item !== undefined))
-      if (typeof adapter.id === 'string' && adapter.id !== '') result.adapter = adapter
-      continue
-    }
+    // Configs saved before adapters were removed upstream may still carry one.
+    if (key === 'adapter') continue
     if (key === 'headers' && Object.keys(value as object).length === 0) continue
     result[key] = value
   }
@@ -123,10 +119,10 @@ export function Field(props: { label: string; hint?: ReactNode; wide?: boolean; 
   )
 }
 
-export function TextInput(props: { value: string | undefined; onChange: (value: string) => void; placeholder?: string; type?: string; disabled?: boolean }) {
+export function TextInput(props: { value: string | undefined; onChange: (value: string) => void; placeholder?: string; type?: string; disabled?: boolean; list?: string }) {
   return (
     <input
-      className="rwkv-input" type={props.type ?? 'text'} value={props.value ?? ''} placeholder={props.placeholder}
+      className="rwkv-input" type={props.type ?? 'text'} value={props.value ?? ''} placeholder={props.placeholder} list={props.list}
       disabled={props.disabled} spellCheck={false} autoComplete="off"
       onChange={event => props.onChange(event.target.value)}
     />
@@ -218,7 +214,7 @@ function modelFailure(model: ModelDraft, others: readonly ModelDraft[]): string 
   if (!model.id.trim()) return '请填写模型 ID'
   if (!/^[A-Za-z0-9][\w.-]*$/.test(model.id.trim())) return '模型 ID 只能包含字母、数字、点、下划线和连字符'
   if (others.some(other => other.id === model.id.trim())) return `已有一个模型叫 ${model.id}`
-  if (!isHttpUrl(model.baseURL.trim())) return '服务地址需要是 http(s) 地址'
+  if (!isHttpUrl(normalizeBaseURL(model.baseURL))) return '服务地址需要是 IP:端口 或 http(s) 地址'
   if (!model.model.trim()) return '请填写上游模型 ID'
   return undefined
 }
@@ -234,6 +230,8 @@ function ModelEditor(props: {
   // Model ID and display name follow the upstream model ID until edited by hand.
   const [idLinked, setIdLinked] = useState(props.initial.id === '' || props.initial.id === props.initial.model)
   const [nameLinked, setNameLinked] = useState(!props.initial.name || props.initial.name === props.initial.model)
+  // The upstream model id follows what the server lists until typed by hand.
+  const [modelLinked, setModelLinked] = useState(props.initial.model === '')
   const [touched, setTouched] = useState(false)
   const [headersError, setHeadersError] = useState<string | undefined>()
   const [busy, setBusy] = useState(false)
@@ -243,7 +241,8 @@ function ModelEditor(props: {
     setTouched(true)
     setFailure(undefined)
   }
-  const setUpstream = (value: string) => {
+  const setUpstream = (value: string, byHand = true) => {
+    if (byHand) setModelLinked(value.trim() === '')
     setDraft(current => ({
       ...current,
       model: value,
@@ -254,11 +253,25 @@ function ModelEditor(props: {
     setFailure(undefined)
   }
   const lightning = draft.backend === 'lightning'
+  const connection = { baseURL: normalizeBaseURL(draft.baseURL), apiKey: draft.apiKey, headers: draft.headers }
+  const server = useServerModels(connection)
+  useEffect(() => {
+    const first = server.models?.[0]
+    if (modelLinked && first !== undefined && first !== draft.model) setUpstream(first, false)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server.models, modelLinked])
+  const listId = `rwkv-models-${props.initial.id || 'new'}`
+  const modelHint = server.loading ? '正在向服务器查询模型…'
+    : server.error ? `没能取到模型列表：${server.error}`
+    : server.models === undefined ? '填好服务地址后会自动从服务器读取'
+    : server.models.length === 0 ? '服务器没有列出模型'
+    : server.models.includes(draft.model.trim()) ? undefined
+    : `服务器上的模型：${server.models.join('、')}`
   const disabled = props.disabled || busy
   const invalid = modelFailure(draft, props.others) ?? headersError
   const save = async () => {
     setBusy(true)
-    const ok = await props.onSave(cleanModel({ ...draft, id: draft.id.trim(), baseURL: draft.baseURL.trim(), model: draft.model.trim() }))
+    const ok = await props.onSave(cleanModel({ ...draft, id: draft.id.trim(), baseURL: normalizeBaseURL(draft.baseURL), model: draft.model.trim() }))
     setBusy(false)
     if (!ok) setFailure('Host 没有接受这份配置（校验失败，或配置已在别处修改），草稿已保留')
   }
@@ -276,16 +289,19 @@ function ModelEditor(props: {
         />
       </Field>
       <div className="rwkv-grid">
-        <Field label="上游模型 ID"><TextInput value={draft.model} disabled={disabled} placeholder="rwkv7-g1l-7.2b" onChange={setUpstream} /></Field>
-        <Field label="服务地址"><TextInput value={draft.baseURL} disabled={disabled} placeholder="http://host:8000" onChange={value => set('baseURL', value)} /></Field>
+        <Field label="服务地址"><TextInput value={draft.baseURL} disabled={disabled} placeholder="100.64.0.8:8060" onChange={value => set('baseURL', value)} /></Field>
+        <Field label="上游模型 ID" hint={modelHint}>
+          <TextInput value={draft.model} disabled={disabled} placeholder="自动从服务器读取" list={listId} onChange={value => setUpstream(value)} />
+          <datalist id={listId}>{(server.models ?? []).map(id => <option key={id} value={id} />)}</datalist>
+        </Field>
         <Field label="模型 ID"><TextInput value={draft.id} disabled={disabled} placeholder="默认同上游模型 ID" onChange={value => { setIdLinked(value.trim() === ''); set('id', value) }} /></Field>
         <Field label="显示名"><TextInput value={draft.name} disabled={disabled} placeholder="默认同上游模型 ID" onChange={value => { setNameLinked(value.trim() === ''); set('name', value) }} /></Field>
       </div>
       {lightning ? (
-        <AdapterPicker
-          connection={{ baseURL: draft.baseURL, apiKey: draft.apiKey, headers: draft.headers }}
-          value={draft.adapter?.id} disabled={disabled}
-          onChange={id => set('adapter', id ? { id } : undefined)}
+        <StatePicker
+          connection={connection}
+          value={draft.stateId} disabled={disabled}
+          onChange={id => set('stateId', id)}
         />
       ) : null}
       <details className="rwkv-details">
@@ -335,16 +351,16 @@ function ModelCard(props: {
 }) {
   const { model } = props
   const [confirming, setConfirming] = useState(false)
-  const adapterId = model.backend === 'lightning' ? model.adapter?.id : undefined
+  const stateId = model.backend === 'lightning' ? model.stateId : undefined
   return (
     <li className="rwkv-card">
       <div className="rwkv-head">
         <span className="rwkv-identity">
           <span className="rwkv-name">{model.name || model.id}</span>
           <span className="rwkv-tag">{BACKEND_LABEL[model.backend]}</span>
-          {adapterId ? <span className="rwkv-dot" title={`adapter ${adapterId}`} /> : null}
+          {stateId ? <span className="rwkv-dot" title={`state ${stateId}`} /> : null}
         </span>
-        <span className="rwkv-meta">{model.model}{adapterId ? ` · ${adapterId}` : ''}</span>
+        <span className="rwkv-meta">{model.model}{stateId ? ` · state ${stateId}` : ''}</span>
         <span className="rwkv-actions">
           {props.editing ? null : confirming ? (
             <>

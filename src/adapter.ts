@@ -43,16 +43,8 @@ export interface ModelConfig {
   /** Extra request headers, e.g. Cloudflare Access service-token headers. */
   readonly headers?: Record<string, string>
   readonly contextWindow?: number
-  /** rwkv_lightning only: uploaded state id. */
+  /** rwkv_lightning only: initial state uploaded through /v1/state/upload (the server drops uploads when it restarts). */
   readonly stateId?: string
-  /** rwkv_lightning only: MiSS / LoRA / NoRA adapter used for every request of this model. */
-  readonly adapter?: {
-    readonly id?: string
-    /** Local adapter package, uploaded when the server does not list the id. */
-    readonly file?: string
-    /** Path on the inference server, registered when the server does not list the id. */
-    readonly serverPath?: string
-  }
   /** Per-model harness overrides (e.g. thinking: off for a non-thinking checkpoint). */
   readonly thinking?: 'off' | 'full'
   /** agent-wire-think-v2.0 history for think-sft checkpoints. */
@@ -88,7 +80,6 @@ export class RwkvAdapter extends LlmAdapter {
   /** Live settings: read per call, so edits saved from the settings page apply to the next request. */
   private readonly current: () => AdapterSettings
   private readonly clients = new Map<string, Generator>()
-  private readonly adapterReady = new Map<string, Promise<void>>()
 
   constructor(settings: () => AdapterSettings) {
     super()
@@ -108,7 +99,7 @@ export class RwkvAdapter extends LlmAdapter {
       provider,
       id: model.id,
       name: model.name ?? model.id,
-      description: `${model.backend === 'irwkv' ? 'iRWKV' : 'rwkv_lightning'} · ${model.model}${model.adapter?.id ? ` · adapter ${model.adapter.id}` : ''}`,
+      description: `${model.backend === 'irwkv' ? 'iRWKV' : 'rwkv_lightning'} · ${model.model}${model.stateId ? ` · state ${model.stateId}` : ''}`,
       inputModalities: ['text'] as const,
     })))
   }
@@ -142,8 +133,8 @@ export class RwkvAdapter extends LlmAdapter {
     let client = this.clients.get(key)
     if (client !== undefined) return client
     if (config.backend === 'irwkv') {
-      if (config.adapter?.id || config.stateId) {
-        throw new LlmError(`rwkv: model "${config.id}" sets adapter/stateId, which iRWKV does not support`, 'INVALID_MODEL_CONFIG')
+      if (config.stateId) {
+        throw new LlmError(`rwkv: model "${config.id}" sets stateId, which iRWKV does not support`, 'INVALID_MODEL_CONFIG')
       }
       client = new IRWKVClient({
         baseURL: config.baseURL,
@@ -157,7 +148,6 @@ export class RwkvAdapter extends LlmAdapter {
         baseURL: config.baseURL,
         model: config.model,
         ...config.apiKey ? { password: config.apiKey } : {},
-        ...config.adapter?.id ? { adapterId: config.adapter.id } : {},
         ...config.stateId ? { stateId: config.stateId } : {},
         ...config.headers ? { headers: config.headers } : {},
         loopGuard: this.settings.loopGuard,
@@ -165,40 +155,6 @@ export class RwkvAdapter extends LlmAdapter {
     }
     this.clients.set(key, client)
     return client
-  }
-
-  /**
-   * Makes sure the model's adapter exists on the server: uploads the local
-   * file or registers the server path when the id is not listed. A restart
-   * of the inference server drops uploads, so a failed check is retried on
-   * the next request.
-   */
-  ensureAdapter(config: ModelConfig): Promise<void> {
-    const adapter = config.adapter
-    const adapterId = adapter?.id
-    if (config.backend !== 'lightning' || adapter === undefined || !adapterId) return Promise.resolve()
-    const key = JSON.stringify([config.baseURL, adapter])
-    let ready = this.adapterReady.get(key)
-    if (ready === undefined) {
-      const client = this.client(config) as LightningClient
-      ready = (async () => {
-        const listed = await client.listAdapters()
-        if (listed.some(item => item.id === adapterId)) return
-        if (adapter.file) {
-          this.settings.log?.(`uploading adapter ${adapterId} from ${adapter.file}`)
-          const version = await client.uploadAdapter(adapterId, adapter.file)
-          this.settings.log?.(`adapter ${adapterId} registered as version ${version}`)
-        } else if (adapter.serverPath) {
-          const version = await client.registerAdapterPath(adapterId, adapter.serverPath)
-          this.settings.log?.(`adapter ${adapterId} registered from server path as version ${version}`)
-        } else {
-          throw new LlmError(`rwkv: adapter "${adapterId}" is not on ${config.baseURL} and the model config gives no file or serverPath`, 'ADAPTER_MISSING')
-        }
-      })()
-      ready.catch(() => this.adapterReady.delete(key))
-      this.adapterReady.set(key, ready)
-    }
-    return ready
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -268,7 +224,6 @@ export class RwkvAdapter extends LlmAdapter {
 
     let settled = false
     const work = (async () => {
-      await this.ensureAdapter(config)
       return decideStep({
         history,
         tools: catalog,

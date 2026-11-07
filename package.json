@@ -16,7 +16,7 @@
     "build": "node scripts/build.mjs",
     "test": "node --test test/*.test.ts",
     "smoke": "node scripts/smoke.ts",
-    "adapter": "node scripts/adapter.ts",
+    "state": "node scripts/state.ts",
     "headless": "node scripts/headless.ts"
   },
   "engines": {
