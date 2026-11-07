@@ -50,11 +50,11 @@ flowchart TD
     GT -- "再次重复 · 重复失败<br/>满 12 步" --> CL
     CL --> FIN
 
-    classDef io fill:#ecfdf5,stroke:#10b981,stroke-width:1.5px,color:#064e3b
-    classDef model fill:#eef2ff,stroke:#6366f1,stroke-width:1.5px,color:#1e1b4b
-    classDef check fill:#f8fafc,stroke:#64748b,stroke-width:1.5px,color:#0f172a
-    classDef retry fill:#fffbeb,stroke:#f59e0b,stroke-width:1.5px,color:#78350f
-    classDef stop fill:#fef2f2,stroke:#ef4444,stroke-width:1.5px,color:#7f1d1d
+    classDef io fill:#10b98126,stroke:#10b981,stroke-width:1.5px
+    classDef model fill:#6366f126,stroke:#6366f1,stroke-width:1.5px
+    classDef check fill:#64748b26,stroke:#64748b,stroke-width:1.5px
+    classDef retry fill:#f59e0b26,stroke:#f59e0b,stroke-width:1.5px
+    classDef stop fill:#ef444426,stroke:#ef4444,stroke-width:1.5px
 ```
 
 “强制收尾”还有几层保底：再要求一次、捞出模型写过的正文、实在没有就由插件写一段不编事实的总结。各个数字（12 步、重问 2 次等）都能在设置页调。
