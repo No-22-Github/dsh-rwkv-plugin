@@ -45,6 +45,8 @@ const { values, positionals } = parseArgs({
     // YAML rows appended to the generated cordis.patch.yml (eval overlays: extra
     // plugins, web provider selection). Top-level list items, same indentation.
     'extra-patch': { type: 'string' },
+    // System prompt ends with the current date (off: eval prompts match the training rows).
+    'current-date': { type: 'boolean', default: false },
   },
 })
 if (!values['base-url'] || !values.model) {
@@ -105,6 +107,7 @@ writeFileSync(join(profileDir, 'cordis.patch.yml'), [
   `${indent}providers: [ rwkv ]`,
   `${indent}thinking: ${json(values.thinking)}`,
   `${indent}maxSteps: ${Number(values['max-steps'])}`,
+  `${indent}currentDate: ${values['current-date']}`,
   ...(values['trace-dir'] ? [`${indent}traceDir: ${json(resolve(values['trace-dir']))}`] : []),
   `${indent}models:`,
   ...modelRows.map(row => `${indent}  ${row}`),

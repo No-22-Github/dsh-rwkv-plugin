@@ -56,6 +56,8 @@ export interface HarnessConfig {
   readonly maxResultChars: number
   readonly sampling: Sampling
   readonly taskContract?: string
+  /** Appended as the system prompt's last line (currentDateLine); absent: no date. */
+  readonly dateLine?: string
   /**
    * Fixes applied to the model's output: parser near-miss repairs, tool name
    * and argument aliases, scalar coercion, DSH value repairs, path repair.
@@ -209,7 +211,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
   const state = analyzeTurn(input.history)
   const reminder = config.thinking === 'full' ? POST_TOOL_REMINDER_THINK : POST_TOOL_REMINDER
   const base: Entry[] = [
-    { role: 'system', text: systemPrompt(tools, config.thinking, config.taskContract, input.systemHead) },
+    { role: 'system', text: systemPrompt(tools, config.thinking, config.taskContract, input.systemHead, config.dateLine) },
     ...transcriptEntries(input.history, { tools, postToolReminder: reminder, maxResultChars: config.maxResultChars }),
   ]
   let promptTokens = 0

@@ -7,7 +7,7 @@ import { decideStep, DEFAULT_HARNESS, type HarnessConfig } from '../src/core/age
 import { parseAction } from '../src/core/parse.ts'
 import { dshSystemSections } from '../src/core/dsh-prompt.ts'
 import { analyzeTurn, isMutatingCall, toolFailureReminder, transcriptEntries, POST_TOOL_REMINDER_THINK, type HistoryItem } from '../src/core/policy.ts'
-import { promptJSON, recordToolCall, renderPrompt, systemPrompt, toolResponse } from '../src/core/prompt.ts'
+import { currentDateLine, promptJSON, recordToolCall, renderPrompt, systemPrompt, toolResponse } from '../src/core/prompt.ts'
 import { historyFromMessages } from '../src/history.ts'
 import { runtimeCwd } from '../src/paths.ts'
 import { buildCatalog, coerceArguments, normalizeArguments, repairNativeValues, resolveTool, type DshToolSchema, type WireTool } from '../src/core/tools.ts'
@@ -404,6 +404,28 @@ test('DSH time-context readings become a timestamp note, never the task', () => 
   const state = analyzeTurn(history)
   assert.equal(state.task, '帮我查一下 iPhone 最新的型号')
   assert.equal(state.successKeys.size, 1)
+})
+
+test('date line: day precision, zone and UTC offset, last line of the system prompt', async () => {
+  const at = Date.UTC(2026, 10, 6, 17, 30) // 01:30 on the 7th in Shanghai
+  assert.equal(currentDateLine(at, 'Asia/Shanghai'), 'Current date: 2026-11-07 (Asia/Shanghai, UTC+08:00).')
+  assert.equal(currentDateLine(at, 'UTC'), 'Current date: 2026-11-06 (UTC, UTC+00:00).')
+  assert.equal(currentDateLine(at, 'America/New_York'), 'Current date: 2026-11-06 (America/New_York, UTC-05:00).')
+  const line = currentDateLine(at, 'Asia/Shanghai')
+  const generator = new ScriptedGenerator(['>x</think>ok'])
+  await decideStep({ history: [{ kind: 'user', text: 'hi' }], tools, config: { ...harness, dateLine: line }, generator })
+  const system = generator.prompts[0]!.split('\n\nUser: ')[0]!
+  assert.ok(system.endsWith(`\n${line}`))
+  const plain = new ScriptedGenerator(['>x</think>ok'])
+  await decideStep({ history: [{ kind: 'user', text: 'hi' }], tools, config: harness, generator: plain })
+  assert.equal(generator.prompts[0], plain.prompts[0]!.replace('\n\nUser: ', `\n${line}\n\nUser: `))
+  // With the date in the system prompt, time-context readings stay out of the history.
+  const reading = 'Time sampled while preparing turn 1, step 1: 2026-11-06T15:45:09+08:00[Asia/Shanghai]'
+  const messages = [
+    { role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } },
+    { role: 'user', content: [{ type: 'text', text: reading }], source: { kind: 'time-context', form: 'snapshot', sections: [] } },
+  ] as never
+  assert.deepEqual(historyFromMessages(messages, [], { includeDeveloper: false, dropTimeContext: true }), [{ kind: 'user', text: 'hi' }])
 })
 
 test('history JSON keeps < > & raw: no \\u003c for the model to copy into HTML arguments', () => {

@@ -56,6 +56,7 @@ interface RunSettings {
   maxResultChars: number
   sampling: Sampling
   loopGuard: boolean
+  currentDate: boolean
 }
 
 type RwkvConfig = RunSettings & DeveloperSettings & { models: ModelDraft[] }
@@ -73,6 +74,7 @@ const RUN_DEFAULTS: RunSettings = {
   maxResultChars: 12000,
   sampling: AGENT_FAST,
   loopGuard: true,
+  currentDate: true,
 }
 
 const RUN_FIELDS = Object.keys(RUN_DEFAULTS) as (keyof RunSettings)[]
@@ -411,6 +413,7 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
       <div className="rwkv-checks">
         <Check label="历史步骤不带思考" checked={draft.historyEmptyThink} disabled={disabled} onChange={value => update({ historyEmptyThink: value })} />
         <Check label="复读时截断生成" checked={draft.loopGuard} disabled={disabled} onChange={value => update({ loopGuard: value })} />
+        <Check label="系统提示词末尾写当前日期和时区" checked={draft.currentDate} disabled={disabled} onChange={value => update({ currentDate: value })} />
       </div>
 
       <div className="rwkv-block">

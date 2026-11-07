@@ -68,7 +68,23 @@ function thinkingControl(mode: ThinkingMode): string {
  * trained opener and tool-choice guidance; the action protocol and the tool
  * catalog follow unchanged.
  */
-export function systemPrompt(tools: readonly WireTool[], mode: ThinkingMode, taskContract?: string, head?: string): string {
+/**
+ * The date line appended to the system prompt: the local date and zone of the
+ * machine running DSH (or `timeZone`), day precision so the prompt prefix
+ * changes once a day, e.g. "Current date: 2026-11-06 (Asia/Shanghai, UTC+08:00)."
+ */
+export function currentDateLine(now: number, timeZone?: string): string {
+  const format = new Intl.DateTimeFormat('en-US', {
+    ...timeZone === undefined ? {} : { timeZone },
+    year: 'numeric', month: '2-digit', day: '2-digit', timeZoneName: 'longOffset',
+  })
+  const parts = Object.fromEntries(format.formatToParts(now).map(part => [part.type, part.value]))
+  const zone = format.resolvedOptions().timeZone
+  const offset = String(parts.timeZoneName).replace(/^GMT$/, 'GMT+00:00').replace(/^GMT/, 'UTC')
+  return `Current date: ${parts.year}-${parts.month}-${parts.day} (${zone}, ${offset}).`
+}
+
+export function systemPrompt(tools: readonly WireTool[], mode: ThinkingMode, taskContract?: string, head?: string, dateLine?: string): string {
   let prompt: string
   if (head !== undefined && head.trim() !== '') {
     prompt = `${head.trim()}\n`
@@ -90,6 +106,8 @@ After a Tool result, make the same choice again: call one tool if more evidence 
   let control = prompt.trim()
   const task = taskContract?.trim()
   if (task) control += `\n\nTask-specific contract:\n${task}`
+  // Last, so a date change leaves the rest of the system prompt's prefix intact.
+  if (dateLine) control += `\n${dateLine}`
   return control
 }
 

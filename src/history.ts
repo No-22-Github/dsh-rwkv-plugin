@@ -65,6 +65,8 @@ export interface HistoryOptions {
   readonly includeDeveloper: boolean
   /** Name tools outside the catalog by their trained (default) or DSH names. */
   readonly names?: ToolNames
+  /** Drop DSH time-context readings (the date is in the system prompt instead). */
+  readonly dropTimeContext?: boolean
 }
 
 /** The leading system message DSH assembled for this request ('' when absent). */
@@ -109,7 +111,7 @@ export function historyFromMessages(
         }
         if (source?.kind === 'time-context') {
           // A clock reading appended before a step: a note, never a new user turn.
-          items.push({ kind: 'note', text: timeNote(text) })
+          if (!options.dropTimeContext) items.push({ kind: 'note', text: timeNote(text) })
           break
         }
         items.push({ kind: source?.form === 'notice' ? 'note' : 'user', text })

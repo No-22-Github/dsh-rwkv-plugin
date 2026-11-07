@@ -17,6 +17,7 @@ import { IRWKVClient } from './backend/irwkv.ts'
 import { LightningClient } from './backend/lightning.ts'
 import { decideStep, type GenerationTrace, type HarnessConfig } from './core/agent.ts'
 import { dshSystemSections } from './core/dsh-prompt.ts'
+import { currentDateLine } from './core/prompt.ts'
 import { buildCatalog, type ToolMode, type ToolNames } from './core/tools.ts'
 import { historyFromMessages, systemText } from './history.ts'
 import { argumentChanges, clipArguments, memoryTraces, type ArgumentChange, type TraceLocation } from './traces.ts'
@@ -66,6 +67,8 @@ export interface AdapterSettings {
   readonly toolNames: ToolNames
   readonly excludeTools: readonly string[]
   readonly includeDeveloper: boolean
+  /** System prompt ends with currentDateLine; time-context readings are dropped from the history. */
+  readonly currentDate?: boolean
   readonly loopGuard: boolean
   /** Where to write per-session JSONL traces (absent: memory only). */
   readonly traces?: TraceLocation
@@ -212,10 +215,11 @@ export class RwkvAdapter extends LlmAdapter {
         decisionMaxTokens: Math.min(this.settings.harness.decisionMaxTokens, options.maxTokens),
         answerMaxTokens: Math.min(this.settings.harness.answerMaxTokens, options.maxTokens),
       },
+      ...this.settings.currentDate ? { dateLine: currentDateLine(Date.now()) } : {},
     }
     const names = this.settings.toolNames
     const catalog = buildCatalog(options.tools ?? [], { mode: this.settings.toolMode, names, exclude: this.settings.excludeTools })
-    const history = historyFromMessages(options.messages, catalog, { includeDeveloper: this.settings.includeDeveloper, names })
+    const history = historyFromMessages(options.messages, catalog, { includeDeveloper: this.settings.includeDeveloper, names, dropTimeContext: this.settings.currentDate === true })
     const systemHead = names === 'dsh' ? dshSystemSections(options.system ?? systemText(options.messages)) : undefined
 
     // Bridge the harness callbacks to this async generator.
