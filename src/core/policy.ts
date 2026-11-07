@@ -151,6 +151,32 @@ export function callKey(name: string, args: Args): string {
   return `${name}\u0000${JSON.stringify(canonical(args))}`
 }
 
+/** Tools that change workspace files, under their trained and DSH names. */
+const FILE_WRITERS = new Set(['edit_file', 'write_file', 'edit', 'write'])
+
+/**
+ * Shell commands that look like they change files or the environment: an
+ * output redirect (not to /dev/null, not an fd duplication such as 2>&1), an
+ * in-place sed, tee, file operations, git operations that touch the tree, and
+ * package installs. A false positive only lets one more repeat through.
+ */
+const SHELL_WRITE = new RegExp([
+  String.raw`(?<![<>&=-])\d?>>?(?![>&=])\s*(?!/dev/null\b)[^\s&|;)]`,
+  String.raw`\bsed\s+(?:-[a-zA-Z]*\s+)*-[a-zA-Z]*i`,
+  String.raw`\b(?:tee|mv|cp|rm|rmdir|touch|mkdir|chmod|ln|patch|truncate|unzip|tar)\b`,
+  String.raw`\bgit\s+(?:apply|checkout|restore|reset|commit|merge|rebase|stash|am|cherry-pick|add|rm|mv)\b`,
+  String.raw`\b(?:pip3?|npm|pnpm|yarn|uv|cargo|go)\s+(?:install|add|get)\b`,
+].join('|'))
+
+/**
+ * A call that may change what a later read or test run sees: an edit or write
+ * of a file, or a shell command matching {@link SHELL_WRITE}.
+ */
+export function isMutatingCall(name: string, args: Args): boolean {
+  if (FILE_WRITERS.has(name)) return true
+  return name === 'bash' && typeof args.command === 'string' && SHELL_WRITE.test(args.command)
+}
+
 export interface TurnResult {
   readonly name: string
   readonly ok: boolean
@@ -163,6 +189,11 @@ export interface TurnState {
   readonly steps: number
   readonly results: readonly TurnResult[]
   readonly successfulCalls: number
+  /**
+   * Successful calls since the latest successful mutating call (that call
+   * included): rereading a file or rerunning a test after a change is not a
+   * repeat, but repeating the change itself, or any call since, still is.
+   */
   readonly successKeys: ReadonlySet<string>
   /** Failed call key → successful-call count when it failed (no success since = same epoch). */
   readonly failedEpochs: ReadonlyMap<string, number>
@@ -180,7 +211,7 @@ export function currentTurnStart(history: readonly HistoryItem[]): number {
 export function analyzeTurn(history: readonly HistoryItem[]): TurnState {
   const start = currentTurnStart(history)
   const first = history[start]
-  const calls = new Map<string, string>()
+  const calls = new Map<string, { key: string; mutating: boolean }>()
   const successKeys = new Set<string>()
   const failedEpochs = new Map<string, number>()
   const results: TurnResult[] = []
@@ -188,11 +219,14 @@ export function analyzeTurn(history: readonly HistoryItem[]): TurnState {
   let consecutiveFailedTool = ''
   let consecutiveFailures = 0
   for (const item of history.slice(start)) {
-    if (item.kind === 'call') calls.set(item.id, callKey(item.name, item.args))
+    if (item.kind === 'call') {
+      calls.set(item.id, { key: callKey(item.name, item.args), mutating: isMutatingCall(item.name, item.args) })
+    }
     if (item.kind !== 'result') continue
-    const key = calls.get(item.id) ?? callKey(item.name, {})
+    const { key, mutating } = calls.get(item.id) ?? { key: callKey(item.name, {}), mutating: false }
     results.push({ name: item.name, ok: item.ok })
     if (item.ok) {
+      if (mutating) successKeys.clear()
       successKeys.add(key)
       failedEpochs.delete(key)
       successfulCalls++

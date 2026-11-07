@@ -47,6 +47,19 @@ interface RuntimeSource {
  */
 export const RUNTIME_CONTEXT_KEPT: readonly string[] = ['working-directory:current', 'sandbox:policy']
 
+const TIME_SAMPLE = /^Time sampled while preparing turn \d+, step \d+: (\S+)/
+
+/**
+ * DSH's time-context reading (`@deepseek-ai/dsh-time-context`) as RWKV sees it:
+ * the timestamp only. The browser time-zone line (which asks the model to
+ * query the user when no browser zone is known) and the elapsed-time line are
+ * dropped. Unrecognised text is kept whole.
+ */
+export function timeNote(text: string): string {
+  const match = TIME_SAMPLE.exec(text)
+  return match ? `Current time: ${match[1]}.` : text
+}
+
 export interface HistoryOptions {
   /** Include developer messages (DSH context snapshots, instructions) as user notes. */
   readonly includeDeveloper: boolean
@@ -92,6 +105,11 @@ export function historyFromMessages(
           // the sections RWKV can use (the cleared marker has none).
           const kept = (source.sections ?? []).filter(section => RUNTIME_CONTEXT_KEPT.includes(section.name))
           if (kept.length > 0) items.push({ kind: 'note', text: kept.map(section => section.text).join('\n') })
+          break
+        }
+        if (source?.kind === 'time-context') {
+          // A clock reading appended before a step: a note, never a new user turn.
+          items.push({ kind: 'note', text: timeNote(text) })
           break
         }
         items.push({ kind: source?.form === 'notice' ? 'note' : 'user', text })

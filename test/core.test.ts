@@ -6,7 +6,7 @@ import { LoopGuard, splitAtStop, v1Root } from '../src/backend/generator.ts'
 import { decideStep, DEFAULT_HARNESS, type HarnessConfig } from '../src/core/agent.ts'
 import { parseAction } from '../src/core/parse.ts'
 import { dshSystemSections } from '../src/core/dsh-prompt.ts'
-import { analyzeTurn, toolFailureReminder, transcriptEntries, POST_TOOL_REMINDER_THINK, type HistoryItem } from '../src/core/policy.ts'
+import { analyzeTurn, isMutatingCall, toolFailureReminder, transcriptEntries, POST_TOOL_REMINDER_THINK, type HistoryItem } from '../src/core/policy.ts'
 import { promptJSON, recordToolCall, renderPrompt, systemPrompt, toolResponse } from '../src/core/prompt.ts'
 import { historyFromMessages } from '../src/history.ts'
 import { runtimeCwd } from '../src/paths.ts'
@@ -142,6 +142,67 @@ test('step limit goes straight to the answer stage', async () => {
   const generator = new ScriptedGenerator(['>ok</think>共 3 个。'])
   const step = await decideStep({ history, tools, config: harness, generator })
   assert.deepEqual(step.decision, { type: 'final', text: '共 3 个。', via: 'answer-stage' })
+})
+
+const call = (id: string, name: string, args: Record<string, unknown>, ok = true): HistoryItem[] => [
+  { kind: 'call', id, name, args },
+  { kind: 'result', id, name, ok, text: 'ok' },
+]
+const gateTools = buildCatalog([
+  { name: 'read', description: '', parameters: {} },
+  { name: 'edit', description: '', parameters: {} },
+  { name: 'bash', description: '', parameters: {} },
+], { mode: 'mapped' })
+const decideWith = async (history: HistoryItem[], output: string) => {
+  const generator = new ScriptedGenerator([output, '>x</think>done'])
+  return (await decideStep({ history, tools: gateTools, config: { ...DEFAULT_HARNESS, maxSteps: 20 }, generator })).decision.type
+}
+const readA = '>x</think><tool_call>{"name":"read_file","arguments":{"path":"a.py"}}'
+const runTests = '>x</think><tool_call>{"name":"bash","arguments":{"command":"python3 -m unittest"}}'
+
+test('a successful edit lets the edited file be reread and the same test rerun', async () => {
+  const base: HistoryItem[] = [
+    { kind: 'user', text: 'Fix a.py' },
+    ...call('c1', 'read_file', { path: 'a.py' }),
+    ...call('c2', 'bash', { command: 'python3 -m unittest' }),
+  ]
+  // No change in between: still a repeat.
+  assert.equal(await decideWith(base, readA), 'final')
+  const edited = [...base, ...call('c3', 'edit_file', { path: 'a.py', old_text: 'x', new_text: 'y' })]
+  assert.equal(await decideWith(edited, readA), 'tool')
+  assert.equal(await decideWith(edited, runTests), 'tool')
+  // A failed edit changes nothing.
+  const failed = [...base, ...call('c3', 'edit_file', { path: 'a.py', old_text: 'x', new_text: 'y' }, false)]
+  assert.equal(await decideWith(failed, readA), 'final')
+  // Calls made after the edit are repeats again.
+  const reread = [...edited, ...call('c4', 'read_file', { path: 'a.py' })]
+  assert.equal(await decideWith(reread, readA), 'final')
+  // The edit itself cannot be repeated.
+  assert.equal(await decideWith(edited, '>x</think><tool_call>{"name":"edit_file","arguments":{"path":"a.py","old_text":"x","new_text":"y"}}'), 'final')
+})
+
+test('state analysis: only successful mutating calls reset the repeat set', () => {
+  const history: HistoryItem[] = [
+    { kind: 'user', text: 'task' },
+    ...call('c1', 'read', { file_path: 'a' }),
+    ...call('c2', 'bash', { command: 'ls' }),
+    ...call('c3', 'bash', { command: "sed -i 's/a/b/' a" }),
+    ...call('c4', 'read', { file_path: 'a' }),
+  ]
+  const state = analyzeTurn(history)
+  assert.equal(state.successKeys.size, 2)
+  assert.equal(state.successfulCalls, 4)
+})
+
+test('shell commands that write are recognised; reads and fd duplication are not', () => {
+  const writes = ['echo x > a.txt', 'cat >> log <<EOF', 'sed -i "s/a/b/" f', 'sed -E -i.bak s/a/b/ f', 'python3 gen.py | tee out.txt',
+    'mv a b', 'rm -f x', 'mkdir -p d', 'git apply p.diff', 'pip install requests', 'cmd 2> err.txt']
+  const reads = ['ls -la', 'cat a.txt', 'python3 -m pytest 2>&1 | tail -20', 'grep -n foo a.py', 'cmd > /dev/null 2>&1',
+    'awk \'$3 >= 5\' f.csv', 'git status', 'git diff', 'sed -n 1,20p f', 'python3 -m unittest discover -s tests']
+  for (const command of writes) assert.ok(isMutatingCall('bash', { command }), command)
+  for (const command of reads) assert.ok(!isMutatingCall('bash', { command }), command)
+  assert.ok(isMutatingCall('write', { file_path: 'a' }))
+  assert.ok(!isMutatingCall('read_file', { path: 'a' }))
 })
 
 test('a new call returns the mapped tool with coerced arguments', async () => {
@@ -314,6 +375,35 @@ test('runtime context keeps only the working directory and sandbox policy, as a 
   ])
   assert.equal(analyzeTurn(history).task, '帮我写一个 HTML 简历模板')
   assert.equal(runtimeCwd(history), '/Users/me/ws')
+})
+
+test('DSH time-context readings become a timestamp note, never the task', () => {
+  // As the desktop app's standard preset sends them (rwkv-trace, 2026-11-06).
+  const reading = 'Time sampled while preparing turn 1, step 1: 2026-11-06T15:45:09+08:00[Asia/Shanghai]\n'
+    + 'Browser time zone for this request: Asia/Shanghai. Interpret otherwise-unqualified dates and times in this zone.\n'
+    + 'Elapsed since the preceding model-visible message: unavailable.'
+  const later = 'Time sampled while preparing turn 1, step 4: 2026-11-06T15:56:10+08:00[Asia/Shanghai]\n'
+    + 'Browser time zone for this request: Asia/Shanghai. Interpret otherwise-unqualified dates and times in this zone.\n'
+    + 'Elapsed since the preceding step context: 11m 1s.'
+  const timeMessage = (text: string) => ({
+    role: 'user', content: [{ type: 'text', text }],
+    source: { kind: 'time-context', form: 'snapshot', sections: [{ name: 'time-context', text }] },
+  })
+  const messages = [
+    { role: 'user', content: [{ type: 'text', text: '帮我查一下 iPhone 最新的型号' }], source: { kind: 'user' } },
+    timeMessage(reading),
+    { role: 'assistant', content: [{ type: 'tool-call', id: 't1', name: 'web_search', arguments: '{"queries":["iPhone"]}' }] },
+    { role: 'tool', toolCallId: 't1', content: [{ type: 'text', text: 'results' }] },
+    timeMessage(later),
+  ] as never
+  const history = historyFromMessages(messages, [], { includeDeveloper: false, names: 'dsh' })
+  assert.deepEqual(history.filter(item => item.kind === 'note'), [
+    { kind: 'note', text: 'Current time: 2026-11-06T15:45:09+08:00[Asia/Shanghai].' },
+    { kind: 'note', text: 'Current time: 2026-11-06T15:56:10+08:00[Asia/Shanghai].' },
+  ])
+  const state = analyzeTurn(history)
+  assert.equal(state.task, '帮我查一下 iPhone 最新的型号')
+  assert.equal(state.successKeys.size, 1)
 })
 
 test('history JSON keeps < > & raw: no \\u003c for the model to copy into HTML arguments', () => {
