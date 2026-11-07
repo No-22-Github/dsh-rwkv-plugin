@@ -10,17 +10,22 @@ DeepSeek 这类模型走对话接口：DSH 把系统提示词和工具 schema �
 
 ```mermaid
 sequenceDiagram
-    participant D as DSH<br/>会话 · 执行工具 · 沙箱
+    autonumber
+    participant D as DSH
     participant P as 插件
-    participant R as RWKV 推理服务
+    participant R as RWKV
     D->>P: 历史消息（含上一步的工具结果）
+    activate P
     P->>P: 拼成一段文本
+    rect rgba(245, 158, 11, 0.08)
     loop 直到拿到一个合规动作
         P->>R: 提示词
         R-->>P: 续写的文本
-        P->>P: 解析 + 检查（不合规就附一句提示重来）
+        P->>P: 解析 + 检查，不合规就附一句提示重来
+    end
     end
     P-->>D: 一个工具调用，或最终回答
+    deactivate P
     Note over D: 执行工具，带着结果发下一次请求
 ```
 
@@ -31,18 +36,25 @@ sequenceDiagram
 ## 一次请求里发生了什么
 
 ```mermaid
+%%{init: {"flowchart":{"curve":"basis","nodeSpacing":36,"rankSpacing":46,"padding":14}}}%%
 flowchart TD
-    S(["DSH 发来请求"]) --> G["RWKV 生成一次"]
-    G --> PA{"解析输出"}
-    PA -- "普通文字" --> FIN(["交回最终回答"])
-    PA -- "工具调用" --> GT{"检查调用"}
-    GT -- "通过" --> RUN(["交给 DSH 执行"])
-    PA -- "解析不了（前 2 次）" --> RE["附一句提示，重新生成"]
-    GT -- "第一次重复 · 未知工具 · 连续失败" --> RE
-    RE --> G
-    PA -- "解析不了（第 3 次）" --> CL["强制收尾<br/>撤掉工具，只许根据已有结果作答"]
-    GT -- "再次重复 · 重复失败的调用 · 满 12 步" --> CL
+    S(["DSH 发来请求"]):::io --> G["RWKV 生成一次"]:::model
+    G --> PA{"解析输出"}:::check
+    PA -- "普通文字" --> FIN(["交回最终回答"]):::io
+    PA -- "工具调用" --> GT{"检查调用"}:::check
+    GT -- "通过" --> RUN(["交给 DSH 执行"]):::io
+    PA -- "解析不了<br/>前 2 次" --> RE["附一句提示<br/>重新生成"]:::retry
+    GT -- "第一次重复<br/>未知工具 · 连续失败" --> RE
+    RE -.-> G
+    PA -- "解析不了<br/>第 3 次" --> CL["强制收尾<br/>撤掉工具，只根据已有结果作答"]:::stop
+    GT -- "再次重复 · 重复失败<br/>满 12 步" --> CL
     CL --> FIN
+
+    classDef io fill:#ecfdf5,stroke:#10b981,stroke-width:1.5px,color:#064e3b
+    classDef model fill:#eef2ff,stroke:#6366f1,stroke-width:1.5px,color:#1e1b4b
+    classDef check fill:#f8fafc,stroke:#64748b,stroke-width:1.5px,color:#0f172a
+    classDef retry fill:#fffbeb,stroke:#f59e0b,stroke-width:1.5px,color:#78350f
+    classDef stop fill:#fef2f2,stroke:#ef4444,stroke-width:1.5px,color:#7f1d1d
 ```
 
 “强制收尾”还有几层保底：再要求一次、捞出模型写过的正文、实在没有就由插件写一段不编事实的总结。各个数字（12 步、重问 2 次等）都能在设置页调。
