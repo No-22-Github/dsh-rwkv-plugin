@@ -4,7 +4,8 @@
 //
 //   node scripts/headless.ts --backend irwkv --base-url http://host:8000 \
 //     --model rwkv7-g1l-7.2b [--home DIR] [--max-steps 12] [--thinking full|off] \
-//     [--state ID] [--no-empty-think] [--installed] [--trace-dir DIR] [--session-id ID] [--model-id ID] [--extra-patch FILE] "task text"   (or `-` / stdin)
+//     [--state ID] [--no-empty-think] [--installed] [--trace-dir DIR] [--session-id ID] [--model-id ID] [--extra-patch FILE]
+//     [--current-date [--time-zone ZONE]] "task text"   (or `-` / stdin)
 //
 // --installed: the plugin was added to --home's headless profile with
 // `dsh plugin --profile headless add <dir>` (how a container runs it); only
@@ -47,6 +48,8 @@ const { values, positionals } = parseArgs({
     'extra-patch': { type: 'string' },
     // System prompt ends with the current date (off: eval prompts match the training rows).
     'current-date': { type: 'boolean', default: false },
+    // IANA zone for the date line and for DSH itself (TZ, so bash's `date` agrees).
+    'time-zone': { type: 'string' },
   },
 })
 if (!values['base-url'] || !values.model) {
@@ -108,6 +111,7 @@ writeFileSync(join(profileDir, 'cordis.patch.yml'), [
   `${indent}thinking: ${json(values.thinking)}`,
   `${indent}maxSteps: ${Number(values['max-steps'])}`,
   `${indent}currentDate: ${values['current-date']}`,
+  ...(values['time-zone'] ? [`${indent}timeZone: ${json(values['time-zone'])}`] : []),
   ...(values['trace-dir'] ? [`${indent}traceDir: ${json(resolve(values['trace-dir']))}`] : []),
   `${indent}models:`,
   ...modelRows.map(row => `${indent}  ${row}`),
@@ -137,6 +141,6 @@ const args = [...binArgs, '--profile', 'headless', '--json', ...approval, ...ses
 const child = spawn(bin, args, {
   stdio: 'inherit',
   // Eval runs never report session content upstream, even on a feedback path.
-  env: { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' },
+  env: { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1', ...values['time-zone'] ? { TZ: values['time-zone'] } : {} },
 })
 child.on('exit', code => process.exit(code ?? 1))

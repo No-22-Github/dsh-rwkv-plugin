@@ -61,6 +61,8 @@ export interface AdapterSettings {
   readonly includeDeveloper: boolean
   /** System prompt ends with currentDateLine; time-context readings are dropped from the history. */
   readonly currentDate?: boolean
+  /** IANA zone for the date line; absent: the zone of the process (its TZ). */
+  readonly timeZone?: string
   readonly loopGuard: boolean
   /** Where to write per-session JSONL traces (absent: memory only). */
   readonly traces?: TraceLocation
@@ -171,7 +173,7 @@ export class RwkvAdapter extends LlmAdapter {
         decisionMaxTokens: Math.min(this.settings.harness.decisionMaxTokens, options.maxTokens),
         answerMaxTokens: Math.min(this.settings.harness.answerMaxTokens, options.maxTokens),
       },
-      ...this.settings.currentDate ? { dateLine: currentDateLine(Date.now()) } : {},
+      ...this.settings.currentDate ? { dateLine: currentDateLine(Date.now(), this.settings.timeZone) } : {},
     }
     const names = this.settings.toolNames
     const catalog = buildCatalog(options.tools ?? [], { mode: this.settings.toolMode, names, exclude: this.settings.excludeTools })

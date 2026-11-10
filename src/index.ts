@@ -39,6 +39,7 @@ export interface Settings {
   excludeTools: string[]
   includeDeveloper: boolean
   currentDate: boolean
+  timeZone: string
   loopGuard: boolean
   outputRepairs: boolean
   guards: boolean
@@ -97,6 +98,8 @@ export const Config = z.object({
   includeDeveloper: z.boolean().default(false).description('Show DSH developer/context messages to the model as user notes.').volatile(),
   currentDate: z.boolean().default(true)
     .description('End the system prompt with "Current date: YYYY-MM-DD (zone, UTC±hh:mm)." for this machine\'s time zone; DSH time-context readings are then left out of the history. Off: no date line; readings appear as "Current time: ..." notes.').volatile(),
+  timeZone: z.string().default('')
+    .description('IANA time zone for the date line (e.g. Asia/Shanghai). Empty: this machine\'s zone.').volatile(),
   loopGuard: z.boolean().default(true).description('Client-side repetition cut-off.').volatile(),
   outputRepairs: z.boolean().default(DEFAULT_HARNESS.outputRepairs)
     .description('Fix near-miss output: parser repairs, tool name / argument aliases, scalar coercion, DSH value repairs, path repair. Off: exact protocol form only, arguments reach DSH as written.').volatile(),
@@ -133,6 +136,7 @@ function settingsOf(config: Config): AdapterSettings {
     excludeTools: config.excludeTools.get(),
     includeDeveloper: config.includeDeveloper.get(),
     currentDate: config.currentDate.get(),
+    ...config.timeZone.get() ? { timeZone: config.timeZone.get() } : {},
     loopGuard: config.loopGuard.get(),
     ...config.recordTraces.get() ? { traces: traceLocationOf(config) } : {},
     log: message => console.log(`[rwkv-llm] ${message}`),
