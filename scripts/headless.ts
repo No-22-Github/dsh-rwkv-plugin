@@ -99,7 +99,7 @@ const modelRows = [
 ]
 modelRows.push(`  historyEmptyThink: ${values['empty-think']}`)
 if (values.state) modelRows.push(`  stateId: ${json(values.state)}`)
-if (values.adapter) modelRows.push(`  adapter:`, `    id: ${json(values.adapter)}`)
+if (values.adapter) modelRows.push(`  adapterId: ${json(values.adapter)}`)
 // Installed: patch the row the plugin's own bundle layer inserted (same id,
 // whole config replaced). Not installed: insert the row ourselves.
 const pluginRows = values.installed

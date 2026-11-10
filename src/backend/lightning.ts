@@ -172,11 +172,6 @@ export class LightningClient implements Generator {
     return body.data ?? []
   }
 
-  /** Uploads a local adapter package (multipart: adapter_id + file). Returns the registered version. */
-  async uploadAdapter(adapterId: string, file: string): Promise<string> {
-    return this.uploadAdapterBlob(adapterId, await openAsBlob(file), basename(file))
-  }
-
   /** Uploads adapter bytes already in memory (the settings page sends the browser's file through the Host). */
   async uploadAdapterBlob(adapterId: string, blob: Blob, fileName: string): Promise<string> {
     if (blob.size > MAX_ADAPTER_UPLOAD_BYTES) {
@@ -189,16 +184,6 @@ export class LightningClient implements Generator {
     form.set('adapter_id', adapterId)
     form.set('file', blob, fileName)
     const response = await fetch(`${this.root}/adapters`, { method: 'POST', headers: this.headers(this.auth()), body: form })
-    return this.registeredAdapter(response)
-  }
-
-  /** Registers an adapter file that already sits on the inference server (path relative to its working directory). */
-  async registerAdapterPath(adapterId: string, path: string): Promise<string> {
-    const response = await fetch(`${this.root}/adapters`, {
-      method: 'POST',
-      headers: this.headers({ 'content-type': 'application/json', ...this.auth() }),
-      body: JSON.stringify({ adapter_id: adapterId, path }),
-    })
     return this.registeredAdapter(response)
   }
 

@@ -65,14 +65,9 @@ const Model = z.object({
   contextWindow: z.natural().description('Context window advertised to DSH.'),
   stateId: z.string().description('rwkv_lightning: initial state id from /v1/state/upload; empty = zero state.'),
   adapterId: z.string().description('rwkv_lightning: adapter id for request-level adaptation; empty = no adapter.'),
-  // Inner fields stay optional: schemastery validates them even when the
-  // whole adapter object is absent, so a required id fails every model
-  // without an adapter. A model without adapter.id runs on the base weights.
-  adapter: z.object({
-    id: z.string().description('Adapter id on the server; empty = no adapter.'),
-    file: z.string().description('Local adapter package uploaded when the server does not list the id.'),
-    serverPath: z.string().description('Path on the inference server registered when the id is not listed.'),
-  }).description('rwkv_lightning: MiSS / LoRA / NoRA adapter.'),
+  // Configs saved before 94b3734 carry `adapter: { id, file, serverPath }`;
+  // schemastery passes unknown keys through, the adapter still reads
+  // adapter.id, and the settings page rewrites it as adapterId on save.
   thinking: z.union(['off', 'full']).description('Overrides the global wire for this model.'),
   historyEmptyThink: z.boolean().description('Overrides historyEmptyThink for this model.'),
 })

@@ -96,7 +96,7 @@ test('a bare host:port gets http://', () => {
   assert.equal(normalizeBaseURL(''), '')
 })
 
-test('a saved model with adapter or adapterId is accepted by config', () => {
+test('a saved model with adapterId or a legacy adapter object is accepted by config', () => {
   assert.doesNotThrow(() => Config({ models: [{ id: 'm', backend: 'lightning', baseURL: 'http://h:1', model: 'x', adapter: { id: 'old' } }] }))
   assert.doesNotThrow(() => Config({ models: [{ id: 'm2', backend: 'lightning', baseURL: 'http://h:1', model: 'x', adapterId: 'new-id' }] }))
 })
@@ -120,7 +120,7 @@ test('lightning client forwards adapter_id in batch completion requests', async 
     })
     assert.equal(res.text, 'ok')
     assert.equal(seen.length, 1)
-    const payload = JSON.parse(seen[0]) as { adapter_id?: string; model?: string }
+    const payload = JSON.parse(seen[0]!) as { adapter_id?: string; model?: string }
     assert.equal(payload.adapter_id, 'my-adapter')
     assert.equal(payload.model, 'm')
   } finally {

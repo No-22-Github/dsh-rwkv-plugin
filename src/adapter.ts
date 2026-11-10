@@ -47,12 +47,8 @@ export interface ModelConfig {
   readonly stateId?: string
   /** rwkv_lightning only: adapter id for request-level adaptation. */
   readonly adapterId?: string
-  /** rwkv_lightning only: legacy adapter object. */
-  readonly adapter?: {
-    readonly id?: string
-    readonly file?: string
-    readonly serverPath?: string
-  }
+  /** Legacy (pre-94b3734) form of adapterId; only its id is read. */
+  readonly adapter?: { readonly id?: string }
   /** Per-model harness overrides (e.g. thinking: off for a non-thinking checkpoint). */
   readonly thinking?: 'off' | 'full'
   /** agent-wire-think-v2.0 history for think-sft checkpoints. */

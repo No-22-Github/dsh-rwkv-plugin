@@ -8,7 +8,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { BackendError, listModels } from './backend/generator.ts'
-import { LightningClient, MAX_STATE_UPLOAD_BYTES } from './backend/lightning.ts'
+import { LightningClient, MAX_ADAPTER_UPLOAD_BYTES, MAX_STATE_UPLOAD_BYTES } from './backend/lightning.ts'
 import { allSessions, deleteTrace, exportTask, sessionRecords, traceStats, type TraceLocation } from './traces.ts'
 
 export const MODEL_ROUTE = '/api/rwkv/models'
@@ -41,12 +41,15 @@ function clientFor(connection: Connection): LightningClient {
   })
 }
 
-async function readBody(request: IncomingMessage): Promise<Buffer> {
+/** Reads an upload, stopping at `limit` bytes (checked against content-length first, then while streaming). */
+async function readBody(request: IncomingMessage, limit = MAX_STATE_UPLOAD_BYTES, what = 'state'): Promise<Buffer> {
+  const tooLarge = () => new BackendError(`${what} file is over ${limit >> 20} MB`, 'PAYLOAD_TOO_LARGE', 413)
+  if (Number(request.headers['content-length']) > limit) throw tooLarge()
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of request) {
     size += (chunk as Buffer).length
-    if (size > MAX_STATE_UPLOAD_BYTES) throw new BackendError(`state file is over ${MAX_STATE_UPLOAD_BYTES >> 20} MB`, 'PAYLOAD_TOO_LARGE', 413)
+    if (size > limit) throw tooLarge()
     chunks.push(chunk as Buffer)
   }
   return Buffer.concat(chunks)
@@ -117,7 +120,7 @@ export async function handleServerRoute(request: IncomingMessage, response: Serv
           }),
         })
       } else if (request.method === 'PUT' && id !== '') {
-        const body = await readBody(request)
+        const body = await readBody(request, MAX_ADAPTER_UPLOAD_BYTES, 'adapter')
         const name = url.searchParams.get('name') || `${id}.pth`
         const version = await client.uploadAdapterBlob(id, new Blob([new Uint8Array(body)]), name)
         send(response, 200, { id, version })

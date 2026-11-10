@@ -33,7 +33,8 @@ interface ModelDraft {
   contextWindow?: number
   stateId?: string
   adapterId?: string
-  adapter?: { id?: string; file?: string; serverPath?: string }
+  /** Legacy form of adapterId, rewritten on save. */
+  adapter?: { id?: string }
   thinking?: 'off' | 'full'
   historyEmptyThink?: boolean
 }
@@ -93,9 +94,10 @@ function cleanModel(model: ModelDraft): ModelDraft {
   const result: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(model)) {
     if (value === '' || value === undefined) continue
+    // Legacy adapter object: its id moves to adapterId, file / serverPath were never read.
     if (key === 'adapter') {
-      const adapter = Object.fromEntries(Object.entries(value as object).filter(([, item]) => item !== '' && item !== undefined))
-      if (typeof adapter.id === 'string' && adapter.id !== '') result.adapter = adapter
+      const id = (value as { id?: unknown }).id
+      if (typeof id === 'string' && id !== '' && !model.adapterId) result.adapterId = id
       continue
     }
     if (key === 'headers' && Object.keys(value as object).length === 0) continue
@@ -317,9 +319,7 @@ function ModelEditor(props: {
             value={draft.adapterId ?? draft.adapter?.id} disabled={disabled}
             onChange={id => {
               set('adapterId', id)
-              if (draft.adapter || id) {
-                set('adapter', id ? { ...draft.adapter, id } : undefined)
-              }
+              set('adapter', undefined)
             }}
           />
         </>
@@ -454,12 +454,12 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
         <Check label="系统提示词末尾写当前日期和时区" checked={draft.currentDate} disabled={disabled} onChange={value => update({ currentDate: value })} />
       </div>
 
-      <Field label="任务专用补充规则（Task-specific contract）" wide hint="附加在 RWKV 系统提示词末尾的约束，例如约束搜索年份、工具用法等">
+      <Field label="任务专用补充规则（Task-specific contract）" wide hint="附加在系统提示词末尾。训练数据和评测都不带这段，填了就和训练分布不一致，只用于临时试验；正式评测请留空">
         <textarea
           className="rwkv-input"
           value={draft.taskContract ?? ''}
           disabled={disabled}
-          placeholder="例如：When using web_search, do not add past year keywords like 2024 to queries unless specifically requested."
+          placeholder="留空 = 不附加（默认）"
           style={{ minHeight: 64 }}
           onChange={event => update({ taskContract: event.target.value })}
         />
