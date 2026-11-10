@@ -1,7 +1,5 @@
 // rwkv_lightning CUDA raw continuation: POST /v1/batch/completions with
-// `contents`, integer stop_tokens, optional uploaded state_id. Request-level
-// adapters were removed upstream (the server answers adapter_id with HTTP 400);
-// fine-tunes are served as merged weights instead.
+// `contents`, integer stop_tokens, optional uploaded state_id or adapter_id.
 // Ported from RWKV-Agent internal/continuation/rwkvlightning.
 
 import { openAsBlob } from 'node:fs'
@@ -16,6 +14,8 @@ import {
 } from './generator.ts'
 import { readCompletionStream } from './stream.ts'
 
+/** Cloudflare-fronted endpoints reject bodies over 100 MB with HTTP 413. */
+export const MAX_ADAPTER_UPLOAD_BYTES = 100 << 20
 /** rwkv_lightning_cuda rejects state uploads over 512 MiB. */
 export const MAX_STATE_UPLOAD_BYTES = 512 << 20
 
@@ -23,11 +23,18 @@ export interface LightningConfig {
   readonly baseURL: string
   readonly model: string
   readonly password?: string
+  readonly adapterId?: string
   readonly stateId?: string
   /** EOS only: 24281 (bare "User") also cuts "User(...)" inside thinking and code. */
   readonly stopTokens?: readonly number[]
   readonly headers?: Readonly<Record<string, string>>
   readonly loopGuard?: boolean
+}
+
+export interface AdapterInfo {
+  readonly id: string
+  readonly version?: string
+  readonly manifest?: Record<string, unknown>
 }
 
 /** One entry of `GET /v1/state/list` (and the upload response). */
@@ -73,6 +80,7 @@ export class LightningClient implements Generator {
       stream: true,
       chunk_size: 1,
       ...this.config.stateId ? { state_id: this.config.stateId } : {},
+      ...this.config.adapterId ? { adapter_id: this.config.adapterId } : {},
       ...this.config.password ? { password: this.config.password } : {},
     }
     const response = await fetch(`${this.root}/batch/completions`, {
@@ -152,6 +160,65 @@ export class LightningClient implements Generator {
       body: JSON.stringify({ state_id: stateId }),
     })
     if (!response.ok) throw await responseError(response, this.config.password)
+  }
+
+  async listAdapters(): Promise<AdapterInfo[]> {
+    const response = await fetch(`${this.root}/adapters`, { headers: this.headers(this.auth()) })
+    if (response.status === 404 || response.status === 405) {
+      throw new BackendError(`deployment has no /v1/adapters route (HTTP ${response.status})`, 'ADAPTERS_UNSUPPORTED', response.status)
+    }
+    if (!response.ok) throw await responseError(response, this.config.password)
+    const body = await response.json() as { data?: AdapterInfo[] }
+    return body.data ?? []
+  }
+
+  /** Uploads a local adapter package (multipart: adapter_id + file). Returns the registered version. */
+  async uploadAdapter(adapterId: string, file: string): Promise<string> {
+    return this.uploadAdapterBlob(adapterId, await openAsBlob(file), basename(file))
+  }
+
+  /** Uploads adapter bytes already in memory (the settings page sends the browser's file through the Host). */
+  async uploadAdapterBlob(adapterId: string, blob: Blob, fileName: string): Promise<string> {
+    if (blob.size > MAX_ADAPTER_UPLOAD_BYTES) {
+      throw new BackendError(
+        `adapter file is ${blob.size >> 20} MB, over the ${MAX_ADAPTER_UPLOAD_BYTES >> 20} MB request limit of Cloudflare-fronted endpoints; upload the adapter package, not the full training checkpoint`,
+        'PAYLOAD_TOO_LARGE',
+      )
+    }
+    const form = new FormData()
+    form.set('adapter_id', adapterId)
+    form.set('file', blob, fileName)
+    const response = await fetch(`${this.root}/adapters`, { method: 'POST', headers: this.headers(this.auth()), body: form })
+    return this.registeredAdapter(response)
+  }
+
+  /** Registers an adapter file that already sits on the inference server (path relative to its working directory). */
+  async registerAdapterPath(adapterId: string, path: string): Promise<string> {
+    const response = await fetch(`${this.root}/adapters`, {
+      method: 'POST',
+      headers: this.headers({ 'content-type': 'application/json', ...this.auth() }),
+      body: JSON.stringify({ adapter_id: adapterId, path }),
+    })
+    return this.registeredAdapter(response)
+  }
+
+  async deleteAdapter(adapterId: string, version?: string): Promise<void> {
+    const response = await fetch(`${this.root}/adapters`, {
+      method: 'DELETE',
+      headers: this.headers({ 'content-type': 'application/json', ...this.auth() }),
+      body: JSON.stringify({ adapter_id: adapterId, ...version ? { adapter_version: version } : {} }),
+    })
+    if (!response.ok) throw await responseError(response, this.config.password)
+  }
+
+  private async registeredAdapter(response: Response): Promise<string> {
+    if (response.status === 404 || response.status === 405) {
+      throw new BackendError(`deployment has no /v1/adapters route (HTTP ${response.status})`, 'ADAPTERS_UNSUPPORTED', response.status)
+    }
+    if (!response.ok) throw await responseError(response, this.config.password)
+    const body = await response.json() as { version?: string }
+    if (!body.version) throw new BackendError('register response has no version', 'PROVIDER_PROTOCOL_ERROR')
+    return body.version
   }
 
   /** The password as a bearer token, for routes that take no JSON body (multipart upload, list). */

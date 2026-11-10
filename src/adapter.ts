@@ -45,6 +45,14 @@ export interface ModelConfig {
   readonly contextWindow?: number
   /** rwkv_lightning only: initial state uploaded through /v1/state/upload (the server drops uploads when it restarts). */
   readonly stateId?: string
+  /** rwkv_lightning only: adapter id for request-level adaptation. */
+  readonly adapterId?: string
+  /** rwkv_lightning only: legacy adapter object. */
+  readonly adapter?: {
+    readonly id?: string
+    readonly file?: string
+    readonly serverPath?: string
+  }
   /** Per-model harness overrides (e.g. thinking: off for a non-thinking checkpoint). */
   readonly thinking?: 'off' | 'full'
   /** agent-wire-think-v2.0 history for think-sft checkpoints. */
@@ -97,13 +105,16 @@ export class RwkvAdapter extends LlmAdapter {
   }
 
   override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    return Promise.resolve(this.settings.models.map(model => ({
-      provider,
-      id: model.id,
-      name: model.name ?? model.id,
-      description: `${model.backend === 'irwkv' ? 'iRWKV' : 'rwkv_lightning'} · ${model.model}${model.stateId ? ` · state ${model.stateId}` : ''}`,
-      inputModalities: ['text'] as const,
-    })))
+    return Promise.resolve(this.settings.models.map(model => {
+      const adapterId = model.adapterId ?? model.adapter?.id
+      return {
+        provider,
+        id: model.id,
+        name: model.name ?? model.id,
+        description: `${model.backend === 'irwkv' ? 'iRWKV' : 'rwkv_lightning'} · ${model.model}${model.stateId ? ` · state ${model.stateId}` : ''}${adapterId ? ` · adapter ${adapterId}` : ''}`,
+        inputModalities: ['text'] as const,
+      }
+    }))
   }
 
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -134,9 +145,10 @@ export class RwkvAdapter extends LlmAdapter {
     const key = JSON.stringify([config, this.settings.loopGuard])
     let client = this.clients.get(key)
     if (client !== undefined) return client
+    const adapterId = config.adapterId ?? config.adapter?.id
     if (config.backend === 'irwkv') {
-      if (config.stateId) {
-        throw new LlmError(`rwkv: model "${config.id}" sets stateId, which iRWKV does not support`, 'INVALID_MODEL_CONFIG')
+      if (config.stateId || adapterId) {
+        throw new LlmError(`rwkv: model "${config.id}" sets adapter/stateId, which iRWKV does not support`, 'INVALID_MODEL_CONFIG')
       }
       client = new IRWKVClient({
         baseURL: config.baseURL,
@@ -151,6 +163,7 @@ export class RwkvAdapter extends LlmAdapter {
         model: config.model,
         ...config.apiKey ? { password: config.apiKey } : {},
         ...config.stateId ? { stateId: config.stateId } : {},
+        ...adapterId ? { adapterId } : {},
         ...config.headers ? { headers: config.headers } : {},
         loopGuard: this.settings.loopGuard,
       })
