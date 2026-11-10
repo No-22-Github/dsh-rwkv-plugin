@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { test } from 'node:test'
+import { LightningClient } from '../src/backend/lightning.ts'
 import { Config } from '../src/index.ts'
 import { handleServerRoute } from '../src/routes.ts'
 import { normalizeBaseURL } from '../src/client/url.ts'
@@ -29,6 +30,13 @@ function fakeLightning() {
       response.end(JSON.stringify(value))
     }
     if (path === '/v1/models') return json(200, { object: 'list', loaded: 'b', data: [{ id: 'a' }, { id: 'b' }] })
+    if (path === '/v1/adapters') {
+      if (request.method === 'GET') {
+        return json(200, { data: [{ id: 'lora-1', version: 'v1', manifest: { method: 'lora', rank: 16 } }] })
+      }
+      if (request.method === 'POST') return json(200, { version: 'v1.1' })
+      if (request.method === 'DELETE') return json(200, { ok: true })
+    }
     if (path === '/v1/state/list') return json(200, { object: 'list', data: states })
     if (path === '/v1/state/upload') {
       const name = /filename="([^"]+)"/.exec(raw.toString('latin1'))?.[1] ?? 'x.pth'
@@ -63,6 +71,7 @@ test('server routes relay model list and state list / upload / delete', async ()
   try {
     // The loaded model comes first: it is the one to prefill.
     assert.deepEqual(await call('/api/rwkv/models'), { status: 200, body: { models: ['b', 'a'] } })
+    assert.deepEqual(await call('/api/rwkv/adapters'), { status: 200, body: { adapters: [{ id: 'lora-1', method: 'lora', rank: 16, version: 'v1' }] } })
     assert.deepEqual((await call('/api/rwkv/states')).body, { states: [] })
     const uploaded = await call('/api/rwkv/states?name=agent.pth', { method: 'PUT', body: new Uint8Array([1, 2, 3]) })
     assert.equal(uploaded.status, 200)
@@ -87,8 +96,34 @@ test('a bare host:port gets http://', () => {
   assert.equal(normalizeBaseURL(''), '')
 })
 
-test('a saved model that still carries an adapter is still accepted', () => {
-  // Configs saved before adapters were removed upstream; the plugin no longer
-  // reads the field and the settings page drops it on the next save.
+test('a saved model with adapter or adapterId is accepted by config', () => {
   assert.doesNotThrow(() => Config({ models: [{ id: 'm', backend: 'lightning', baseURL: 'http://h:1', model: 'x', adapter: { id: 'old' } }] }))
+  assert.doesNotThrow(() => Config({ models: [{ id: 'm2', backend: 'lightning', baseURL: 'http://h:1', model: 'x', adapterId: 'new-id' }] }))
+})
+
+test('lightning client forwards adapter_id in batch completion requests', async () => {
+  const seen: string[] = []
+  const server = createServer(async (request, response) => {
+    const raw = await body(request)
+    seen.push(raw.toString())
+    response.writeHead(200, { 'content-type': 'text/event-stream' })
+    response.end('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n')
+  })
+  const url = await listen(server)
+  try {
+    const client = new LightningClient({ baseURL: url, model: 'm', adapterId: 'my-adapter' })
+    const res = await client.generate({
+      prompt: 'hi',
+      maxTokens: 10,
+      stops: [],
+      sampling: { temperature: 1, topK: 1, topP: 1, presencePenalty: 0, frequencyPenalty: 0, penaltyDecay: 1 },
+    })
+    assert.equal(res.text, 'ok')
+    assert.equal(seen.length, 1)
+    const payload = JSON.parse(seen[0]) as { adapter_id?: string; model?: string }
+    assert.equal(payload.adapter_id, 'my-adapter')
+    assert.equal(payload.model, 'm')
+  } finally {
+    server.close()
+  }
 })

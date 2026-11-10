@@ -4,6 +4,7 @@
 // every field is volatile, so the next request already uses the saved value.
 
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { AdapterPicker } from './AdapterPicker.tsx'
 import { normalizeBaseURL, StatePicker, useServerModels } from './StatePicker.tsx'
 import { DEVELOPER_DEFAULTS, DeveloperCard, type DeveloperSettings } from './DeveloperPanel.tsx'
 
@@ -31,6 +32,8 @@ interface ModelDraft {
   headers?: Record<string, string>
   contextWindow?: number
   stateId?: string
+  adapterId?: string
+  adapter?: { id?: string; file?: string; serverPath?: string }
   thinking?: 'off' | 'full'
   historyEmptyThink?: boolean
 }
@@ -54,6 +57,7 @@ interface RunSettings {
   answerMaxTokens: number
   maxResultChars: number
   sampling: Sampling
+  taskContract: string
   loopGuard: boolean
   currentDate: boolean
 }
@@ -72,6 +76,7 @@ const RUN_DEFAULTS: RunSettings = {
   answerMaxTokens: 4096,
   maxResultChars: 12000,
   sampling: AGENT_FAST,
+  taskContract: '',
   loopGuard: true,
   currentDate: true,
 }
@@ -88,8 +93,11 @@ function cleanModel(model: ModelDraft): ModelDraft {
   const result: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(model)) {
     if (value === '' || value === undefined) continue
-    // Configs saved before adapters were removed upstream may still carry one.
-    if (key === 'adapter') continue
+    if (key === 'adapter') {
+      const adapter = Object.fromEntries(Object.entries(value as object).filter(([, item]) => item !== '' && item !== undefined))
+      if (typeof adapter.id === 'string' && adapter.id !== '') result.adapter = adapter
+      continue
+    }
     if (key === 'headers' && Object.keys(value as object).length === 0) continue
     result[key] = value
   }
@@ -298,11 +306,23 @@ function ModelEditor(props: {
         <Field label="显示名"><TextInput value={draft.name} disabled={disabled} placeholder="默认同上游模型 ID" onChange={value => { setNameLinked(value.trim() === ''); set('name', value) }} /></Field>
       </div>
       {lightning ? (
-        <StatePicker
-          connection={connection}
-          value={draft.stateId} disabled={disabled}
-          onChange={id => set('stateId', id)}
-        />
+        <>
+          <StatePicker
+            connection={connection}
+            value={draft.stateId} disabled={disabled}
+            onChange={id => set('stateId', id)}
+          />
+          <AdapterPicker
+            connection={connection}
+            value={draft.adapterId ?? draft.adapter?.id} disabled={disabled}
+            onChange={id => {
+              set('adapterId', id)
+              if (draft.adapter || id) {
+                set('adapter', id ? { ...draft.adapter, id } : undefined)
+              }
+            }}
+          />
+        </>
       ) : null}
       <details className="rwkv-details">
         <summary className="rwkv-summary">自定义设置</summary>
@@ -352,6 +372,7 @@ function ModelCard(props: {
   const { model } = props
   const [confirming, setConfirming] = useState(false)
   const stateId = model.backend === 'lightning' ? model.stateId : undefined
+  const adapterId = model.backend === 'lightning' ? (model.adapterId ?? model.adapter?.id) : undefined
   return (
     <li className="rwkv-card">
       <div className="rwkv-head">
@@ -359,8 +380,9 @@ function ModelCard(props: {
           <span className="rwkv-name">{model.name || model.id}</span>
           <span className="rwkv-tag">{BACKEND_LABEL[model.backend]}</span>
           {stateId ? <span className="rwkv-dot" title={`state ${stateId}`} /> : null}
+          {adapterId ? <span className="rwkv-dot" title={`adapter ${adapterId}`} /> : null}
         </span>
-        <span className="rwkv-meta">{model.model}{stateId ? ` · state ${stateId}` : ''}</span>
+        <span className="rwkv-meta">{model.model}{stateId ? ` · state ${stateId}` : ''}{adapterId ? ` · adapter ${adapterId}` : ''}</span>
         <span className="rwkv-actions">
           {props.editing ? null : confirming ? (
             <>
@@ -431,6 +453,17 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
         <Check label="复读时截断生成" checked={draft.loopGuard} disabled={disabled} onChange={value => update({ loopGuard: value })} />
         <Check label="系统提示词末尾写当前日期和时区" checked={draft.currentDate} disabled={disabled} onChange={value => update({ currentDate: value })} />
       </div>
+
+      <Field label="任务专用补充规则（Task-specific contract）" wide hint="附加在 RWKV 系统提示词末尾的约束，例如约束搜索年份、工具用法等">
+        <textarea
+          className="rwkv-input"
+          value={draft.taskContract ?? ''}
+          disabled={disabled}
+          placeholder="例如：When using web_search, do not add past year keywords like 2024 to queries unless specifically requested."
+          style={{ minHeight: 64 }}
+          onChange={event => update({ taskContract: event.target.value })}
+        />
+      </Field>
 
       <div className="rwkv-block">
         <div className="rwkv-block-head">

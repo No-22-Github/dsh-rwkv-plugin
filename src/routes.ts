@@ -13,6 +13,7 @@ import { allSessions, deleteTrace, exportTask, sessionRecords, traceStats, type 
 
 export const MODEL_ROUTE = '/api/rwkv/models'
 export const STATE_ROUTE = '/api/rwkv/states'
+export const ADAPTER_ROUTE = '/api/rwkv/adapters'
 
 /** The draft model's connection, sent by the page so unsaved edits can be listed against. */
 interface Connection {
@@ -58,27 +59,33 @@ function send(response: ServerResponse, status: number, body: unknown): void {
 
 function failure(response: ServerResponse, error: unknown): void {
   const status = error instanceof BackendError
-    ? error.code === 'STATES_UNSUPPORTED' ? 404 : error.status && error.status < 500 ? error.status : 502
+    ? (error.code === 'STATES_UNSUPPORTED' || error.code === 'ADAPTERS_UNSUPPORTED') ? 404 : error.status && error.status < 500 ? error.status : 502
     : 502
   const message = error instanceof BackendError && error.code === 'STATES_UNSUPPORTED'
     ? '这个服务不支持上传 state（没有 /v1/state 接口）'
+    : error instanceof BackendError && error.code === 'ADAPTERS_UNSUPPORTED'
+    ? '这个服务不支持 adapter（没有 /v1/adapters 接口）'
     : error instanceof Error ? error.message : String(error)
   if (!response.headersSent) send(response, status, { error: message })
 }
 
 /**
- * Serves one request when it belongs to {@link MODEL_ROUTE} or
- * {@link STATE_ROUTE}; returns false for any other path so the waterfall continues.
+ * Serves one request when it belongs to {@link MODEL_ROUTE}, {@link STATE_ROUTE}
+ * or {@link ADAPTER_ROUTE}; returns false for any other path so the waterfall continues.
  *   GET    /api/rwkv/models              { models: string[] }
  *   GET    /api/rwkv/states              { states: StateInfo[] }
  *   PUT    /api/rwkv/states?name=FILE    body = file bytes → { state: StateInfo }
  *   DELETE /api/rwkv/states/<state id>
+ *   GET    /api/rwkv/adapters            { adapters: ServerAdapter[] }
+ *   PUT    /api/rwkv/adapters/<id>?name= body = file bytes → { id, version }
+ *   DELETE /api/rwkv/adapters/<id>
  */
 export async function handleServerRoute(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
   const url = new URL(request.url ?? '/', 'http://host')
   const isModels = url.pathname === MODEL_ROUTE
   const isStates = url.pathname === STATE_ROUTE || url.pathname.startsWith(`${STATE_ROUTE}/`)
-  if (!isModels && !isStates) return false
+  const isAdapters = url.pathname === ADAPTER_ROUTE || url.pathname.startsWith(`${ADAPTER_ROUTE}/`)
+  if (!isModels && !isStates && !isAdapters) return false
   try {
     const connection = connectionOf(request)
     if (isModels) {
@@ -91,6 +98,35 @@ export async function handleServerRoute(request: IncomingMessage, response: Serv
         ...connection.headers ? { headers: connection.headers } : {},
       })
       send(response, 200, { models })
+      return true
+    }
+    if (isAdapters) {
+      const id = decodeURIComponent(url.pathname.slice(ADAPTER_ROUTE.length + 1))
+      const client = clientFor(connection)
+      if (request.method === 'GET' && id === '') {
+        const adapters = await client.listAdapters()
+        send(response, 200, {
+          adapters: adapters.map(adapter => {
+            const manifest = (adapter.manifest ?? {}) as Record<string, unknown>
+            return {
+              id: adapter.id,
+              method: typeof manifest.method === 'string' ? manifest.method : '',
+              rank: typeof manifest.rank === 'number' ? manifest.rank : undefined,
+              version: String(manifest.content_version ?? adapter.version ?? ''),
+            }
+          }),
+        })
+      } else if (request.method === 'PUT' && id !== '') {
+        const body = await readBody(request)
+        const name = url.searchParams.get('name') || `${id}.pth`
+        const version = await client.uploadAdapterBlob(id, new Blob([new Uint8Array(body)]), name)
+        send(response, 200, { id, version })
+      } else if (request.method === 'DELETE' && id !== '') {
+        await client.deleteAdapter(id)
+        send(response, 200, { id })
+      } else {
+        send(response, 405, { error: 'method not allowed' })
+      }
       return true
     }
     const id = decodeURIComponent(url.pathname.slice(STATE_ROUTE.length + 1))
