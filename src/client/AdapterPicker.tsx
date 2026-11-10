@@ -7,8 +7,8 @@ import { useEffect, useRef, useState } from 'react'
 import { isHttpUrl } from './url.ts'
 
 const ROUTE = '/api/rwkv/adapters'
-/** Same limit as MAX_ADAPTER_UPLOAD_BYTES in the Host (Cloudflare's 100 MB request cap). */
-const MAX_UPLOAD_BYTES = 100 << 20
+/** Same as MAX_ADAPTER_UPLOAD_BYTES in the Host: the server's request-body cap. */
+const MAX_UPLOAD_BYTES = 512 << 20
 
 export interface AdapterConnection {
   baseURL: string
@@ -117,7 +117,7 @@ export function AdapterPicker(props: {
 
   const upload = (file: File, id: string) => {
     if (file.size > MAX_UPLOAD_BYTES) {
-      setError(`文件 ${(file.size / 1048576).toFixed(0)} MB，超过 ${MAX_UPLOAD_BYTES >> 20} MB 上限；请上传 adapter 包，不要传完整训练 checkpoint`)
+      setError(`文件 ${(file.size / 1048576).toFixed(0)} MB，超过 ${MAX_UPLOAD_BYTES >> 20} MB 上限；请上传 adapter-final.pth，不要传完整训练 checkpoint`)
       return
     }
     setError('')

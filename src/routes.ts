@@ -115,7 +115,7 @@ export async function handleServerRoute(request: IncomingMessage, response: Serv
               id: adapter.id,
               method: typeof manifest.method === 'string' ? manifest.method : '',
               rank: typeof manifest.rank === 'number' ? manifest.rank : undefined,
-              version: String(manifest.content_version ?? adapter.version ?? ''),
+              version: String(adapter.version ?? manifest.content_version ?? ''),
             }
           }),
         })

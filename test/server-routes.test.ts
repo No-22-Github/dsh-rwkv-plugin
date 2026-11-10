@@ -127,3 +127,20 @@ test('lightning client forwards adapter_id in batch completion requests', async 
     server.close()
   }
 })
+
+test('an upstream 413 on adapter upload explains the Cloudflare cap', async () => {
+  const server = createServer((request, response) => {
+    request.resume()
+    request.on('end', () => { response.writeHead(413); response.end() })
+  })
+  const url = await listen(server)
+  try {
+    const client = new LightningClient({ baseURL: url, model: 'm' })
+    await assert.rejects(
+      client.uploadAdapterBlob('a', new Blob([new Uint8Array([1])]), 'a.pth'),
+      (error: Error & { code?: string }) => error.code === 'PAYLOAD_TOO_LARGE' && /Cloudflare/.test(error.message),
+    )
+  } finally {
+    server.close()
+  }
+})

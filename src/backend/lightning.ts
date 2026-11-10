@@ -14,10 +14,14 @@ import {
 } from './generator.ts'
 import { readCompletionStream } from './stream.ts'
 
-/** Cloudflare-fronted endpoints reject bodies over 100 MB with HTTP 413. */
-export const MAX_ADAPTER_UPLOAD_BYTES = 100 << 20
 /** rwkv_lightning_cuda rejects state uploads over 512 MiB. */
 export const MAX_STATE_UPLOAD_BYTES = 512 << 20
+/**
+ * The server's request-body cap is the state limit plus 1 MiB of form overhead,
+ * and adapter registration goes through the same cap. Cloudflare-fronted
+ * endpoints stop at 100 MB earlier; their 413 is explained in registeredAdapter.
+ */
+export const MAX_ADAPTER_UPLOAD_BYTES = MAX_STATE_UPLOAD_BYTES
 
 export interface LightningConfig {
   readonly baseURL: string
@@ -176,8 +180,9 @@ export class LightningClient implements Generator {
   async uploadAdapterBlob(adapterId: string, blob: Blob, fileName: string): Promise<string> {
     if (blob.size > MAX_ADAPTER_UPLOAD_BYTES) {
       throw new BackendError(
-        `adapter file is ${blob.size >> 20} MB, over the ${MAX_ADAPTER_UPLOAD_BYTES >> 20} MB request limit of Cloudflare-fronted endpoints; upload the adapter package, not the full training checkpoint`,
+        `adapter file is ${blob.size >> 20} MB, over the server's ${MAX_ADAPTER_UPLOAD_BYTES >> 20} MB request limit; upload adapter-final.pth, not a full training checkpoint`,
         'PAYLOAD_TOO_LARGE',
+        413,
       )
     }
     const form = new FormData()
@@ -199,6 +204,13 @@ export class LightningClient implements Generator {
   private async registeredAdapter(response: Response): Promise<string> {
     if (response.status === 404 || response.status === 405) {
       throw new BackendError(`deployment has no /v1/adapters route (HTTP ${response.status})`, 'ADAPTERS_UNSUPPORTED', response.status)
+    }
+    if (response.status === 413) {
+      throw new BackendError(
+        'HTTP 413: request body too large; Cloudflare-fronted endpoints cap uploads at 100 MB, so register adapters larger than that through the server address directly',
+        'PAYLOAD_TOO_LARGE',
+        413,
+      )
     }
     if (!response.ok) throw await responseError(response, this.config.password)
     const body = await response.json() as { version?: string }
