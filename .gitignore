@@ -2,3 +2,4 @@ node_modules/
 traces/
 bench/
 .DS_Store
+.claude/launch.json
