@@ -37,6 +37,7 @@ export interface Settings {
   toolMode: ToolMode
   toolNames: ToolNames
   excludeTools: string[]
+  toolOverrides: Record<string, { description?: string, arguments?: Record<string, string> }>
   includeDeveloper: boolean
   currentDate: boolean
   timeZone: string
@@ -99,6 +100,8 @@ export const Config = z.object({
   toolNames: z.union(['dsh', 'trained']).default('dsh')
     .description('dsh: DSH tool names (read, glob, ...) and DSH\'s system prompt without the sections for tools the RWKV preset does not mount; trained: the agent-tool-v3 names (read_file, ...) and the Go-aligned prompt.').volatile(),
   excludeTools: z.array(z.string()).default([]).description('Tool names (DSH or RWKV) hidden from the model.').volatile(),
+  toolOverrides: z.dict(z.object({ description: z.string(), arguments: z.dict(z.string()) })).default({})
+    .description('Experiment only: replace tool descriptions / argument placeholders by tool name. Anything set here breaks parity with the training data.').volatile(),
   includeDeveloper: z.boolean().default(false).description('Show DSH developer/context messages to the model as user notes.').volatile(),
   currentDate: z.boolean().default(true)
     .description('End the system prompt with "Current date: YYYY-MM-DD (zone, UTC±hh:mm)." for this machine\'s time zone; DSH time-context readings are then left out of the history. Off: no date line; readings appear as "Current time: ..." notes.').volatile(),
@@ -138,6 +141,7 @@ function settingsOf(config: Config): AdapterSettings {
     toolMode: config.toolMode.get(),
     toolNames: config.toolNames.get(),
     excludeTools: config.excludeTools.get(),
+    ...Object.keys(config.toolOverrides.get()).length ? { toolOverrides: config.toolOverrides.get() } : {},
     includeDeveloper: config.includeDeveloper.get(),
     currentDate: config.currentDate.get(),
     ...config.timeZone.get() ? { timeZone: config.timeZone.get() } : {},

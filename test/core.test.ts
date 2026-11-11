@@ -507,3 +507,21 @@ test('a filled bash description is its own repair, not an argument alias', async
   const step = await decideStep({ history: [{ kind: 'user', text: 'ls' }], tools: dshTools, config: harness, generator })
   assert.deepEqual(step.decision.type === 'tool' && step.decision.repairs, ['bash_description_filled'])
 })
+
+test('toolOverrides replace description and named argument placeholders only', () => {
+  const offered: DshToolSchema[] = [{
+    name: 'edit',
+    description: 'Edit an existing UTF-8 text file by replacing literal text.',
+    parameters: { type: 'object', required: ['file_path', 'old_string', 'new_string'], properties: {
+      file_path: { type: 'string', description: 'Path to edit.' },
+      old_string: { type: 'string', description: 'Literal text to replace.' },
+      new_string: { type: 'string', description: 'Literal replacement text.' },
+    } },
+  }]
+  const plain = buildCatalog(offered, { mode: 'mapped', names: 'dsh' })
+  const same = buildCatalog(offered, { mode: 'mapped', names: 'dsh', overrides: {} })
+  assert.deepEqual(same.map(t => [t.description, t.arguments]), plain.map(t => [t.description, t.arguments]))
+  const [edited] = buildCatalog(offered, { mode: 'mapped', names: 'dsh', overrides: { edit: { description: 'D', arguments: { old_string: 'O', nope: 'x' } } } })
+  assert.equal(edited!.description, 'D')
+  assert.equal(edited!.arguments, '{"file_path":"Path to edit","old_string":"O","new_string":"Literal replacement text"}')
+})

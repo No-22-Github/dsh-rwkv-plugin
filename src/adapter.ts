@@ -18,7 +18,7 @@ import { LightningClient } from './backend/lightning.ts'
 import { decideStep, type GenerationTrace, type HarnessConfig } from './core/agent.ts'
 import { dshSystemSections } from './core/dsh-prompt.ts'
 import { currentDateLine } from './core/prompt.ts'
-import { buildCatalog, type ToolMode, type ToolNames } from './core/tools.ts'
+import { buildCatalog, type ToolMode, type ToolNames, type ToolOverride } from './core/tools.ts'
 import { historyFromMessages, systemText } from './history.ts'
 import { argumentChanges, clipArguments, memoryTraces, type ArgumentChange, type TraceLocation } from './traces.ts'
 import { repairToolPaths, runtimeCwd } from './paths.ts'
@@ -62,6 +62,8 @@ export interface AdapterSettings {
   /** dsh: DSH tool names and DSH's system prompt (filtered); trained: the agent-tool-v3 names and the Go-aligned prompt. */
   readonly toolNames: ToolNames
   readonly excludeTools: readonly string[]
+  /** Experiment-only catalog text replacements (see ToolOverride); empty in normal use. */
+  readonly toolOverrides?: Readonly<Record<string, ToolOverride>>
   readonly includeDeveloper: boolean
   /** System prompt ends with currentDateLine; time-context readings are dropped from the history. */
   readonly currentDate?: boolean
@@ -185,7 +187,7 @@ export class RwkvAdapter extends LlmAdapter {
       ...this.settings.currentDate ? { dateLine: currentDateLine(Date.now(), this.settings.timeZone) } : {},
     }
     const names = this.settings.toolNames
-    const catalog = buildCatalog(options.tools ?? [], { mode: this.settings.toolMode, names, exclude: this.settings.excludeTools })
+    const catalog = buildCatalog(options.tools ?? [], { mode: this.settings.toolMode, names, exclude: this.settings.excludeTools, overrides: this.settings.toolOverrides })
     const history = historyFromMessages(options.messages, catalog, { includeDeveloper: this.settings.includeDeveloper, names, dropTimeContext: this.settings.currentDate === true })
     const systemHead = names === 'dsh' ? dshSystemSections(options.system ?? systemText(options.messages)) : undefined
 

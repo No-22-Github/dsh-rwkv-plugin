@@ -51,6 +51,8 @@ const { values, positionals } = parseArgs({
     'current-date': { type: 'boolean', default: false },
     // IANA zone for the date line and for DSH itself (TZ, so bash's `date` agrees).
     'time-zone': { type: 'string' },
+    // Experiment only: JSON object of extra rwkv-llm config keys (e.g. taskContract, toolOverrides).
+    'plugin-config': { type: 'string' },
   },
 })
 if (!values['base-url'] || !values.model) {
@@ -115,6 +117,8 @@ writeFileSync(join(profileDir, 'cordis.patch.yml'), [
   `${indent}currentDate: ${values['current-date']}`,
   ...(values['time-zone'] ? [`${indent}timeZone: ${json(values['time-zone'])}`] : []),
   ...(values['trace-dir'] ? [`${indent}traceDir: ${json(resolve(values['trace-dir']))}`] : []),
+  ...Object.entries(values['plugin-config'] ? JSON.parse(values['plugin-config']) as Record<string, unknown> : {})
+    .map(([key, value]) => `${indent}${key}: ${json(value)}`),
   `${indent}models:`,
   ...modelRows.map(row => `${indent}  ${row}`),
   '- id: session-title-llm',

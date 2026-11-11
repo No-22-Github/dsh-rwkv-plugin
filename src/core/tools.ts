@@ -348,6 +348,28 @@ export interface CatalogOptions {
   readonly names?: ToolNames
   /** Wire or DSH names to hide; applied after the mode filter. */
   readonly exclude?: readonly string[]
+  /** Experiment-only: replace a tool's description and/or argument placeholders, keyed by wire or DSH name. */
+  readonly overrides?: Readonly<Record<string, ToolOverride>>
+}
+
+/** Replacement text for one catalog entry; unset fields keep the default. */
+export interface ToolOverride {
+  readonly description?: string
+  /** Argument placeholder text by argument key; keys the tool does not have are ignored. */
+  readonly arguments?: Readonly<Record<string, string>>
+}
+
+function applyOverride(tool: WireTool, override: ToolOverride | undefined): WireTool {
+  if (override === undefined) return tool
+  let args = tool.arguments
+  if (override.arguments !== undefined) {
+    const parsed = JSON.parse(args) as Record<string, string>
+    for (const [key, text] of Object.entries(override.arguments)) {
+      if (key in parsed) parsed[key] = text
+    }
+    args = JSON.stringify(parsed)
+  }
+  return { ...tool, description: override.description ?? tool.description, arguments: args }
 }
 
 /** Flat placeholder object for an unmapped DSH tool's JSON Schema. */
@@ -414,8 +436,10 @@ export function buildCatalog(offered: readonly DshToolSchema[], options: Catalog
       })
     }
   }
+  const overrides = options.overrides ?? {}
+  const final = tools.map(tool => applyOverride(tool, overrides[tool.name] ?? overrides[tool.dshName]))
   // Stable alphabetical order, as in the RWKV-Agent catalog.
-  return tools.sort((a, b) => a.name.localeCompare(b.name))
+  return final.sort((a, b) => a.name.localeCompare(b.name))
 }
 
 /**
