@@ -56,7 +56,6 @@ interface RunSettings {
   protocolRetries: number
   decisionMaxTokens: number
   answerMaxTokens: number
-  maxResultChars: number
   sampling: Sampling
   taskContract: string
   loopGuard: boolean
@@ -75,7 +74,6 @@ const RUN_DEFAULTS: RunSettings = {
   protocolRetries: 2,
   decisionMaxTokens: 4096,
   answerMaxTokens: 4096,
-  maxResultChars: 12000,
   sampling: AGENT_FAST,
   taskContract: '',
   loopGuard: true,
@@ -409,7 +407,7 @@ function runSummary(run: RunSettings): string {
   return `思考${run.thinking === 'full' ? '开' : '关'} · 每轮 ${run.maxSteps} 步 · ${sampling}`
 }
 
-type NumericRunField = 'maxSteps' | 'maxConsecutiveFailures' | 'protocolRetries' | 'decisionMaxTokens' | 'answerMaxTokens' | 'maxResultChars'
+type NumericRunField = 'maxSteps' | 'maxConsecutiveFailures' | 'protocolRetries' | 'decisionMaxTokens' | 'answerMaxTokens'
 
 function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: () => void; onSave: (run: RunSettings) => Promise<boolean> }) {
   const [draft, setDraft] = useState<RunSettings>(props.initial)
@@ -446,7 +444,6 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
         <Field label="格式错误重问次数">{num('protocolRetries')}</Field>
         <Field label="决策步 max tokens">{num('decisionMaxTokens')}</Field>
         <Field label="作答 max tokens">{num('answerMaxTokens')}</Field>
-        <Field label="工具结果最多字符">{num('maxResultChars')}</Field>
       </div>
       <div className="rwkv-checks">
         <Check label="历史步骤不带思考" checked={draft.historyEmptyThink} disabled={disabled} onChange={value => update({ historyEmptyThink: value })} />

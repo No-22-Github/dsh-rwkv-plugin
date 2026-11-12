@@ -33,7 +33,7 @@ Tools are now unavailable. Answer from the Tool results, and clearly state anyth
 /** harness v26: the first repeat of a successful call gets one more decision with an edit hint. */
 export function duplicateRetryReminder(tools: readonly WireTool[]): string {
   let prompt = 'That tool call was rejected because it repeats a successful call; its result is already above. Do not call it again.\n'
-  const edits = ['edit', 'write'].flatMap(dsh => tools.filter(tool => tool.dshName === dsh).map(tool => tool.name))
+  const edits = ['edit', 'edit_lines', 'write'].flatMap(dsh => tools.filter(tool => tool.dshName === dsh).map(tool => tool.name))
   if (edits.length > 0) {
     prompt += `If the task asks to change a file you have already read, make the change now with ${edits.join(' or ')}, using the text already shown.\n`
   }
@@ -152,7 +152,7 @@ export function callKey(name: string, args: Args): string {
 }
 
 /** Tools that change workspace files, under their trained and DSH names. */
-const FILE_WRITERS = new Set(['edit_file', 'write_file', 'edit', 'write'])
+const FILE_WRITERS = new Set(['edit_file', 'write_file', 'edit', 'edit_lines', 'write'])
 
 /**
  * Shell commands that look like they change files or the environment: an
@@ -256,12 +256,20 @@ export function analyzeTurn(history: readonly HistoryItem[]): TurnState {
 export interface TranscriptOptions {
   readonly tools: readonly WireTool[]
   readonly postToolReminder: string
-  readonly maxResultChars: number
+  /**
+   * Legacy: cut results longer than this when rendering. Live sessions are cut
+   * once, when the tool runs (src/result-budget.ts), so the plugin leaves this
+   * unset; only the pipeline sets it, to render data recorded before that.
+   */
+  readonly maxResultChars?: number
 }
 
-/** Long tool output: keep the head and the tail; the middle is what RWKV loses first anyway. */
-export function truncateResult(text: string, maxChars: number): string {
-  if (maxChars <= 0 || text.length <= maxChars) return text
+/**
+ * Legacy prompt-time cut (head 80%, tail 20%, no saved copy), for rendering
+ * data recorded before the execution-time budget (src/result-budget.ts).
+ */
+export function truncateResult(text: string, maxChars: number | undefined): string {
+  if (maxChars === undefined || maxChars <= 0 || text.length <= maxChars) return text
   const head = Math.floor(maxChars * 0.8)
   const tail = maxChars - head
   return `${text.slice(0, head)}\n…(${text.length - maxChars} characters omitted)…\n${text.slice(text.length - tail)}`

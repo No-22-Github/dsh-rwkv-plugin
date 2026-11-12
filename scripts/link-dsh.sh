@@ -13,3 +13,4 @@ link cordis vendor/cordis
 link schemastery vendor/schemastery
 link dsh-brand packages/util/brand
 link dsh-llm packages/llm/llm
+link dsh-tools packages/core/tools

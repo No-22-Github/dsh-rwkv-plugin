@@ -8,6 +8,7 @@ import z from '@deepseek-ai/schemastery'
 import { RwkvAdapter, type AdapterSettings, type ModelConfig } from './adapter.ts'
 import { DEFAULT_HARNESS } from './core/agent.ts'
 import type { ToolMode, ToolNames } from './core/tools.ts'
+import { applyResultBudget } from './result-budget.ts'
 import { handleServerRoute, handleTraceRoute } from './routes.ts'
 import { TraceLocation } from './traces.ts'
 
@@ -24,7 +25,6 @@ export interface Settings {
   protocolRetries: number
   decisionMaxTokens: number
   answerMaxTokens: number
-  maxResultChars: number
   sampling: {
     temperature: number
     topK: number
@@ -85,7 +85,6 @@ export const Config = z.object({
   protocolRetries: z.natural().default(DEFAULT_HARNESS.protocolRetries).volatile(),
   decisionMaxTokens: z.natural().default(DEFAULT_HARNESS.decisionMaxTokens).volatile(),
   answerMaxTokens: z.natural().default(DEFAULT_HARNESS.answerMaxTokens).volatile(),
-  maxResultChars: z.natural().default(DEFAULT_HARNESS.maxResultChars).description('Tool output longer than this keeps its head and tail.').volatile(),
   sampling: z.object({
     temperature: z.number().default(DEFAULT_HARNESS.sampling.temperature),
     topK: z.natural().default(DEFAULT_HARNESS.sampling.topK),
@@ -132,7 +131,6 @@ function settingsOf(config: Config): AdapterSettings {
       protocolRetries: config.protocolRetries.get(),
       decisionMaxTokens: config.decisionMaxTokens.get(),
       answerMaxTokens: config.answerMaxTokens.get(),
-      maxResultChars: config.maxResultChars.get(),
       sampling: config.sampling.get(),
       outputRepairs: config.outputRepairs.get(),
       guards: config.guards.get(),
@@ -154,6 +152,8 @@ function settingsOf(config: Config): AdapterSettings {
 export function apply(ctx: Context, config: Config): void {
   const adapter = new RwkvAdapter(() => settingsOf(config))
   ctx.llm.registerAdapter(config.providers, adapter)
+  // Long tool results in RWKV sessions: cut once when the tool runs, the rest saved to a file.
+  applyResultBudget(ctx, { providers: () => config.providers, log: message => console.log(`[rwkv-llm] ${message}`) })
   // Server model list and state list / upload / delete for the settings page, behind the /api
   // bridge's authentication (client-connection runs this waterfall only for
   // admitted requests). Absent in compositions without a Web connection.

@@ -30,7 +30,7 @@ function repairPath(path: string, cwd: string): string {
   return candidates.find(candidate => existsSync(candidate)) ?? path
 }
 
-const FILE_TOOLS = new Set(['read', 'write', 'edit', 'glob', 'grep'])
+const FILE_TOOLS = new Set(['read', 'write', 'edit', 'edit_lines', 'glob', 'grep'])
 
 /** DSH-side arguments with file_path / path repaired; the same object when nothing changed. */
 export function repairToolPaths(dshName: string, args: Record<string, unknown>, cwd: string | undefined): Record<string, unknown> {

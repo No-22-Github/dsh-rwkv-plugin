@@ -53,7 +53,6 @@ export interface HarnessConfig {
   readonly protocolRetries: number
   readonly decisionMaxTokens: number
   readonly answerMaxTokens: number
-  readonly maxResultChars: number
   readonly sampling: Sampling
   readonly taskContract?: string
   /** Appended as the system prompt's last line (currentDateLine); absent: no date. */
@@ -83,7 +82,6 @@ export const DEFAULT_HARNESS: HarnessConfig = {
   protocolRetries: 2,
   decisionMaxTokens: 4096,
   answerMaxTokens: 4096,
-  maxResultChars: 12000,
   outputRepairs: true,
   guards: true,
   sampling: {
@@ -212,7 +210,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
   const reminder = config.thinking === 'full' ? POST_TOOL_REMINDER_THINK : POST_TOOL_REMINDER
   const base: Entry[] = [
     { role: 'system', text: systemPrompt(tools, config.thinking, config.taskContract, input.systemHead, config.dateLine) },
-    ...transcriptEntries(input.history, { tools, postToolReminder: reminder, maxResultChars: config.maxResultChars }),
+    ...transcriptEntries(input.history, { tools, postToolReminder: reminder }),
   ]
   let promptTokens = 0
   let completionTokens = 0

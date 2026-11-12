@@ -37,7 +37,7 @@ test('renders the bytes of a real Go harness prompt (agent-wire-think-v1.0)', ()
   ]
   const prompt = renderPrompt([
     { role: 'system', text: systemPrompt(tools, 'full', contract) },
-    ...transcriptEntries(history, { tools, postToolReminder: POST_TOOL_REMINDER_THINK, maxResultChars: 0 }),
+    ...transcriptEntries(history, { tools, postToolReminder: POST_TOOL_REMINDER_THINK }),
   ], { thinking: 'full' })
   // The plugin's bash sentence drops the sandbox wording (DSH bash is not the RWKV-Agent sandbox).
   const guidance = (text: string) => text.split('\n').filter(line => !line.startsWith('bash runs in ')).join('\n')

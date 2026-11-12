@@ -111,6 +111,15 @@ export const BUILTIN_MAPPINGS: Readonly<Record<string, ToolMapping>> = {
     toDsh: args => ({ file_path: workspacePath(args.path), old_string: args.old_text ?? '', new_string: args.new_text ?? '' }),
     fromDsh: args => ({ path: args.file_path, old_text: args.old_string, new_text: args.new_string }),
   },
+  // Line-range edit (src/line-edit.ts); offered only where that plugin is mounted.
+  edit_lines: {
+    wireName: 'edit_lines',
+    description: 'Replace a range of lines in a workspace text file, numbered as read_file shows them. end_line = start_line - 1 inserts before start_line.',
+    arguments: '{"path":"relative file path","start_line":"first line to replace","end_line":"last line to replace","new_text":"replacement lines without line numbers"}',
+    schema: { properties: { path: { type: 'string' }, start_line: { type: 'integer' }, end_line: { type: 'integer' }, new_text: { type: 'string' } } },
+    toDsh: args => ({ file_path: workspacePath(args.path), start_line: args.start_line, end_line: args.end_line, new_text: args.new_text ?? '' }),
+    fromDsh: args => ({ path: args.file_path, start_line: args.start_line, end_line: args.end_line, new_text: args.new_text }),
+  },
   glob: {
     wireName: 'list_files',
     description: 'List files below a workspace-relative path.',
@@ -199,6 +208,12 @@ const ARGUMENT_ALIASES: Readonly<Record<string, Readonly<Record<string, readonly
     old_text: ['old_string', 'old_str', 'old', 'search', 'find', 'original'],
     new_text: ['new_string', 'new_str', 'new', 'replace', 'replacement', 'updated'],
   },
+  edit_lines: {
+    path: PATH_ALIASES,
+    start_line: ['line_start', 'from_line', 'start', 'line'],
+    end_line: ['line_end', 'to_line', 'end'],
+    new_text: ['new_string', 'new_str', 'text', 'content', 'replacement', 'lines'],
+  },
   list_files: { path: ['directory', 'dir', 'folder', 'dir_path'], pattern: ['glob'] },
   search_text: { query: ['pattern', 'text', 'search', 'keyword', 'regex'], path: ['file_path', 'directory', 'dir'] },
   bash: { command: ['cmd', 'script', 'code', 'shell'] },
@@ -214,6 +229,12 @@ const NATIVE_ARGUMENT_ALIASES: Readonly<Record<string, Readonly<Record<string, r
     file_path: ['path', 'filepath', 'file', 'filename', 'file_name'],
     old_string: ['old_text', 'old_str', 'old', 'search', 'find', 'original'],
     new_string: ['new_text', 'new_str', 'new', 'replace', 'replacement', 'updated'],
+  },
+  edit_lines: {
+    file_path: ['path', 'filepath', 'file', 'filename', 'file_name'],
+    start_line: ['line_start', 'from_line', 'start', 'line', 'offset'],
+    end_line: ['line_end', 'to_line', 'end'],
+    new_text: ['new_string', 'new_str', 'text', 'content', 'replacement', 'lines'],
   },
   glob: { pattern: ['glob'], path: ['directory', 'dir', 'folder', 'dir_path'] },
   grep: { pattern: ['query', 'text', 'search', 'keyword', 'regex'], path: ['file_path', 'directory', 'dir'] },
@@ -398,6 +419,8 @@ function firstSentence(text: string): string {
 
 export function buildCatalog(offered: readonly DshToolSchema[], options: CatalogOptions): WireTool[] {
   const exclude = new Set(options.exclude ?? [])
+  // The line-range edit replaces the literal one wherever it is mounted.
+  if (offered.some(tool => tool.name === 'edit_lines')) exclude.add('edit')
   const tools: WireTool[] = []
   for (const tool of offered) {
     const mapping = BUILTIN_MAPPINGS[tool.name]
@@ -467,6 +490,6 @@ export function coerceArguments(args: Args, schema: Record<string, unknown> | un
 }
 
 export function toolAccessDescription(tools: readonly WireTool[]): string {
-  const mutating = tools.some(tool => ['write', 'edit', 'bash'].includes(tool.dshName))
+  const mutating = tools.some(tool => ['write', 'edit', 'edit_lines', 'bash'].includes(tool.dshName))
   return mutating ? 'isolated tools, including the explicitly listed mutation tools' : 'read-only tools'
 }

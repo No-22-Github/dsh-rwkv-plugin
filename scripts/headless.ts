@@ -5,7 +5,7 @@
 //   node scripts/headless.ts --backend irwkv --base-url http://host:8000 \
 //     --model rwkv7-g1l-7.2b [--home DIR] [--max-steps 12] [--thinking full|off] \
 //     [--state ID] [--adapter ID] [--no-empty-think] [--installed] [--trace-dir DIR] [--session-id ID] [--model-id ID] [--extra-patch FILE]
-//     [--current-date [--time-zone ZONE]] "task text"   (or `-` / stdin)
+//     [--current-date [--time-zone ZONE]] [--line-edit] "task text"   (or `-` / stdin)
 //
 // --installed: the plugin was added to --home's headless profile with
 // `dsh plugin --profile headless add <dir>` (how a container runs it); only
@@ -47,6 +47,8 @@ const { values, positionals } = parseArgs({
     // YAML rows appended to the generated cordis.patch.yml (eval overlays: extra
     // plugins, web provider selection). Top-level list items, same indentation.
     'extra-patch': { type: 'string' },
+    // Mount the edit_lines tool (src/line-edit.ts); the RWKV catalog then shows it instead of edit.
+    'line-edit': { type: 'boolean', default: false },
     // System prompt ends with the current date (off: eval prompts match the training rows).
     'current-date': { type: 'boolean', default: false },
     // IANA zone for the date line and for DSH itself (TZ, so bash's `date` agrees).
@@ -121,6 +123,11 @@ writeFileSync(join(profileDir, 'cordis.patch.yml'), [
     .map(([key, value]) => `${indent}${key}: ${json(value)}`),
   `${indent}models:`,
   ...modelRows.map(row => `${indent}  ${row}`),
+  ...(values['line-edit']
+    ? ['- insert:', '    - id: rwkv-edit-lines', `      name: ${json(values.installed
+      ? 'dsh-rwkv-plugin/line-edit'
+      : pathToFileURL(join(pluginRoot, fromSource ? 'src/line-edit.ts' : 'lib/line-edit.js')).href)}`]
+    : []),
   '- id: session-title-llm',
   '  disabled: true',
   // The headless profile has no agent-presets service, so the plugin's preset
