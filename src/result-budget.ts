@@ -14,38 +14,78 @@
 // read is not spilled (the file is on disk already): its window is shortened
 // at a line boundary with read's own "Output capped ... Use offset=N" footer.
 //
+// Tokens are RWKV World tokens, estimated (see estimateTokens) so that the
+// estimate is rarely below the real count: better to show the model a little
+// less than to overflow it.
+//
 // No DSH runtime imports: the pipeline's teacher plugin mounts the same hook.
 
-/** Estimated tokens (DSH's density: 4 characters per token) a tool result may take inline. */
+/** Estimated RWKV tokens a tool result may take inline (as the model sees it, JSON-escaped). */
 export const RESULT_TOKEN_BUDGET = 3000
 
-const CHARS_PER_TOKEN = 4
-const BLOCK_OVERHEAD = 4
+/**
+ * Tokens per character, by character class, of the JSON-escaped text the
+ * model reads inside <tool_response>. Fitted on 3521 real tool results (eval
+ * runs 2026-11-11 and the mix-20261111 training pack, 551 mostly Chinese) and
+ * their 1000-character pieces against rwkv-tokenizer-go (rwkv_vocab_v20230424)
+ * so that it overestimates: median estimate/real about 1.26, below the real
+ * count for 0.3% of results and 0.8% of pieces, at worst about 0.78 (runs of
+ * short identifiers, escaped byte strings). Re-measure with
+ * scripts/calibrate-token-estimate.ts after a tokenizer or format change.
+ */
+export const TOKEN_WEIGHTS = {
+  letter: 0.4,
+  digit: 1,
+  space: 0.2,
+  punctuation: 0.6,
+  cjk: 1.25,
+  other: 1,
+} as const
+
+function charWeight(code: number): number {
+  if (code < 128) {
+    if ((code >= 65 && code <= 90) || (code >= 97 && code <= 122)) return TOKEN_WEIGHTS.letter
+    if (code >= 48 && code <= 57) return TOKEN_WEIGHTS.digit
+    if (code === 32 || code === 9 || code === 10 || code === 13) return TOKEN_WEIGHTS.space
+    return TOKEN_WEIGHTS.punctuation
+  }
+  if ((code >= 0x2e80 && code <= 0x9fff) || (code >= 0xf900 && code <= 0xfaff)
+    || (code >= 0xff00 && code <= 0xffef) || (code >= 0xac00 && code <= 0xd7af)) return TOKEN_WEIGHTS.cjk
+  return TOKEN_WEIGHTS.other
+}
+
+/** Weight of one character as it appears JSON-escaped ("\n" is a backslash and an n). */
+function escapedWeight(char: string): number {
+  const code = char.codePointAt(0) ?? 0
+  if (code >= 32 && code !== 34 && code !== 92) return charWeight(code)
+  let weight = 0
+  for (const part of JSON.stringify(char).slice(1, -1)) weight += charWeight(part.codePointAt(0) ?? 0)
+  return weight
+}
+
+/** Framing around a result (<tool_response>{"ok":true,"tool":...,"result":"...", "}</tool_response>). */
+const RESULT_OVERHEAD = 24
 const GAP = '\n\n[...]\n\n'
 
-/** DSH's estimate for one text block (dsh-token-meter estimateContent). */
-export function textTokens(text: string): number {
-  return Math.ceil(text.length / CHARS_PER_TOKEN) + BLOCK_OVERHEAD
+/** Estimated RWKV tokens of `text` inside a tool response (rarely below the real count). */
+export function estimateTokens(text: string): number {
+  let weight = 0
+  for (const char of text) weight += escapedWeight(char)
+  return Math.ceil(weight) + RESULT_OVERHEAD
 }
 
-/** Longest prefix/suffix length whose block estimate fits `tokens`. */
-function charsFor(tokens: number): number {
-  return Math.max(0, (tokens - BLOCK_OVERHEAD) * CHARS_PER_TOKEN)
-}
-
-function isHighSurrogate(code: number): boolean {
-  return code >= 0xd800 && code <= 0xdbff
-}
-
-function head(text: string, length: number): string {
-  const cut = Math.min(length, text.length)
-  return text.slice(0, cut > 0 && isHighSurrogate(text.charCodeAt(cut - 1)) ? cut - 1 : cut)
-}
-
-function tail(text: string, length: number): string {
-  let cut = text.length - Math.min(length, text.length)
-  if (cut > 0 && isHighSurrogate(text.charCodeAt(cut - 1))) cut += 1
-  return text.slice(cut)
+/** Longest prefix (or suffix) of `text` whose estimate stays within `tokens`; whole code points. */
+function fit(text: string, tokens: number, fromEnd: boolean): string {
+  const chars = Array.from(text)
+  let weight = 0
+  let count = 0
+  for (let i = 0; i < chars.length; i++) {
+    const next = weight + escapedWeight(chars[fromEnd ? chars.length - 1 - i : i]!)
+    if (next > tokens) break
+    weight = next
+    count++
+  }
+  return fromEnd ? chars.slice(chars.length - count).join('') : chars.slice(0, count).join('')
 }
 
 /** DSH spill-policy's notice (notice.ts formatSpillNotice), so DSH and its UI recognise it. */
@@ -60,11 +100,11 @@ export function spillNotice(omittedBytes: number, locator: string, retrievalHint
  */
 export function spillText(text: string, budget: number, notice: (omittedBytes: number) => string): string {
   const totalBytes = Buffer.byteLength(text, 'utf8')
-  const reserved = textTokens(GAP) + textTokens(`\n\n${notice(totalBytes)}`)
+  const reserved = estimateTokens(`${GAP}\n\n${notice(totalBytes)}`)
   const room = Math.max(0, budget - reserved)
-  const kept = head(text, charsFor(Math.ceil(room / 2)))
+  const kept = fit(text, Math.ceil(room / 2), false)
   const rest = text.slice(kept.length)
-  const end = tail(rest, charsFor(Math.floor(room / 2)))
+  const end = fit(rest, Math.floor(room / 2), true)
   const omitted = Buffer.byteLength(rest.slice(0, rest.length - end.length), 'utf8')
   return kept.length + end.length === 0 ? notice(omitted) : `${kept}${GAP}${end}\n\n${notice(omitted)}`
 }
@@ -77,7 +117,7 @@ const READ_LINE = /^(\d+): /
  * fits or is not in that shape. At least one line is kept.
  */
 export function capReadResult(text: string, budget: number): string | undefined {
-  if (textTokens(text) <= budget) return undefined
+  if (estimateTokens(text) <= budget) return undefined
   const open = text.indexOf('<content>\n')
   const close = text.lastIndexOf('\n</content>')
   if (open < 0 || close < open) return undefined
@@ -97,7 +137,7 @@ export function capReadResult(text: string, budget: number): string | undefined 
   let high = lines.length
   while (low < high) {
     const middle = Math.ceil((low + high) / 2)
-    if (textTokens(render(middle)) <= budget) low = middle
+    if (estimateTokens(render(middle)) <= budget) low = middle
     else high = middle - 1
   }
   return render(low)
@@ -146,9 +186,8 @@ export function applyResultBudget(ctx: unknown, options: ResultBudgetOptions): v
     if (provider === undefined || !options.providers().includes(provider)) return decision
     const content = decision.content ?? result.content
     if (!content.every(block => block.type === 'text')) return decision
-    const total = content.reduce((sum, block) => sum + textTokens(block.text ?? ''), 0)
-    if (total <= budget) return decision
     const text = content.map(block => block.text ?? '').join('')
+    if (estimateTokens(text) <= budget) return decision
     let bounded: string | undefined
     if (exec.name === 'read') {
       bounded = capReadResult(text, budget)

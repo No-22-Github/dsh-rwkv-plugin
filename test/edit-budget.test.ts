@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { applyLineEdit, editSummary, syntaxRejection } from '../src/core/line-edit.ts'
 import { introducedSyntaxError } from '../src/syntax-check.ts'
 import { buildCatalog, type DshToolSchema } from '../src/core/tools.ts'
-import { capReadResult, spillNotice, spillText, textTokens, RESULT_TOKEN_BUDGET } from '../src/result-budget.ts'
+import { capReadResult, estimateTokens, spillNotice, spillText, RESULT_TOKEN_BUDGET } from '../src/result-budget.ts'
 
 const FILE = 'a\nb\nc\nd\ne\n'
 
@@ -79,7 +79,7 @@ test('catalog: edit_lines replaces edit when offered', () => {
 test('result budget: spill keeps head and tail and names the file', () => {
   const text = `HEAD${'x'.repeat(40_000)}TAIL`
   const out = spillText(text, RESULT_TOKEN_BUDGET, bytes => spillNotice(bytes, '/spill/web_fetch.txt', 'Read it with read.'))
-  assert.ok(textTokens(out) <= RESULT_TOKEN_BUDGET, `${textTokens(out)} tokens`)
+  assert.ok(estimateTokens(out) <= RESULT_TOKEN_BUDGET, `${estimateTokens(out)} tokens`)
   assert.ok(out.startsWith('HEAD') && out.includes('TAIL\n\n(Omitted '))
   assert.match(out, /\n\n\[\.\.\.\]\n\n/)
   assert.match(out, /\(Omitted \d+ bytes\. Full formatted result stored at: \/spill\/web_fetch\.txt\. Read it with read\.\)$/)
@@ -93,10 +93,39 @@ test('result budget: read is shortened at a line with a continuation footer', ()
   const text = `<path>/w/big.txt</path>\n<type>file</type>\n<content>\n${lines.join('\n')}\n\n(End of file - total 2000 lines)\n</content>`
   const out = capReadResult(text, RESULT_TOKEN_BUDGET)
   assert.ok(out !== undefined)
-  assert.ok(textTokens(out) <= RESULT_TOKEN_BUDGET)
+  assert.ok(estimateTokens(out) <= RESULT_TOKEN_BUDGET)
   const shown = /Showing lines 1-(\d+)\. Use offset=(\d+) to continue\.\)\n<\/content>$/.exec(out)
   assert.ok(shown, out.slice(-200))
   assert.equal(Number(shown[2]), Number(shown[1]) + 1)
   assert.ok(out.includes(`\n${shown[1]}: y`) && !out.includes(`\n${Number(shown[1]) + 1}: y`))
   assert.equal(capReadResult(text.slice(0, 500), RESULT_TOKEN_BUDGET), undefined, 'short results untouched')
+})
+
+// Real RWKV World token counts (rwkv-tokenizer-go, rwkv_vocab_v20230424) of each
+// text inside <tool_response>{"ok":true,"tool":"web_fetch","result":...}</tool_response>.
+const MEASURED: Record<string, { text: string; tokens: number }> = {
+  "english": {
+    "text": "Fetched https://docs.python.org/3/library/csv.html (HTTP 200)\n\nThe csv module implements classes to read and write tabular data in CSV format. It allows programmers to say, \"write this data in the format preferred by Excel,\" without knowing the precise details of the CSV format used by Excel.\n\n| Parameter | Default |\n|---|---|\n| delimiter | ',' |\n| quotechar | '\"' |\n",
+    "tokens": 126
+  },
+  "chinese": {
+    "text": "根据国家统计局发布的数据，2025年全国居民人均可支配收入为43377元，比上年名义增长5.3%。分城乡看，城镇居民人均可支配收入56502元，农村居民人均可支配收入23119元。",
+    "tokens": 106
+  },
+  "code": {
+    "text": "<path>/app/src/tool.py</path>\n<type>file</type>\n<content>\n1: import tempfile\n2: \n3: def generate(render):\n4:     folder = tempfile.mkdtemp()\n5:     return render(folder)\n\n(End of file - total 5 lines)\n</content>",
+    "tokens": 107
+  },
+  "digits": {
+    "text": "SKU00003,WH-C,530,retired\nSKU00004,WH-B,367,retired\n0x7f3a9c2e 0x7f3a9c30 1734567890123 3.14159265358979\n",
+    "tokens": 95
+  }
+}
+
+test('result budget: the estimate does not fall below real RWKV token counts', () => {
+  for (const [name, { text, tokens }] of Object.entries(MEASURED)) {
+    const estimate = estimateTokens(text)
+    assert.ok(estimate >= tokens, `${name}: estimate ${estimate} < real ${tokens}`)
+    assert.ok(estimate <= tokens * 2, `${name}: estimate ${estimate} more than twice real ${tokens}`)
+  }
 })
