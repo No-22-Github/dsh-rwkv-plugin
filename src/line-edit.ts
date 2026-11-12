@@ -12,11 +12,14 @@
 // and file. edit_lines reports its own result too, so a further edit_lines
 // without re-reading is allowed (its result shows the new numbering). A
 // change made any other way (bash, another process) makes the next edit_lines
-// fail until the file is read again; a file never read is refused.
+// fail until the file is read again; a file never read is refused. As in
+// SWE-agent, an edit that breaks a file that parsed before (src/syntax-check.ts)
+// is not written: the result shows it next to the original lines.
 
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { applyLineEdit } from './core/line-edit.ts'
+import { applyLineEdit, editSummary, syntaxRejection } from './core/line-edit.ts'
+import { introducedSyntaxError } from './syntax-check.ts'
 
 export const name = 'rwkv-edit-lines'
 export const inject = ['tools', 'fs']
@@ -119,15 +122,16 @@ export function apply(ctx: Context): void {
       if (typeof guard === 'string') throw new Error(guard)
       try {
         const text = await host.fs.readText(target, exec.signal)
-        const edited = applyLineEdit(text, target.displayPath, {
-          startLine: args.start_line, endLine: args.end_line, newText: args.new_text,
-        })
+        const edit = { startLine: args.start_line, endLine: args.end_line, newText: args.new_text }
+        const edited = applyLineEdit(text, target.displayPath, edit)
         if (typeof edited === 'string') throw new Error(edited)
+        const broken = await introducedSyntaxError(text, edited.content, target.displayPath)
+        if (broken !== undefined) throw new Error(syntaxRejection(target.displayPath, edit, edited, broken))
         // Guarded by the version the model saw, not the text just read: a file
         // changed since then fails here instead of being edited by stale numbers.
         const outcome = await host.fs.writeText(target, edited.content, guard.version === undefined ? undefined : guard, exec.signal)
         host.emit('fs/observed', target, { kind: 'present', version: outcome.version }, exec)
-        return { path: host.fs.processPath(target), summary: edited.summary }
+        return { path: host.fs.processPath(target), summary: editSummary(target.displayPath, edit, edited) }
       } catch (error: unknown) {
         throw remediate(error)
       }

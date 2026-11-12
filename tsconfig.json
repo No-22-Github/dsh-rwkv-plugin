@@ -16,5 +16,5 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src/core", "src/backend", "src/result-budget.ts", "src/line-edit.ts", "scripts/*.ts", "test"]
+  "include": ["src/core", "src/backend", "src/result-budget.ts", "src/line-edit.ts", "src/syntax-check.ts", "scripts/*.ts", "test"]
 }

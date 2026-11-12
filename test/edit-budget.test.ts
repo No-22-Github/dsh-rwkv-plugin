@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { applyLineEdit } from '../src/core/line-edit.ts'
+import { applyLineEdit, editSummary, syntaxRejection } from '../src/core/line-edit.ts'
+import { introducedSyntaxError } from '../src/syntax-check.ts'
 import { buildCatalog, type DshToolSchema } from '../src/core/tools.ts'
 import { capReadResult, spillNotice, spillText, textTokens, RESULT_TOKEN_BUDGET } from '../src/result-budget.ts'
 
@@ -24,13 +25,34 @@ test('edit_lines: replace, delete, insert, append', () => {
   assert.equal(ok('', 1, 0, 'new').content, 'new\n')
 })
 
-test('edit_lines: summary shows new numbers and the shift', () => {
-  const { summary } = ok(FILE, 2, 2, 'b1\nb2\nb3')
-  assert.match(summary, /^The file f\.txt has been updated\. Replaced lines 2-2 with 3 lines\./)
-  assert.match(summary, /moved down by 2: old line 3 is now line 5\./)
-  assert.match(summary, /\nLines 1-6 now:\n1: a\n2: b1\n3: b2\n4: b3\n5: c\n6: d$/)
-  assert.doesNotMatch(ok(FILE, 5, 5, 'E').summary, /moved/, 'no shift note when nothing follows')
-  assert.match(ok(FILE, 2, 4, '').summary, /Deleted lines 2-4\. Lines after it moved up by 3: old line 5 is now line 2\./)
+test('edit_lines: summary shows new numbers, the shift and a window', () => {
+  const edit = { startLine: 2, endLine: 2, newText: 'b1\nb2\nb3' }
+  const summary = editSummary('f.txt', edit, ok(FILE, 2, 2, edit.newText))
+  assert.match(summary, /^File updated\. Replaced lines 2-2 with 3 lines\. Lines after it moved down by 2: old line 3 is now line 5\. Review the change/)
+  assert.match(summary, /\n\[File: f\.txt \(7 lines total\)\]\n1: a\n2: b1\n3: b2\n4: b3\n5: c\n6: d\n7: e$/)
+  const last = { startLine: 5, endLine: 5, newText: 'E' }
+  assert.doesNotMatch(editSummary('f.txt', last, ok(FILE, 5, 5, 'E')), /moved/, 'no shift note when nothing follows')
+  assert.match(editSummary('f.txt', last, ok(FILE, 5, 5, 'E')), /\(1 more lines above\)\n2: b/)
+  const del = { startLine: 2, endLine: 4, newText: '' }
+  assert.match(editSummary('f.txt', del, ok(FILE, 2, 4, '')), /Deleted lines 2-4\. Lines after it moved up by 3: old line 5 is now line 2\./)
+})
+
+test('edit_lines: a syntax-breaking edit shows both versions', () => {
+  const edit = { startLine: 2, endLine: 2, newText: 'B' }
+  const message = syntaxRejection('f.txt', edit, ok(FILE, 2, 2, 'B'), 'SyntaxError: x (line 2)')
+  assert.match(message, /^Your edit was NOT applied: it introduces a syntax error\.\nERROR: SyntaxError: x \(line 2\)/)
+  assert.match(message, /would have looked:\n\[File: f\.txt \(5 lines total\)\]\n1: a\n2: B\n/)
+  assert.match(message, /original code before your edit:\n\[File: f\.txt \(5 lines total\)\]\n1: a\n2: b\n/)
+})
+
+test('syntax check: only errors the edit introduces', async () => {
+  assert.equal(await introducedSyntaxError('x = 1\n', 'x = 1\n', 'a.py'), undefined)
+  assert.match(String(await introducedSyntaxError('def f():\n    return 1\n', 'def f():\nreturn 1\n', 'a.py')), /IndentationError: .*\(line 2\)/)
+  assert.equal(await introducedSyntaxError('def f(:\n', 'def g(:\n', 'a.py'), undefined, 'already broken: not blocked')
+  assert.match(String(await introducedSyntaxError('let a = 1\n', 'let a = (1\n', 'a.js')), /SyntaxError/)
+  assert.match(String(await introducedSyntaxError('{"a":1}', '{"a":1,}', 'a.json')), /^JSON: /)
+  assert.match(String(await introducedSyntaxError('if true; then :; fi\n', 'if true; then :;\n', 'a.sh')), /syntax error|unexpected/)
+  assert.equal(await introducedSyntaxError('a', 'b(', 'notes.txt'), undefined, 'unknown extension: unchecked')
 })
 
 test('edit_lines: refusals', () => {
