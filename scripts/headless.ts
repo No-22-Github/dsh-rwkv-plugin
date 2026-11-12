@@ -5,7 +5,11 @@
 //   node scripts/headless.ts --backend irwkv --base-url http://host:8000 \
 //     --model rwkv7-g1l-7.2b [--home DIR] [--max-steps 12] [--thinking full|off] \
 //     [--state ID] [--adapter ID] [--no-empty-think] [--installed] [--trace-dir DIR] [--session-id ID] [--model-id ID] [--extra-patch FILE]
-//     [--current-date [--time-zone ZONE]] [--line-edit] "task text"   (or `-` / stdin)
+//     [--current-date [--time-zone ZONE]] [--native-edit] "task text"   (or `-` / stdin)
+//
+// Edit tool: the line-range `edit_lines` is mounted by default (src/line-edit.ts),
+// and the RWKV catalog then hides the literal `edit`. --native-edit (or
+// --no-line-edit) leaves it out for A/B runs with DSH's own edit.
 //
 // --installed: the plugin was added to --home's headless profile with
 // `dsh plugin --profile headless add <dir>` (how a container runs it); only
@@ -48,7 +52,9 @@ const { values, positionals } = parseArgs({
     // plugins, web provider selection). Top-level list items, same indentation.
     'extra-patch': { type: 'string' },
     // Mount the edit_lines tool (src/line-edit.ts); the RWKV catalog then shows it instead of edit.
-    'line-edit': { type: 'boolean', default: false },
+    'line-edit': { type: 'boolean', default: true },
+    // Native edit instead of edit_lines: an explicit opt-out for A/B runs.
+    'native-edit': { type: 'boolean', default: false },
     // System prompt ends with the current date (off: eval prompts match the training rows).
     'current-date': { type: 'boolean', default: false },
     // IANA zone for the date line and for DSH itself (TZ, so bash's `date` agrees).
@@ -123,7 +129,7 @@ writeFileSync(join(profileDir, 'cordis.patch.yml'), [
     .map(([key, value]) => `${indent}${key}: ${json(value)}`),
   `${indent}models:`,
   ...modelRows.map(row => `${indent}  ${row}`),
-  ...(values['line-edit']
+  ...(values['line-edit'] && !values['native-edit']
     ? ['- insert:', '    - id: rwkv-edit-lines', `      name: ${json(values.installed
       ? 'dsh-rwkv-plugin/line-edit'
       : pathToFileURL(join(pluginRoot, fromSource ? 'src/line-edit.ts' : 'lib/line-edit.js')).href)}`]
