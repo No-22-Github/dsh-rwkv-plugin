@@ -118,3 +118,79 @@ export function syntaxRejection(displayPath: string, edit: LineEdit, result: Lin
     'Fix start_line/end_line or new_text (check the indentation) and try again. Do not repeat the same edit.',
   ].join('\n')
 }
+
+// --- Which lines the model has seen ---------------------------------------
+//
+// Line numbers are only safe for lines the model was shown: a read cut at
+// line 150 (src/result-budget.ts) says nothing about line 300, and an edit
+// there is a guess. The tool keeps, per session and file version, the lines
+// read showed (and the lines its own results showed), and refuses an edit
+// that touches others; the refusal says which offset to read.
+
+/** Lines (1-based) of the current file version the model has been shown; 'all' when unknown or whole. */
+export type SeenLines = ReadonlySet<number> | 'all'
+
+/** Add lines first..last (inclusive) to `seen`. */
+export function addSeen(seen: SeenLines, first: number, last: number): SeenLines {
+  if (seen === 'all') return seen
+  const next = new Set(seen)
+  for (let n = Math.max(1, first); n <= last; n++) next.add(n)
+  return next
+}
+
+/**
+ * Lines the edit needs the model to have seen that it has not: the replaced
+ * lines, or for an insert a neighbour (the line before or after the gap).
+ * `total` is the file's current line count.
+ */
+export function unseenLines(seen: SeenLines, edit: LineEdit, total: number): number[] {
+  if (seen === 'all') return []
+  const { startLine: start, endLine: end } = edit
+  if (end >= start) {
+    const missing: number[] = []
+    for (let n = start; n <= end; n++) if (!seen.has(n)) missing.push(n)
+    return missing
+  }
+  const neighbours = [start - 1, start].filter(n => n >= 1 && n <= total)
+  return neighbours.length === 0 || neighbours.some(n => seen.has(n)) ? [] : neighbours
+}
+
+/** The lines seen after a successful edit: old ones renumbered, plus the new lines and the result window. */
+export function seenAfterEdit(seen: SeenLines, edit: LineEdit, result: LineEditResult): SeenLines {
+  if (seen === 'all') return seen
+  const { startLine: start, endLine: end } = edit
+  const delta = result.added - result.removed
+  const next = new Set<number>()
+  for (const n of seen) {
+    if (n < start) next.add(n)
+    else if (n > end) next.add(n + delta)
+  }
+  const total = result.after.length
+  const from = Math.max(1, start - CONTEXT)
+  const to = Math.min(total, start + Math.max(result.added, 1) - 1 + CONTEXT)
+  for (let n = from; n <= to; n++) next.add(n)
+  return next
+}
+
+/** "1-150, 200-230" */
+export function formatRanges(lines: Iterable<number>): string {
+  const sorted = [...lines].sort((a, b) => a - b)
+  const parts: string[] = []
+  for (let i = 0; i < sorted.length;) {
+    let j = i
+    while (j + 1 < sorted.length && sorted[j + 1] === sorted[j]! + 1) j++
+    parts.push(sorted[i] === sorted[j] ? `${sorted[i]}` : `${sorted[i]}-${sorted[j]}`)
+    i = j + 1
+  }
+  return parts.join(', ')
+}
+
+/** Model-facing refusal of an edit that touches lines it has not seen. */
+export function unseenRejection(displayPath: string, missing: readonly number[], seen: ReadonlySet<number>, total: number): string {
+  const offset = Math.max(1, missing[0]! - CONTEXT)
+  const shown = seen.size === 0 ? 'you have seen none of it' : `you have seen lines ${formatRanges(seen)}`
+  const which = missing.length === 1 ? `line ${missing[0]} of ${displayPath} has` : `lines ${formatRanges(missing)} of ${displayPath} have`
+  return `Your edit was NOT applied: ${which} not been shown to you `
+    + `(the file has ${total} lines; ${shown}). `
+    + `Read them first (read with offset=${offset}), then edit by the numbers you see.`
+}

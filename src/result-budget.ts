@@ -110,6 +110,29 @@ export function spillText(text: string, budget: number, notice: (omittedBytes: n
 }
 
 const READ_LINE = /^(\d+): /
+const READ_TOTAL = /^\n\n\((?:End of file - total (\d+) lines|Showing lines \d+-\d+ of (\d+)\.)/
+
+/** The file and the line numbers a DSH read result shows (as the model gets it), if it is one. */
+export function readWindow(text: string): { first: number; last: number } | undefined {
+  const open = text.indexOf('<content>\n')
+  const close = text.lastIndexOf('\n</content>')
+  if (open < 0 || close < open) return undefined
+  const body = text.slice(open + '<content>\n'.length, close)
+  const footerAt = body.lastIndexOf('\n\n(')
+  const lines = footerAt < 0 ? [] : body.slice(0, footerAt).split('\n')
+  const first = READ_LINE.exec(lines[0] ?? '')?.[1]
+  const last = READ_LINE.exec(lines.at(-1) ?? '')?.[1]
+  // Every shown line starts "N: ", so the last "\n\n(" is the footer; none shown
+  // (an empty file, an offset past the end) is the empty window 1-0.
+  return first === undefined || last === undefined ? { first: 1, last: 0 } : { first: Number(first), last: Number(last) }
+}
+
+/**
+ * Event carrying the lines a read showed the model, after this budget has cut
+ * it: the line-edit plugin (src/line-edit.ts, a separate DSH plugin) keeps
+ * which lines each session has seen and refuses edits outside them.
+ */
+export const READ_SHOWN_EVENT = 'rwkv/read-shown'
 
 /**
  * A DSH read result (`<content>` with "N: text" lines and a footer) shortened
@@ -128,9 +151,14 @@ export function capReadResult(text: string, budget: number): string | undefined 
   const lines = body.slice(0, footerAt).split('\n')
   const first = READ_LINE.exec(lines[0] ?? '')
   if (!first) return undefined
+  // DSH's own footer knows the file's length unless read itself hit its byte cap.
+  const total = READ_TOTAL.exec(body.slice(footerAt))?.[1] ?? READ_TOTAL.exec(body.slice(footerAt))?.[2]
   const render = (count: number) => {
     const last = Number(READ_LINE.exec(lines[count - 1] ?? '')?.[1] ?? first[1])
-    const footer = `(Output capped. Showing lines ${first[1]}-${last}. Use offset=${last + 1} to continue.)`
+    // With the total, DSH's line-limit wording; without it, its byte-cap wording.
+    const footer = total === undefined
+      ? `(Output capped. Showing lines ${first[1]}-${last}. Use offset=${last + 1} to continue.)`
+      : `(Showing lines ${first[1]}-${last} of ${total}. Use offset=${last + 1} to continue.)`
     return `${text.slice(0, start)}${lines.slice(0, count).join('\n')}\n\n${footer}${text.slice(close)}`
   }
   let low = 1
@@ -177,6 +205,7 @@ export function applyResultBudget(ctx: unknown, options: ResultBudgetOptions): v
   const budget = options.budget ?? RESULT_TOKEN_BUDGET
   const context = ctx as {
     on(event: string, listener: (exec: ExecLike, result: { content: readonly TextBlock[] }, next: () => Promise<Decision>) => Promise<Decision>): unknown
+    emit(event: string, ...args: unknown[]): void
     get(name: string): unknown
   }
   context.on('tools/post-execute', async (exec, result, next) => {
@@ -187,11 +216,15 @@ export function applyResultBudget(ctx: unknown, options: ResultBudgetOptions): v
     const content = decision.content ?? result.content
     if (!content.every(block => block.type === 'text')) return decision
     const text = content.map(block => block.text ?? '').join('')
+    if (exec.name === 'read') {
+      const bounded = estimateTokens(text) <= budget ? undefined : capReadResult(text, budget)
+      const window = readWindow(bounded ?? text)
+      if (window !== undefined) context.emit(READ_SHOWN_EVENT, exec, window)
+      return bounded === undefined ? decision : { ...decision, kind: 'accept', content: [{ type: 'text', text: bounded }] }
+    }
     if (estimateTokens(text) <= budget) return decision
     let bounded: string | undefined
-    if (exec.name === 'read') {
-      bounded = capReadResult(text, budget)
-    } else {
+    {
       const store = context.get('spillStore') as SpillStoreLike | undefined
       const owner = exec.agent?.session?.header?.id
       if (store === undefined || owner === undefined) {

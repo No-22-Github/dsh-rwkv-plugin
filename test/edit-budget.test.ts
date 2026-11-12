@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { applyLineEdit, editSummary, syntaxRejection } from '../src/core/line-edit.ts'
+import { addSeen, applyLineEdit, editSummary, formatRanges, seenAfterEdit, syntaxRejection, unseenLines, unseenRejection } from '../src/core/line-edit.ts'
 import { introducedSyntaxError } from '../src/syntax-check.ts'
 import { buildCatalog, type DshToolSchema } from '../src/core/tools.ts'
-import { capReadResult, estimateTokens, spillNotice, spillText, RESULT_TOKEN_BUDGET } from '../src/result-budget.ts'
+import { applyResultBudget, capReadResult, estimateTokens, readWindow, spillNotice, spillText, READ_SHOWN_EVENT, RESULT_TOKEN_BUDGET } from '../src/result-budget.ts'
 
 const FILE = 'a\nb\nc\nd\ne\n'
 
@@ -94,11 +94,69 @@ test('result budget: read is shortened at a line with a continuation footer', ()
   const out = capReadResult(text, RESULT_TOKEN_BUDGET)
   assert.ok(out !== undefined)
   assert.ok(estimateTokens(out) <= RESULT_TOKEN_BUDGET)
-  const shown = /Showing lines 1-(\d+)\. Use offset=(\d+) to continue\.\)\n<\/content>$/.exec(out)
+  const shown = /Showing lines 1-(\d+) of 2000\. Use offset=(\d+) to continue\.\)\n<\/content>$/.exec(out)
   assert.ok(shown, out.slice(-200))
   assert.equal(Number(shown[2]), Number(shown[1]) + 1)
   assert.ok(out.includes(`\n${shown[1]}: y`) && !out.includes(`\n${Number(shown[1]) + 1}: y`))
   assert.equal(capReadResult(text.slice(0, 500), RESULT_TOKEN_BUDGET), undefined, 'short results untouched')
+})
+
+test('result budget: read footer keeps the total when DSH gave one', () => {
+  const lines = Array.from({ length: 900 }, (_, i) => `${i + 1}: ${'z'.repeat(40)}`)
+  const wrap = (footer: string) => `<path>/w/f.txt</path>\n<type>file</type>\n<content>\n${lines.join('\n')}\n\n${footer}\n</content>`
+  // read's own line-limit footer (offset/limit given): the total survives the cut.
+  assert.match(capReadResult(wrap('(Showing lines 1-900 of 4000. Use offset=901 to continue.)'), RESULT_TOKEN_BUDGET)!, /\(Showing lines 1-\d+ of 4000\. Use offset=\d+ to continue\.\)\n<\/content>$/)
+  // read's byte cap: no total known, DSH's byte-cap wording.
+  assert.match(capReadResult(wrap('(Output capped. Showing lines 1-900. Use offset=901 to continue.)'), RESULT_TOKEN_BUDGET)!, /\(Output capped\. Showing lines 1-\d+\. Use offset=\d+ to continue\.\)\n<\/content>$/)
+})
+
+test('result budget: readWindow reads the shown line numbers', () => {
+  assert.deepEqual(readWindow('<path>/w/a</path>\n<type>file</type>\n<content>\n7: x\n8: \n9: (y\n\n(Showing lines 7-9 of 20. Use offset=10 to continue.)\n</content>'), { first: 7, last: 9 })
+  assert.deepEqual(readWindow('<path>/w/a</path>\n<type>file</type>\n<content>\n(End of file - total 0 lines)\n</content>'), { first: 1, last: 0 })
+  assert.equal(readWindow('ENOENT: no such file'), undefined)
+})
+
+test('result budget: a read reports the window the model got', async () => {
+  let listener: ((exec: unknown, result: unknown, next: () => Promise<unknown>) => Promise<unknown>) | undefined
+  const events: unknown[][] = []
+  applyResultBudget({
+    on: (_event: string, l: typeof listener) => { listener = l },
+    emit: (...args: unknown[]) => { events.push(args) },
+    get: () => undefined,
+  }, { providers: () => ['rwkv'] })
+  const exec = { name: 'read', callId: 'c1', agent: { options: { provider: 'rwkv' } } }
+  const lines = Array.from({ length: 2000 }, (_, i) => `${i + 1}: ${'y'.repeat(40)}`)
+  const text = `<path>/w/big.txt</path>\n<type>file</type>\n<content>\n${lines.join('\n')}\n\n(End of file - total 2000 lines)\n</content>`
+  const decision = await listener!(exec, { content: [{ type: 'text', text }] }, async () => ({ kind: 'accept' })) as { content: { text: string }[] }
+  const last = Number(/Showing lines 1-(\d+) of 2000/.exec(decision.content[0]!.text)?.[1])
+  assert.deepEqual(events, [[READ_SHOWN_EVENT, exec, { first: 1, last }]])
+  // Short reads are reported too (uncut).
+  events.length = 0
+  await listener!(exec, { content: [{ type: 'text', text: '<path>/w/s</path>\n<type>file</type>\n<content>\n1: a\n2: b\n\n(End of file - total 2 lines)\n</content>' }] }, async () => ({ kind: 'accept' }))
+  assert.deepEqual(events, [[READ_SHOWN_EVENT, exec, { first: 1, last: 2 }]])
+})
+
+test('edit_lines: lines seen, refusals and renumbering', () => {
+  const edit = (startLine: number, endLine: number) => ({ startLine, endLine, newText: 'x' })
+  const seen = addSeen(new Set(), 1, 150)
+  assert.deepEqual(unseenLines(seen, edit(140, 150), 400), [])
+  assert.deepEqual(unseenLines(seen, edit(149, 152), 400), [151, 152])
+  assert.deepEqual(unseenLines(seen, edit(151, 150), 400), [], 'insert right after the last seen line')
+  assert.deepEqual(unseenLines(seen, edit(300, 299), 400), [299, 300])
+  assert.deepEqual(unseenLines('all', edit(300, 310), 400), [])
+  assert.deepEqual(unseenLines(new Set(), edit(1, 0), 0), [], 'empty file')
+  const message = unseenRejection('src/a.py', [280, 281, 282], addSeen(addSeen(new Set(), 1, 150), 200, 230) as Set<number>, 412)
+  assert.match(message, /NOT applied: lines 280-282 of src\/a\.py have not been shown/)
+  assert.match(message, /\(the file has 412 lines; you have seen lines 1-150, 200-230\)/)
+  assert.match(unseenRejection('a.py', [300], new Set(), 500), /NOT applied: line 300 of a\.py has not been shown to you \(the file has 500 lines; you have seen none of it\)/)
+  assert.match(message, /read with offset=277/)
+  // Replace lines 10-11 of a 200-line file with 4 lines: later lines move down 2.
+  const before = Array.from({ length: 200 }, (_, i) => `l${i + 1}`)
+  const result = ok(before.join('\n') + '\n', 10, 11, 'a\nb\nc\nd')
+  const after = seenAfterEdit(addSeen(new Set(), 1, 20), { startLine: 10, endLine: 11, newText: 'a\nb\nc\nd' }, result) as Set<number>
+  assert.equal(formatRanges(after), '1-22')
+  const far = seenAfterEdit(addSeen(addSeen(new Set(), 1, 20), 100, 110), { startLine: 10, endLine: 11, newText: 'a\nb\nc\nd' }, result) as Set<number>
+  assert.equal(formatRanges(far), '1-22, 102-112')
 })
 
 // Real RWKV World token counts (rwkv-tokenizer-go, rwkv_vocab_v20230424) of each
