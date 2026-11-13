@@ -18,9 +18,11 @@ import { LightningClient } from './backend/lightning.ts'
 import { decideStep, type GenerationTrace, type HarnessConfig } from './core/agent.ts'
 import { dshSystemSections } from './core/dsh-prompt.ts'
 import { currentDateLine } from './core/prompt.ts'
+import type { RelayOptions } from './core/relay.ts'
 import { buildCatalog, type ToolMode, type ToolNames, type ToolOverride } from './core/tools.ts'
 import { historyFromMessages, systemText } from './history.ts'
-import { argumentChanges, clipArguments, memoryTraces, type ArgumentChange, type TraceLocation } from './traces.ts'
+import { RelayCardStore } from './relay-store.ts'
+import { argumentChanges, clipArguments, memoryTraces, TraceLocation, type ArgumentChange } from './traces.ts'
 import { repairToolPaths, runtimeCwd } from './paths.ts'
 
 /** Pending appends per trace file, so records keep their order. */
@@ -72,6 +74,8 @@ export interface AdapterSettings {
   readonly loopGuard: boolean
   /** Where to write per-session JSONL traces (absent: memory only). */
   readonly traces?: TraceLocation
+  /** Turn-relay context; absent: the full history is rendered. */
+  readonly relay?: RelayOptions
   readonly log?: (message: string) => void
 }
 
@@ -88,6 +92,8 @@ export class RwkvAdapter extends LlmAdapter {
   /** Live settings: read per call, so edits saved from the settings page apply to the next request. */
   private readonly current: () => AdapterSettings
   private readonly clients = new Map<string, Generator>()
+  /** Relay handoff cards of resumed sessions (one DSH process per user turn). */
+  private readonly relayCards = new RelayCardStore()
 
   constructor(settings: () => AdapterSettings) {
     super()
@@ -185,6 +191,7 @@ export class RwkvAdapter extends LlmAdapter {
         answerMaxTokens: Math.min(this.settings.harness.answerMaxTokens, options.maxTokens),
       },
       ...this.settings.currentDate ? { dateLine: currentDateLine(Date.now(), this.settings.timeZone) } : {},
+      ...this.settings.relay === undefined ? {} : { relay: this.settings.relay },
     }
     const names = this.settings.toolNames
     const catalog = buildCatalog(options.tools ?? [], { mode: this.settings.toolMode, names, exclude: this.settings.excludeTools, overrides: this.settings.toolOverrides })
@@ -237,6 +244,8 @@ export class RwkvAdapter extends LlmAdapter {
 
     let settled = false
     const work = (async () => {
+      // Relay cards live next to the trace file even when recording is off.
+      const relayLocation = location ?? new TraceLocation()
       return decideStep({
         history,
         tools: catalog,
@@ -245,6 +254,12 @@ export class RwkvAdapter extends LlmAdapter {
         ...systemHead ? { systemHead } : {},
         ...options.signal ? { signal: options.signal } : {},
         ...sessionId ? { sessionId } : {},
+        ...this.settings.relay === undefined || sessionId === undefined ? {} : {
+          relay: {
+            cards: this.relayCards.load(relayLocation, sessionId),
+            save: card => this.relayCards.append(relayLocation, sessionId, card),
+          },
+        },
         hooks: {
           ...harness.thinking === 'full' ? { reasoning: reasoningDelta } : {},
           attempt: label => {

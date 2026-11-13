@@ -15,6 +15,9 @@ export function dshHome(): string {
 /** File name of the RWKV trace inside a DSH session directory. */
 export const SESSION_TRACE_FILE = 'rwkv-trace.jsonl'
 
+/** File name of the relay handoff cards inside a DSH session directory. */
+export const RELAY_CARD_FILE = 'rwkv-relay.jsonl'
+
 const SESSION_ID = /^[\w.-]+$/
 const validSession = (session: string) => SESSION_ID.test(session) && !session.includes('..')
 
@@ -63,6 +66,14 @@ export class TraceLocation {
     if (this.customDir !== undefined) return join(this.customDir, `${session}.jsonl`)
     const dir = findSessionDir(this.sessionsRoot, session)
     return dir === undefined ? undefined : join(dir, SESSION_TRACE_FILE)
+  }
+
+  /** The session's relay-card file: same place as the trace, different name. */
+  relayPath(session: string): string | undefined {
+    if (!validSession(session)) return undefined
+    if (this.customDir !== undefined) return join(this.customDir, `${session}.relay.jsonl`)
+    const dir = findSessionDir(this.sessionsRoot, session)
+    return dir === undefined ? undefined : join(dir, RELAY_CARD_FILE)
   }
 
   /** Every existing trace file. */

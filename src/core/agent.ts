@@ -33,6 +33,17 @@ import {
   type TurnState,
 } from './policy.ts'
 import { reconstructOutput, recordToolCall, renderPrompt, systemPrompt, toolResponse, type Entry, type ThinkingMode } from './prompt.ts'
+import {
+  cleanCardText,
+  fallbackCard,
+  makeCard,
+  planRelay,
+  recapEntries,
+  relayEntries,
+  type RelayCard,
+  type RelayNeed,
+  type RelayOptions,
+} from './relay.ts'
 import { coerceArguments, normalizeArguments, repairNativeValues, resolveTool, type Args, type WireTool } from './tools.ts'
 
 /** Pass-through answer for output the harness does not fix (guards off). */
@@ -72,6 +83,11 @@ export interface HarnessConfig {
    * result stay (a budget and the environment's answer, not a fix).
    */
   readonly guards: boolean
+  /**
+   * Turn-relay context: finished legs are replaced by model-written handoff
+   * cards. Absent (the default): the full history is rendered as before.
+   */
+  readonly relay?: RelayOptions
 }
 
 export const DEFAULT_HARNESS: HarnessConfig = {
@@ -109,7 +125,7 @@ export type Decision =
   | { readonly type: 'final'; readonly text: string; readonly via: FinalVia }
 
 export interface GenerationTrace {
-  readonly stage: 'decision' | 'answer'
+  readonly stage: 'decision' | 'answer' | 'card'
   readonly prompt: string
   readonly output: string
   readonly finish: string
@@ -139,6 +155,11 @@ export interface StepInput {
   readonly hooks?: StepHooks
   /** Head of the system block in place of the trained opener (DSH's filtered system prompt). */
   readonly systemHead?: string
+  /** Relay mode: cards of earlier legs, and where a new one is kept. */
+  readonly relay?: {
+    readonly cards: readonly RelayCard[]
+    readonly save?: (card: RelayCard) => void
+  }
 }
 
 export interface StepResult {
@@ -206,19 +227,15 @@ function describe(action: Action): string {
 
 export async function decideStep(input: StepInput): Promise<StepResult> {
   const { config, tools, hooks } = input
-  const state = analyzeTurn(input.history)
   const reminder = config.thinking === 'full' ? POST_TOOL_REMINDER_THINK : POST_TOOL_REMINDER
-  const base: Entry[] = [
-    { role: 'system', text: systemPrompt(tools, config.thinking, config.taskContract, input.systemHead, config.dateLine) },
-    ...transcriptEntries(input.history, { tools, postToolReminder: reminder }),
-  ]
+  const system = systemPrompt(tools, config.thinking, config.taskContract, input.systemHead, config.dateLine)
   let promptTokens = 0
   let completionTokens = 0
   let generations = 0
 
   const generate = async (
     entries: readonly Entry[],
-    stage: 'decision' | 'answer',
+    stage: 'decision' | 'answer' | 'card',
     label: string,
     prefill?: string,
   ): Promise<{ output: string; result: GenerateResult; prompt: string }> => {
@@ -231,7 +248,9 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
     const splitter = config.thinking === 'full' && hooks?.reasoning ? new ThinkSplitter(hooks.reasoning) : undefined
     const request: GenerateRequest = {
       prompt,
-      maxTokens: stage === 'answer' ? config.answerMaxTokens : config.decisionMaxTokens,
+      maxTokens: stage === 'answer' ? config.answerMaxTokens
+        : stage === 'card' ? config.relay?.cardMaxTokens ?? 768
+        : config.decisionMaxTokens,
       stops: [...DECISION_STOPS],
       sampling: config.sampling,
       ...input.signal ? { signal: input.signal } : {},
@@ -278,7 +297,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
   }
 
   const traced = (
-    stage: 'decision' | 'answer', prompt: string, output: string, result: GenerateResult, action: Action,
+    stage: 'decision' | 'answer' | 'card', prompt: string, output: string, result: GenerateResult, action: Action,
     outcome: string, gateRepairs: readonly string[] = [],
   ) => {
     const parsed = action.type === 'tool' || action.type === 'exit' ? action.repairs : []
@@ -291,6 +310,52 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
   const parseOptions = { strict: !config.outputRepairs }
 
   const done = (decision: Decision): StepResult => ({ decision, promptTokens, completionTokens, generations })
+
+  /**
+   * Ask the model for a handoff card. A recap that fails or writes protocol
+   * garbage falls back to the deterministic card: the step still runs.
+   */
+  const writeCard = async (need: RelayNeed, cards: readonly RelayCard[]): Promise<RelayCard> => {
+    let text = ''
+    try {
+      const entries: Entry[] = [
+        { role: 'system', text: system },
+        ...recapEntries(input.history, cards, need, { tools, postToolReminder: '' }),
+      ]
+      const { output, result, prompt } = await generate(entries, 'card', 'handoff recap')
+      text = cleanCardText(output)
+      traced('card', prompt, output, result, { type: 'final', text }, text === '' ? 'card-empty' : 'card')
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') throw error
+      // Network or protocol failure: keep going with the fallback card.
+    }
+    const budget = Math.min(500, config.relay?.cardMaxTokens ?? 768)
+    const card = makeCard(input.history, need, text !== '' ? text : fallbackCard(input.history, need, budget))
+    input.relay?.save?.(card)
+    return card
+  }
+
+  // Turn-relay: card the finished legs before deciding this step. The most
+  // recent call/result pair always stays verbatim, so the model keeps the
+  // observation it is about to act on.
+  let state = analyzeTurn(input.history)
+  let base: Entry[]
+  if (config.relay === undefined) {
+    base = [
+      { role: 'system', text: system },
+      ...transcriptEntries(input.history, { tools, postToolReminder: reminder }),
+    ]
+  } else {
+    const plan = planRelay(input.history, input.relay?.cards ?? [], config.relay)
+    let cards = plan.cards
+    if (plan.need !== undefined) cards = [...cards, await writeCard(plan.need, cards)]
+    const legStart = cards.length > 0 ? cards[cards.length - 1]!.at : 0
+    state = analyzeTurn(input.history, { duplicateFrom: legStart })
+    base = [
+      { role: 'system', text: system },
+      ...relayEntries(input.history, cards, { tools, postToolReminder: reminder }),
+    ]
+  }
 
   /**
    * The forced closeout: tools withdrawn, plain-text answer from the evidence

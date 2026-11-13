@@ -44,6 +44,9 @@ export interface Settings {
   loopGuard: boolean
   outputRepairs: boolean
   guards: boolean
+  historyMode: 'full' | 'relay'
+  relayBudgetTokens: number
+  relayCardMaxTokens: number
   recordTraces: boolean
   traceDir: string
 }
@@ -111,6 +114,12 @@ export const Config = z.object({
     .description('Fix near-miss output: parser repairs, tool name / argument aliases, scalar coercion, DSH value repairs, path repair. Off: exact protocol form only, arguments reach DSH as written.').volatile(),
   guards: z.boolean().default(DEFAULT_HARNESS.guards)
     .description('Harness interventions: format re-asks, duplicate / failure gates, over-budget think close, answer-stage re-asks and fallbacks. Off: the model\'s output stands.').volatile(),
+  historyMode: z.union(['full', 'relay']).default('full')
+    .description('full: the model reads the whole conversation. relay: finished legs are replaced by model-written handoff cards; the most recent call/result pair stays verbatim and the duplicate-call gate restarts at each leg.').volatile(),
+  relayBudgetTokens: z.natural().default(6000)
+    .description('relay: estimated token budget for the part of the leg that gets carded; the latest call/result pair is always kept.').volatile(),
+  relayCardMaxTokens: z.natural().default(768)
+    .description('relay: output cap of one handoff recap.').volatile(),
   recordTraces: z.boolean().default(true)
     .description('Write RWKV traces (prompt bytes + raw output, outcome, repairs) to disk: rwkv-trace.jsonl next to each DSH session log, or traceDir. They are always kept in memory for the RWKV tab.').volatile(),
   traceDir: z.string().default('').description('Custom trace directory (<session>.jsonl per session); empty = next to the DSH session logs.').volatile(),
@@ -144,6 +153,9 @@ function settingsOf(config: Config): AdapterSettings {
     currentDate: config.currentDate.get(),
     ...config.timeZone.get() ? { timeZone: config.timeZone.get() } : {},
     loopGuard: config.loopGuard.get(),
+    ...config.historyMode.get() === 'relay'
+      ? { relay: { budgetTokens: config.relayBudgetTokens.get(), cardMaxTokens: config.relayCardMaxTokens.get() } }
+      : {},
     ...config.recordTraces.get() ? { traces: traceLocationOf(config) } : {},
     log: message => console.log(`[rwkv-llm] ${message}`),
   }

@@ -208,8 +208,19 @@ export function currentTurnStart(history: readonly HistoryItem[]): number {
   return 0
 }
 
-export function analyzeTurn(history: readonly HistoryItem[]): TurnState {
+export interface TurnOptions {
+  /**
+   * First history item whose calls take part in the duplicate and failure
+   * gates. The relay mode resets them at each leg: a card keeps only paths, so
+   * re-reading a file after a cut is not a repeated call. Steps still count
+   * from the user turn's start, so maxSteps is unchanged.
+   */
+  readonly duplicateFrom?: number
+}
+
+export function analyzeTurn(history: readonly HistoryItem[], options: TurnOptions = {}): TurnState {
   const start = currentTurnStart(history)
+  const gateStart = Math.max(start, options.duplicateFrom ?? start)
   const first = history[start]
   const calls = new Map<string, { key: string; mutating: boolean }>()
   const successKeys = new Set<string>()
@@ -218,13 +229,15 @@ export function analyzeTurn(history: readonly HistoryItem[]): TurnState {
   let successfulCalls = 0
   let consecutiveFailedTool = ''
   let consecutiveFailures = 0
-  for (const item of history.slice(start)) {
+  for (let index = start; index < history.length; index++) {
+    const item = history[index]!
     if (item.kind === 'call') {
       calls.set(item.id, { key: callKey(item.name, item.args), mutating: isMutatingCall(item.name, item.args) })
     }
     if (item.kind !== 'result') continue
     const { key, mutating } = calls.get(item.id) ?? { key: callKey(item.name, {}), mutating: false }
     results.push({ name: item.name, ok: item.ok })
+    if (index < gateStart) continue
     if (item.ok) {
       if (mutating) successKeys.clear()
       successKeys.add(key)
@@ -256,6 +269,12 @@ export function analyzeTurn(history: readonly HistoryItem[]): TurnState {
 export interface TranscriptOptions {
   readonly tools: readonly WireTool[]
   readonly postToolReminder: string
+  /**
+   * Add the per-step reminders after results of the current turn. Off for a
+   * recap request: it is not a step, and the model that writes the card must
+   * see the same bytes the teacher and the export rebuild.
+   */
+  readonly reminders?: boolean
   /**
    * Legacy: cut results longer than this when rendering. Live sessions are cut
    * once, when the tool runs (src/result-budget.ts), so the plugin leaves this
@@ -299,7 +318,7 @@ export function transcriptEntries(history: readonly HistoryItem[], options: Tran
       case 'result': {
         const body = truncateResult(item.text, options.maxResultChars)
         entries.push({ role: 'user', text: toolResponse(item.name, item.ok, body) })
-        if (!current) break
+        if (!current || options.reminders === false) break
         if (item.ok) {
           if (options.postToolReminder) entries.push({ role: 'user', text: options.postToolReminder })
         } else {
