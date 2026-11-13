@@ -5,7 +5,11 @@
 // (core/tools.ts buildCatalog).
 //
 // An ordinary DSH file tool: paths resolve in the session's working directory
-// through ctx.fs and the write is atomic. Line numbers are only meaningful for
+// through ctx.fs and the write is atomic. The write is stamped with the calling
+// session's sandbox policy (ctx.sandboxPolicy), as DSH's own write/edit are:
+// a sandboxed filesystem without it fences against the deployment fallback
+// root (the DSH process's cwd), which denies an in-workspace edit under
+// workspace-write. Line numbers are only meaningful for
 // the file as the model last saw it, so the write is guarded by that version:
 // read, write and edit report what a session saw (`fs/observed`, emitted by
 // DSH's file tools whether or not DSH's own fs-observation-policy is on, which
@@ -29,7 +33,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { appendPluginRecord, pluginRecordOf } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
-  addSeen, applyLineEdit, editSummary, seenAfterEdit, syntaxRejection, unseenLines, unseenRejection, type SeenLines,
+  addSeen, applyLineEdit, editSummary, sandboxPolicyFor, seenAfterEdit, syntaxRejection, unseenLines, unseenRejection, type SeenLines,
 } from './core/line-edit.ts'
 import { READ_SHOWN_EVENT } from './result-budget.ts'
 import { introducedSyntaxError } from './syntax-check.ts'
@@ -50,10 +54,12 @@ interface EditLinesArgs {
 // dsh-tools; kept structural so the plugin does not import those packages).
 interface FsTargetLike { readonly displayPath: string; readonly targetKey: string }
 type Observation = { readonly kind: 'present'; readonly version: unknown } | { readonly kind: 'absent' }
+/** The sandbox policy service as this tool uses it (opaque policy value passed back to the write). */
+interface SandboxPolicyLike { resolve(request?: { session?: object }): unknown }
 interface FsLike {
   resolve(path: string, options: { cwd?: string; signal?: AbortSignal }): Promise<FsTargetLike>
   readText(target: FsTargetLike, signal?: AbortSignal): Promise<string>
-  writeText(target: FsTargetLike, content: string, expected?: unknown, signal?: AbortSignal): Promise<{ version: unknown }>
+  writeText(target: FsTargetLike, content: string, expected?: unknown, signal?: AbortSignal, sandboxPolicy?: unknown): Promise<{ version: unknown }>
   processPath(target: FsTargetLike): string
 }
 interface ExecLike {
@@ -287,8 +293,12 @@ export function apply(ctx: Context): void {
         if (broken !== undefined) throw new Error(syntaxRejection(target.displayPath, edit, edited, broken))
         // Guarded by the version the model saw, not the text just read: a file
         // changed since then fails here instead of being edited by stale numbers.
+        // The write carries the calling session's sandbox policy; without it a
+        // sandboxed filesystem checks the deployment fallback root instead of
+        // the session workspace (src/core/line-edit.ts sandboxPolicyFor).
         const expected = guard.version === undefined ? undefined : { kind: guard.kind, version: guard.version }
-        const outcome = await host.fs.writeText(target, edited.content, expected, exec.signal)
+        const policy = sandboxPolicyFor(host.get('sandboxPolicy') as SandboxPolicyLike | undefined, exec.agent?.session)
+        const outcome = await host.fs.writeText(target, edited.content, expected, exec.signal, policy)
         host.emit('fs/observed', target, { kind: 'present', version: outcome.version }, exec)
         observations.setLines(exec, target, seenAfterEdit(guard.lines, edit, edited))
         return { path: host.fs.processPath(target), summary: editSummary(target.displayPath, edit, edited) }

@@ -194,3 +194,20 @@ export function unseenRejection(displayPath: string, missing: readonly number[],
     + `(the file has ${total} lines; ${shown}). `
     + `Read them first (read with offset=${offset}), then edit by the numbers you see.`
 }
+
+// --- Sandbox policy --------------------------------------------------------
+
+/**
+ * The policy to stamp on a write: the calling session's, never the deployment
+ * fallback. DSH's sandboxed filesystem fences a mutation by the policy passed
+ * with it and falls back to `process.cwd()` when none is passed — which is the
+ * DSH server's directory, not the session workspace, so an in-workspace edit
+ * would be denied under workspace-write.
+ */
+export function sandboxPolicyFor(
+  service: { resolve(request?: { session?: object }): unknown } | undefined,
+  session: object | undefined,
+): unknown {
+  if (service === undefined) return undefined
+  return service.resolve(session === undefined ? {} : { session })
+}

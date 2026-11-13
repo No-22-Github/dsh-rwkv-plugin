@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { addSeen, applyLineEdit, editSummary, formatRanges, seenAfterEdit, syntaxRejection, unseenLines, unseenRejection } from '../src/core/line-edit.ts'
+import { addSeen, applyLineEdit, editSummary, formatRanges, sandboxPolicyFor, seenAfterEdit, syntaxRejection, unseenLines, unseenRejection } from '../src/core/line-edit.ts'
 import { introducedSyntaxError } from '../src/syntax-check.ts'
 import { buildCatalog, type DshToolSchema } from '../src/core/tools.ts'
 import { applyResultBudget, capReadResult, estimateTokens, readWindow, spillNotice, spillText, READ_SHOWN_EVENT, RESULT_TOKEN_BUDGET } from '../src/result-budget.ts'
@@ -186,4 +186,20 @@ test('result budget: the estimate does not fall below real RWKV token counts', (
     assert.ok(estimate >= tokens, `${name}: estimate ${estimate} < real ${tokens}`)
     assert.ok(estimate <= tokens * 2, `${name}: estimate ${estimate} more than twice real ${tokens}`)
   }
+})
+
+test('edit_lines: the write carries the session sandbox policy, never the deployment fallback', () => {
+  const asked: ({ session?: object } | undefined)[] = []
+  const service = {
+    resolve(request?: { session?: object }) {
+      asked.push(request)
+      return { mode: 'workspace-write', workspaceRoot: '/ws' }
+    },
+  }
+  const session = { id: 's1' }
+  assert.deepEqual(sandboxPolicyFor(service, session), { mode: 'workspace-write', workspaceRoot: '/ws' })
+  assert.equal(asked[0]?.session, session)
+  sandboxPolicyFor(service, undefined)
+  assert.deepEqual(asked[1], {})
+  assert.equal(sandboxPolicyFor(undefined, session), undefined)
 })
