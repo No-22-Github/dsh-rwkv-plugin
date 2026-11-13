@@ -24,6 +24,8 @@
    - **RWKV 当主 Agent**：新会话里模型选刚加的 RWKV 模型，Agent 预设选「RWKV Agent」。
    - **RWKV 当子 Agent**：保持 DeepSeek 主 Agent，它会多一个 `rwkv_agent` 工具，默认用你加的第一个模型。
 
+   编辑默认走行号版 `edit_lines`（按 read 显示的行号改，不抄原文），原生 `edit` 在这两个入口里自动隐藏；要做 A/B、退回原生编辑时用 headless / 管线采集的 `--native-edit`。
+
 更新插件：在**添加插件**里重新填一次同样的地址并安装。
 
 ## 从 DSH 源码运行

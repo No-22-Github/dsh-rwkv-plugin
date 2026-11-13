@@ -81,7 +81,7 @@ Never invent file content.
 | 工具 | 说明 |
 |---|---|
 | bash | 跑命令（Windows 上没有，预设里禁用了） |
-| read / write / edit | 读、写、改文本文件 |
+| read / write / edit_lines | 读、写、按行号改文本文件（原生 `edit` 在挂行号编辑时自动隐藏） |
 | glob / grep | 按路径找文件、按内容搜索 |
 | web_search / web_fetch | 网页搜索、抓取网页 |
 
@@ -132,8 +132,8 @@ Standard 预设里有、RWKV Agent 没挂的东西：
 1. **工具名纠正**：先精确匹配，再不分大小写，再查别名（`str_replace` → edit、`shell` → bash、`ls` → glob 等）。训练时的名字（read_file、write_file、edit_file、list_files、search_text）也会认回 DSH 的名字。认不出时回一条失败结果，提示它改选别的工具。
 2. **参数名纠正**：别名改成 DSH 的参数名，例如 `path` → `file_path`、`old_text` → `old_string`、`query` → grep 的 `pattern`、`start_line` / `end_line` → `offset` / `limit`。web_search 只给了一个字符串时包成 `queries` 数组；bash 没写 `description` 时用命令的第一行补上。
 3. **数值宽松**：`"5"` 转成 5，`"true"` 转成 true，`"6,412"` 去掉千分位。结构不对的参数原样交给工具，让工具自己报错。
-4. **重复成功调用**：和本轮已经成功过的调用完全一样时（参数先排好顺序再比较）。一次成功的改动（edit、write，或看起来会写文件的 bash：重定向、`sed -i`、tee、mv/cp/rm、git apply、pip install 等）之后从头算，所以改完重读文件、重跑同一条测试不算重复；改动本身和它之后的调用照旧算：
-   - 第一次：拦下来，提示"结果已经在上面了；要改已读过的文件就直接用 edit 或 write"，再给一次决策机会。
+4. **重复成功调用**：和本轮已经成功过的调用完全一样时（参数先排好顺序再比较）。一次成功的改动（edit_lines/edit、write，或看起来会写文件的 bash：重定向、`sed -i`、tee、mv/cp/rm、git apply、pip install 等）之后从头算，所以改完重读文件、重跑同一条测试不算重复；改动本身和它之后的调用照旧算：
+   - 第一次：拦下来，提示"结果已经在上面了；要改已读过的文件就直接用编辑工具或 write"，再给一次决策机会。
    - 第二次：强制收尾（见 3.5 节）。
 5. **重复失败调用**：和之前失败过的调用一样，并且这期间没有新的成功结果，直接强制收尾。
 6. **连续失败封禁**：同一个工具连续失败 2 次（`maxConsecutiveFailures`）后，再调它就拒绝，提示换工具或者直接回答。read 失败时还会提示"路径不确定就先用 glob 或 grep"。
@@ -171,7 +171,7 @@ Standard 预设里有、RWKV Agent 没挂的东西：
 ### 3.6 其他
 
 1. **工具结果截断**（[src/result-budget.ts](../src/result-budget.ts)）：在工具执行完的那一刻截一次，DSH 记下来的就是模型看到的。上限 3000 个 RWKV token，宁少勿多：按字符类别估算（英文字母 0.4、数字 1、空白 0.2、标点 0.6、汉字 1.25、其他 1 个 token/字符，在模型实际看到的 JSON 转义文本上算），对照 rwkv-tokenizer-go 实测中位高估约 25%、低估的只有 0.4%（网页结果 0%），截后的网页实际 1800–2900 token；复测用 `scripts/calibrate-token-estimate.ts`。和 DSH 自带的溢出机制（spill-policy，所有模型 12500 token）做法一样，只是上限更低、只对 RWKV 会话生效：保留头尾各一半，中间换成 `[...]`，完整内容存成文件，结果末尾写明文件路径，模型可以 grep 或 read 去看。read 例外（文件本来就在磁盘上）：在整行处截断，末尾是 read 自己的 `Use offset=N to continue` 提示。以前插件在拼提示词时另截一次（12000 字符，前 80% 后 20%，没有文件路径），和 DSH 的 12500 token 之间的页面既被截掉又拿不到路径，已去掉。老师插件挂同一个函数，训练数据和评测看到的一样。
-   **行号编辑**（默认，[src/line-edit.ts](../src/line-edit.ts)）：`edit_lines` 工具按 read 显示的行号替换一段行，不用抄原文。文件读过之后被别的方式改过（bash 等）就拒绝、要求重读；自己的 edit_lines 改完可以接着改，结果里给出新行号。参照 SWE-agent 的窗口式 `edit <起>:<止>`：改完显示 `[File: 路径 (N lines total)]` 加改动处前后几行、上下还剩多少行，并提醒检查缩进和重复行；改完会让原本能解析的文件出语法错误时（.py 用 python3 compile、.js 用 node --check、.sh 用 bash -n、.json 直接解析，见 [src/syntax-check.ts](../src/syntax-check.ts)）不落盘，把“改了会怎样”和原文并排给模型。headless 默认挂上，挂上后目录里的 `edit` 自动隐藏；`--native-edit`（或 `--no-line-edit`）回退到 DSH 原生 `edit`，只用于 A/B。评测的 `--ak native_edit=true` 和管线的 `--native-edit` 走同一条回退。已读版本和看过的行号作为 `plugin:rwkv-edit-lines/observed` 记录写进 session 日志（DSH 的 `appendPluginRecord`，ignorable、不进模型可见上下文），续跑/恢复会话时重建，所以多轮评测每轮一个进程也不会丢已读状态；DSH 需 0.2.2-alpha.3 及以上（桌面客户端 0.2.2-rc.2 已满足）。
+   **行号编辑**（默认，[src/line-edit.ts](../src/line-edit.ts)）：`edit_lines` 工具按 read 显示的行号替换一段行，不用抄原文。文件读过之后被别的方式改过（bash 等）就拒绝、要求重读；自己的 edit_lines 改完可以接着改，结果里给出新行号。参照 SWE-agent 的窗口式 `edit <起>:<止>`：改完显示 `[File: 路径 (N lines total)]` 加改动处前后几行、上下还剩多少行，并提醒检查缩进和重复行；改完会让原本能解析的文件出语法错误时（.py 用 python3 compile、.js 用 node --check、.sh 用 bash -n、.json 直接解析，见 [src/syntax-check.ts](../src/syntax-check.ts)）不落盘，把“改了会怎样”和原文并排给模型。headless、评测、老师采集、桌面/`dsh web` 的插件 bundle 都默认挂上（bundle 里挂在 RWKV Agent 预设的插件列表，主 Agent 和 `rwkv_agent` 子 Agent 都带），挂上后目录里的 `edit` 自动隐藏；`--native-edit`（headless 与管线，或 headless 的 `--no-line-edit`）和评测的 `--ak native_edit=true` 回退到 DSH 原生 `edit`，只用于 A/B。已读版本和看过的行号作为 `plugin:rwkv-edit-lines/observed` 记录写进 session 日志（DSH 的 `appendPluginRecord`，ignorable、不进模型可见上下文），续跑/恢复会话时重建，所以多轮评测每轮一个进程也不会丢已读状态；DSH 需 0.2.2-alpha.3 及以上（桌面客户端 0.2.2-rc.2 已满足）。
 2. **调用后的提醒**：每条工具结果后面附一句提醒，让它"证据够了就回答，只为缺的那个事实再调工具，不要重复成功的调用"。这句只在当前这一轮出现，历史轮次里没有。
 3. **路径修复**（[src/paths.ts](../src/paths.ts)）：G1 抄工作目录时常常漏掉最后一级目录（把 `…/task/ws/a.py` 写成 `…/task/a.py`）。只在原路径不存在、修复后的路径存在时才改，正确的路径、新建的文件和故意指向工作区外的路径都原样放行。
 4. **当前日期**（`currentDate`，默认开，设置页运行参数里的“系统提示词末尾写当前日期和时区”）：系统提示词最后一行写 `Current date: 2026-11-06 (Asia/Shanghai, UTC+08:00).`，用运行 DSH 的机器的时区。只到日期，一天才变一次，推理服务的前缀缓存基本不受影响。开着时，DSH time-context 插件（Standard 预设会挂）追加的时间读数不进历史；关掉时没有日期行，时间读数以 `Current time: <时间戳>.` 备注出现。headless 入口默认关（`--current-date` 打开），评测提示词和训练数据保持一致。

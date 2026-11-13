@@ -29,6 +29,11 @@
             name: '@deepseek-ai/dsh-tool-fs'
             config:
               applyPatch: false
+          # Line-number edits (edit_lines) instead of literal old_string copy;
+          # the RWKV catalog then hides `edit` (core/tools.ts buildCatalog).
+          # Same plugin the headless / eval / teacher entry points mount.
+          - id: rwkv-edit-lines
+            name: dsh-rwkv-plugin/line-edit
           - id: tool-fs-search
             name: '@deepseek-ai/dsh-tool-fs-search'
             config:

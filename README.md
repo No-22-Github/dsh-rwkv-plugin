@@ -98,7 +98,7 @@ Assistant: <think                                           ← 模型从这里�
 | 功能 | 说明 |
 |---|---|
 | **后端** | rwkv_lightning CUDA（支持上传的初始 state）和 iRWKV 的续写接口 |
-| **工具** | bash、read、write、edit、glob、grep、web_search、web_fetch，名字和参数都用 DSH 原样；模型写训练时的旧名字（read_file、path…）会自动认回来 |
+| **工具** | bash、read、write、edit_lines、glob、grep、web_search、web_fetch，名字和参数都用 DSH 原样；编辑默认走行号版 `edit_lines`（按 read 显示的行号改，不抄原文，原生 `edit` 自动隐藏），headless/管线可用 `--native-edit` 回退；模型写训练时的旧名字（read_file、path…）会自动认回来 |
 | **解析容错** | 先说话再调用、OpenAI 外壳、多余括号、字符串化参数等十来种写法 |
 | **检查与收尾** | 重复调用拦截（改过文件后重读、重跑测试不算重复）、连续失败封禁、强制收尾、复读截断 |
 | **设置页** | 设置 →「RWKV Agent」：管理模型（填服务地址后自动读取模型名）、上传和切换 state、调参数、开关兜底；保存后下一次请求就生效 |
