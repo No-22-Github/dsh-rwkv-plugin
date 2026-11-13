@@ -70,21 +70,29 @@ const RECAP_BODY = `1. Objective - one line describing the required result.
 5. Dead ends - failed approaches that should not be repeated.
 6. Remaining plan - outstanding subgoals in execution order; the immediate next command or edit; and the condition for completion.`
 
+/**
+ * The recap shares one small output cap with the model's thinking, and the
+ * card text is prompt every later step pays for, so the length is stated as a
+ * hard budget instead of "be concise" (Step-3.7-Flash and Qwen both overran
+ * 768 tokens and fell back to the deterministic card).
+ */
+const RECAP_LIMIT = 'Hard limit: the whole recap must stay under 400 words. Plain six numbered sections, no tables, no preamble.'
+
 /** Nudge used when the current user instruction is not finished yet. */
 export const RELAY_RECAP_LEG = `Stop work. Write only a concise handoff recap; do not run commands or call tools.
 The conversation will reset to the system prompt, the task, and this recap; the same task continues.
 Record:
 ${RECAP_BODY}
-If needed output was truncated, give a narrow command to retrieve it.
-Write the recap only, with no preamble.`
+${RECAP_LIMIT}
+If needed output was truncated, give a narrow command to retrieve it.`
 
 /** Nudge used when a turn is finished and the user's next instruction follows. */
 export const RELAY_RECAP_TURN = `Stop work. Write only a concise handoff recap; do not run commands or call tools.
 The conversation will reset; the user's next instruction follows after this recap.
 Record:
 ${RECAP_BODY}
-If needed output was truncated, give a narrow command to retrieve it.
-Write the recap only, with no preamble.`
+${RECAP_LIMIT}
+If needed output was truncated, give a narrow command to retrieve it.`
 
 export function recapInstruction(turnEnd: boolean): string {
   return turnEnd ? RELAY_RECAP_TURN : RELAY_RECAP_LEG
