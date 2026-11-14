@@ -69,7 +69,7 @@ const AGENT_FAST: Sampling = { temperature: 0.3, topK: 65536, topP: 0.5, presenc
 const RUN_DEFAULTS: RunSettings = {
   thinking: 'full',
   historyEmptyThink: true,
-  maxSteps: 12,
+  maxSteps: 15,
   maxConsecutiveFailures: 2,
   protocolRetries: 2,
   decisionMaxTokens: 4096,

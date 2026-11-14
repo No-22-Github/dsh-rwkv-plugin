@@ -93,7 +93,7 @@ export interface HarnessConfig {
 export const DEFAULT_HARNESS: HarnessConfig = {
   thinking: 'full',
   historyEmptyThink: true,
-  maxSteps: 12,
+  maxSteps: 15,
   maxConsecutiveFailures: 2,
   protocolRetries: 2,
   decisionMaxTokens: 4096,
