@@ -76,7 +76,7 @@ const RECAP_BODY = `1. Objective - one line describing the required result.
  * hard budget instead of "be concise" (Step-3.7-Flash and Qwen both overran
  * 768 tokens and fell back to the deterministic card).
  */
-const RECAP_LIMIT = 'Hard limit: the whole recap must stay under 400 words. Plain six numbered sections, no tables, no preamble.'
+const RECAP_LIMIT = 'Hard limit: the whole recap must stay under 200 words. Plain six numbered sections, no tables, no preamble, no code blocks.'
 
 /** Nudge used when the current user instruction is not finished yet. */
 export const RELAY_RECAP_LEG = `Stop work. Write only a concise handoff recap; do not run commands or call tools.
