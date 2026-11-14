@@ -11,6 +11,7 @@ import { currentDateLine, promptJSON, recordToolCall, renderPrompt, systemPrompt
 import { historyFromMessages } from '../src/history.ts'
 import { runtimeCwd } from '../src/paths.ts'
 import { buildCatalog, coerceArguments, normalizeArguments, repairNativeValues, resolveTool, type DshToolSchema, type WireTool } from '../src/core/tools.ts'
+import { countTokens } from '../src/tokenizer.ts'
 
 const identity = (args: Record<string, unknown>) => args
 
@@ -109,6 +110,22 @@ const afterRead: HistoryItem[] = [
   { kind: 'call', id: 'c1', name: 'read_file', args: { path: 'a.txt' } },
   { kind: 'result', id: 'c1', name: 'read_file', ok: true, text: '1\tBUDGET-READY' },
 ]
+
+test('step usage without provider numbers is the exact RWKV token count', async () => {
+  const prompts: string[] = []
+  const text = '>Done.</think>好的，已完成。'
+  const generator: Generator = {
+    generate(request: GenerateRequest): Promise<GenerateResult> {
+      prompts.push(request.prompt)
+      return Promise.resolve({ text, finish: 'stop' })
+    },
+  }
+  const step = await decideStep({ history: afterRead, tools, config: harness, generator })
+  assert.equal(step.decision.type, 'final')
+  assert.equal(step.promptTokens, countTokens(prompts[0]!))
+  assert.equal(step.completionTokens, countTokens(text))
+  assert.notEqual(step.promptTokens, Math.ceil(prompts[0]!.length / 3))
+})
 
 test('first repeat of a successful call gets one retry with a hint (harness v26)', async () => {
   const generator = new ScriptedGenerator([

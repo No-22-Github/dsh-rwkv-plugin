@@ -33,6 +33,7 @@ import {
   type TurnState,
 } from './policy.ts'
 import { reconstructOutput, recordToolCall, renderPrompt, systemPrompt, toolResponse, type Entry, type ThinkingMode } from './prompt.ts'
+import { countTokens } from '../tokenizer.ts'
 import {
   cleanCardText,
   fallbackCard,
@@ -280,8 +281,8 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
     let result = await input.generator.generate(request, onDelta)
     generations++
     let text = result.text
-    let spent = result.completionTokens ?? Math.ceil(text.length / 3)
-    promptTokens += result.promptTokens ?? Math.ceil(prompt.length / 3)
+    let spent = result.completionTokens ?? countTokens(text)
+    promptTokens += result.promptTokens ?? countTokens(prompt)
     // A quoted </tool_call> inside an open think block is not the end of the
     // step: put the stop back and continue the same generation.
     const opening = config.thinking === 'full' ? '<think' : ''
@@ -297,7 +298,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       const next = await input.generator.generate({ ...request, prompt: prompt + text, maxTokens: remaining }, onDelta)
       generations++
       text += next.text
-      spent += next.completionTokens ?? Math.ceil(next.text.length / 3)
+      spent += next.completionTokens ?? countTokens(next.text)
       result = { ...next, text }
     }
     // The think used the whole budget (G1 loops re-checking the same facts):
@@ -309,7 +310,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       const next = await input.generator.generate({ ...request, prompt: prompt + closed, maxTokens: THINK_CLOSE_TOKENS }, onDelta)
       generations++
       text = closed + next.text
-      spent += next.completionTokens ?? Math.ceil(next.text.length / 3)
+      spent += next.completionTokens ?? countTokens(next.text)
       result = { ...next, text }
     }
     completionTokens += spent
