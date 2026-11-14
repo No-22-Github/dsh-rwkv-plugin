@@ -2,7 +2,39 @@
 
 把 RWKV-7 G1 Agent 接进 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（下称 DSH）：注册一个 `rwkv` 模型提供方，RWKV 可以当主 Agent，也可以作为子 Agent 给 DeepSeek 主 Agent 调用。
 
-**安装见 [INSTALL.md](INSTALL.md)。** 每个环节的细节（提示词裁了哪几段、每种兜底的触发条件、怎么排查）见 [docs/how-it-works.md](docs/how-it-works.md)。
+## 安装
+
+需要 DeepSeek Harness 桌面版 **0.2.1 或更新版本**（从源码跑、或者开发插件本身，见 [INSTALL.md](INSTALL.md)）。
+
+**1. 装插件。** 打开侧栏的**插件** → **添加插件**，填这一行：
+
+```
+github:No-22-Github/dsh-rwkv-plugin
+```
+
+点**安装**，装完选**立即启用**。
+
+**2. 加模型。** 打开**设置 → RWKV Agent → 添加模型**：
+
+| 项 | 填什么 |
+|---|---|
+| 后端 | `rwkv_lightning CUDA`，或走兼容续写接口的 iRWKV / vLLM |
+| 服务地址 | 推理服务的地址，填到端口，例如 `http://100.64.0.8:8060`（填完能自动读模型名） |
+| 上游模型 ID | 服务端 `/v1/models` 里的 id |
+| Adapter | 仅 lightning：从列表里选服务器上已有的，或点上传传一个本地 `.pth` |
+
+保存后下一次请求就生效。
+
+**3. 开始用。**
+
+- **RWKV 当主 Agent**：新会话里模型选刚加的 RWKV，Agent 预设选「RWKV Agent」。
+- **RWKV 当子 Agent**：保持 DeepSeek 主 Agent，它会多一个 `rwkv_agent` 工具，默认用你加的第一个模型。
+
+编辑默认走行号版 `edit_lines`（按 read 显示的行号改，不用抄原文），原生 `edit` 自动隐藏；要做 A/B、退回原生编辑，用 headless / 管线采集的 `--native-edit`。
+
+更新插件：在**添加插件**里重新填一次同样的地址再安装一遍。
+
+拼提示词、每种兜底的触发条件、怎么排查：见 [docs/how-it-works.md](docs/how-it-works.md)。
 
 ## 一张图看懂
 
@@ -111,3 +143,14 @@ Assistant: <think                                           ← 模型从这里�
 - **没有上下文压缩**，长会话迟早撑满窗口（默认报给 DSH 32768 token）。
 - **只认文字**，图片、文件附件换成占位符。
 - **DSH 界面上看到的比 RWKV 实际收到的多**：DSH 全局注册的工具、提示词段和运行时上下文，预设管不住，插件只能在拼 RWKV 提示词时自己过滤。所以会话「轨迹」页显示的是过滤前的内容，要看 RWKV 实际收到什么，请看「RWKV」标签页。
+
+## 致谢
+
+这个插件站在下面这些项目上面：
+
+- **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)**（MIT）：会话、工具、沙箱、插件机制和设置页框架都由它提供，动作协议和工具清单也按它的 Standard 提示词改。
+- **[RWKV](https://github.com/BlinkDL/RWKV-LM)**（Apache-2.0）：RWKV-7 G1 模型本体。续写式的 prompt 结构、思考块、工具调用格式和兜底链移植自 [RWKV-Agent](https://github.com/No-22-Github/RWKV-Agent)（更早的自研 harness）。
+- **[rwkv-tokenizer](https://github.com/cahya-wirawan/rwkv-tokenizer)**（MIT OR Apache-2.0）：`vendor/rwkv-tokenizer/` 里原样内置的 WASM 分词器，用来精确计算工具结果上限和接力预算的 token 数。
+- **[rwkv-tokenizer-go](https://github.com/No-22-Github/rwkv-tokenizer-go)**（Apache-2.0）：训练包和跑分的 token 统计口径；内置的分词器和它逐条对过，脚本是 `scripts/tokenizer-parity.ts`。
+
+本项目以 [MIT](LICENSE) 发布，Copyright (c) 2026 No-22-Github。
