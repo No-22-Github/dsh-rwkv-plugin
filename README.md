@@ -16,7 +16,7 @@
    github:No-22-Github/dsh-rwkv-plugin
    ```
 
-2. **加模型**：**设置 → RWKV Agent → 添加模型**，选后端（`rwkv_lightning CUDA` 或 iRWKV）、填服务地址和上游模型 ID 就行；lightning 还要选一个服务器上已有的 adapter。保存后立即生效。
+2. **加模型**：**设置 → RWKV Agent → 添加模型**，选后端（`rwkv_lightning CUDA` 或 iRWKV）、填服务地址和上游模型 ID 就行；lightning 还可以挂一个 adapter（可选，服务器上已有或自己上传）。保存后立即生效。
 3. **开始用**：当主 Agent 就新开会话、模型选它、预设选「RWKV Agent」；当子 Agent 就保持 DeepSeek 主 Agent，会多一个 `rwkv_agent` 工具，默认用你加的第一个模型。
 
 编辑默认走行号版 `edit_lines`（按 read 显示的行号改，不用抄原文），原生 `edit` 自动隐藏；要做 A/B 用 `--native-edit`。更新插件就是重新填一次同样的地址再装一遍。

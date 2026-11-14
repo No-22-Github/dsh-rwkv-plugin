@@ -16,7 +16,7 @@
    - **后端**：`rwkv_lightning CUDA` 或 `iRWKV（vLLM）`
    - **服务地址**：推理服务的地址，填到端口即可，例如 `http://host:8000`
    - **上游模型 ID**：服务端 `/v1/models` 里的 id
-   - **Adapter**（仅 lightning）：从列表里选服务器上已有的，或点**上传**传一个本地 `.pth`
+   - **Adapter**（仅 lightning，可选）：从列表里选服务器上已有的，或点**上传**传一个本地 `.pth`；不挂就用合并权重
 
    保存后立即生效。
 
