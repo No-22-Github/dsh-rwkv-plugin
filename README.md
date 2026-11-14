@@ -98,7 +98,7 @@ Assistant: <think                                           ← 模型从这里�
 
 | 功能 | 说明 |
 |---|---|
-| 后端 | rwkv_lightning CUDA（支持上传的初始 state）、iRWKV 续写接口 |
+| 后端 | rwkv_lightning CUDA（请求级 adapter 可选、支持上传初始 state）、iRWKV 续写接口 |
 | 工具 | bash、read、write、edit_lines、glob、grep、web_search、web_fetch，名字参数照 DSH 原样；训练时的旧名字（read_file…）自动认回 |
 | 解析容错 | 先说话再调用、OpenAI 外壳、多余括号、字符串化参数等十来种写法 |
 | 检查与收尾 | 重复调用拦截、连续失败封禁、强制收尾、复读截断 |
