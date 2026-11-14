@@ -5,7 +5,7 @@
 
 import { useEffect, useState } from 'react'
 import { TraceFrames } from './TraceFrames.tsx'
-import { fetchSession, isGeneration, percent, touched, type TraceRecord } from './traces-api.ts'
+import { fetchSession, isCard, isGeneration, percent, touched, type TraceRecord } from './traces-api.ts'
 
 const POLL_MS = 2500
 
@@ -45,6 +45,10 @@ export function RwkvTraceView(props: { session: string }) {
   }, [props.session])
 
   const generations = (records ?? []).filter(record => isGeneration(record) && record.purpose === undefined)
+  // Handoff cards are generations too, but they are not decisions: they are
+  // counted apart so "原样可用" keeps meaning "the model decided correctly".
+  const cards = (records ?? []).filter(record => isCard(record) && record.purpose === undefined)
+  const fallbackCards = cards.filter(record => record.relay?.fallback === true).length
   const judged = generations.filter(record => record.outcome !== undefined)
   const hit = judged.filter(touched).length
   return (
@@ -56,6 +60,7 @@ export function RwkvTraceView(props: { session: string }) {
         </div>
         <span className="rl-summary">
           {generations.length} 次生成 · {hit} 次用到兜底{judged.length > 0 ? ` · 原样可用 ${percent(judged.length - hit, judged.length)}` : ''}
+          {cards.length > 0 ? ` · 接力卡 ${cards.length} 张${fallbackCards > 0 ? `（自动摘要 ${fallbackCards}）` : ''}` : ''}
         </span>
       </div>
       {error ? <p className="rl-notice rwkv-error">{error}</p> : null}

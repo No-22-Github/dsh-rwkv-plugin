@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { GenerateRequest, GenerateResult, Generator } from '../src/backend/generator.ts'
-import { decideStep, DEFAULT_HARNESS, type HarnessConfig } from '../src/core/agent.ts'
+import { decideStep, DEFAULT_HARNESS, type GenerationTrace, type HarnessConfig } from '../src/core/agent.ts'
 import { analyzeTurn, type HistoryItem } from '../src/core/policy.ts'
 import {
   cleanCardText,
@@ -190,4 +190,63 @@ test('relay: the fallback card lists the exact changes and the failure', () => {
   assert.match(card, /3\. Applied changes: a\.txt/)
   assert.match(card, /4\. Verification:\n- python -m pytest -q -> failed/)
   assert.match(card, /FAILED test_a\.py::test_timeout/)
+})
+
+// The trace is how a run is inspected afterwards: a card must show up as its
+// own generation carrying the exact range it replaced, or the RWKV tab cannot
+// answer "where did the context get cut and what did the model see instead".
+test('relay: the trace records the card generation and the range it cut', async () => {
+  const generator = new ScriptedGenerator([
+    '>Start.</think><tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}',
+    recapOutput('1. Objective: rename the timeout field.'),
+    '>Check the failure.</think><tool_call>{"name":"read_file","arguments":{"path":"test_a.py"}}',
+  ])
+  const traces: GenerationTrace[] = []
+  const config: HarnessConfig = { ...DEFAULT_HARNESS, maxSteps: 5, relay: { budgetTokens: 100_000, cardMaxTokens: 256 } }
+  const saved: RelayCard[] = []
+  const first = await decideStep({ history: turnOne, tools, config, generator, relay: { cards: [], save: card => saved.push(card) } })
+  assert.equal(first.decision.type, 'tool')
+  const turnTwo: HistoryItem[] = [...turnOne, { kind: 'user', text: 'Now add a short note about it to README.md.' }]
+  await decideStep({
+    history: turnTwo, tools, config, generator,
+    relay: { cards: saved, save: card => saved.push(card) },
+    hooks: { trace: trace => { traces.push(trace) } },
+  })
+  const cards = traces.filter(trace => trace.stage === 'card')
+  assert.equal(cards.length, 1, 'the card generation is traced')
+  const card = cards[0]!
+  assert.equal(card.outcome, 'card')
+  assert.match(card.prompt, /Stop work\. Write only a concise handoff recap/, 'the cut prompt itself is kept')
+  assert.ok(card.relay !== undefined, 'the record says what the card replaced')
+  assert.equal(card.relay!.from, 0)
+  assert.equal(card.relay!.to, turnOne.length)
+  assert.equal(card.relay!.turn, 1)
+  assert.equal(card.relay!.fallback, false)
+  assert.match(card.relay!.card, /1\. Objective: rename the timeout field/)
+  // The decision that followed saw the card, not the covered tool results.
+  const execution = traces.filter(trace => trace.stage === 'decision').at(0)!
+  assert.match(execution.prompt, /\[Handoff recap · turn 1 · part 1\]/)
+  assert.doesNotMatch(execution.prompt, /1\talpha/)
+})
+
+test('relay: a card that fell back to the summary is marked as such in the trace', async () => {
+  const generator = new ScriptedGenerator([
+    '>Start.</think><tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}',
+    recapOutput(''), // the model wrote nothing usable
+    '>Check the failure.</think><tool_call>{"name":"read_file","arguments":{"path":"test_a.py"}}',
+  ])
+  const traces: GenerationTrace[] = []
+  const config: HarnessConfig = { ...DEFAULT_HARNESS, maxSteps: 5, relay: { budgetTokens: 100_000, cardMaxTokens: 256 } }
+  const saved: RelayCard[] = []
+  await decideStep({ history: turnOne, tools, config, generator, relay: { cards: [], save: card => saved.push(card) } })
+  const turnTwo: HistoryItem[] = [...turnOne, { kind: 'user', text: 'Now add a short note about it to README.md.' }]
+  await decideStep({
+    history: turnTwo, tools, config, generator,
+    relay: { cards: saved, save: card => saved.push(card) },
+    hooks: { trace: trace => { traces.push(trace) } },
+  })
+  const card = traces.find(trace => trace.stage === 'card')!
+  assert.equal(card.outcome, 'card-empty')
+  assert.equal(card.relay?.fallback, true)
+  assert.ok((card.relay?.card.length ?? 0) > 0, 'the summary the model will read is recorded')
 })

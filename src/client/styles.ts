@@ -143,6 +143,7 @@ button.rwkv-option{cursor:pointer;padding-right:10px}
 .rl-chips{display:inline-flex;flex-wrap:wrap;gap:4px}
 .rl-chip{flex:none;padding:0 5px;border-radius:var(--dsw-radius-xs);font-size:10px;line-height:16px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-module-platform);white-space:nowrap}
 .rl-chip-warn{color:var(--dsw-alias-state-warn-label);background:var(--dsw-alias-state-warn-tertiary)}
+.rl-cut{flex:none;padding:0 5px;border-radius:var(--dsw-radius-xs);font-size:10px;line-height:16px;color:var(--dsw-alias-brand-primary-new-colorprimary-new-color);background:color-mix(in srgb,var(--dsw-alias-brand-primary-new-colorprimary-new-color) 10%,var(--dsw-alias-bg-module-platform))}
 .rl-chip-muted{color:var(--dsw-alias-label-tertiary)}
 .rl-step-row td{height:22px;border-bottom:.5px dashed var(--dsw-alias-border-l1)}
 .rl-step{display:flex;align-items:center;gap:6px;min-width:0;overflow:hidden;color:var(--dsw-alias-label-tertiary);font-size:11px}

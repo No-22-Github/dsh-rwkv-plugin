@@ -133,6 +133,8 @@ export interface TraceRecord {
   readonly generations?: number
   readonly outputRepairs?: boolean
   readonly guards?: boolean
+  /** Card records only: the history range this handoff card replaced. */
+  readonly relay?: { readonly from: number; readonly to: number; readonly turn: number; readonly fallback: boolean; readonly card: string }
 }
 
 const SESSION_FILE = /^[\w.-]+\.jsonl$/

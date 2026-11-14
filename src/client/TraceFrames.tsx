@@ -5,7 +5,7 @@
 // conversation tab and the developer section of the settings page.
 
 import { useEffect, useState } from 'react'
-import { fetchRecord, isGeneration, OUTCOME_LABEL, REPAIR_LABEL, touched, type ArgumentChange, type TraceRecord } from './traces-api.ts'
+import { fetchRecord, isCard, isGeneration, OUTCOME_LABEL, REPAIR_LABEL, touched, type ArgumentChange, type TraceRecord } from './traces-api.ts'
 
 const SHORT_VALUE = 16
 const MAX_CHANGES = 3
@@ -60,6 +60,9 @@ function HandedLine(props: { record: TraceRecord }) {
 
 /** Short tag per outcome, like the native role tags. */
 const OUTCOME_TAG: Record<string, string> = {
+  'card': '写卡',
+  'card-empty': '空卡',
+  'card-failed': '卡失败',
   'run': '调用',
   'final': '作答',
   're-ask': '重问',
@@ -94,8 +97,31 @@ function thinkOf(output: string): string {
   return text.slice(text.indexOf('>') + 1, end < 0 ? undefined : end).trim()
 }
 
+/** The cut a handoff card makes: which part of the conversation stops being readable. */
+function CutNote(props: { record: TraceRecord }) {
+  const relay = props.record.relay
+  if (relay === undefined) return null
+  const count = relay.to - relay.from
+  return (
+    <span className="rl-cut" title={`第 ${relay.from}–${relay.to - 1} 条历史（用户第 ${relay.turn} 轮，共 ${count} 条）被这张卡替换；此前的调用与结果不再逐条可见`}>
+      ✂ 压缩 {count} 条历史 · 第 {relay.turn} 轮
+    </span>
+  )
+}
+
 /** One-line preview: the call as name + arguments, else the answer text. */
 function Preview(props: { record: TraceRecord }) {
+  if (props.record.stage === 'card') {
+    // Records written before the relay field existed carry only the raw output.
+    const card = props.record.relay?.card ?? afterThink(props.record.output ?? '')
+    const fallback = props.record.relay?.fallback === true || props.record.outcome === 'card-empty'
+    return (
+      <span className="rl-text">
+        {fallback ? <span className="rl-chip rl-chip-warn">自动摘要</span> : null}
+        {card.replace(/\s+/g, ' ').slice(0, 220) || '（空卡）'}
+      </span>
+    )
+  }
   const output = props.record.output ?? ''
   const action = afterThink(output)
   const call = /<tool_calls?>\s*([\s\S]*)/.exec(action)
@@ -171,7 +197,7 @@ function Inspector(props: { session: string; row: Row; step: TraceRecord | undef
     <aside className="rl-inspector" aria-label="生成详情">
       <div className="rl-inspector-head">
         <span className={`rl-tag rl-tone-${tone}`}>{OUTCOME_TAG[record.outcome ?? ''] ?? '生成'}</span>
-        <span className="rl-inspector-title">请求 {row.request} · 第 {row.generation} 次生成{record.stage === 'answer' ? ' · 收尾阶段' : ''}</span>
+        <span className="rl-inspector-title">请求 {row.request} · 第 {row.generation} 次生成{record.stage === 'answer' ? ' · 收尾阶段' : record.stage === 'card' ? ' · 写交接卡' : ''}</span>
         <button type="button" className="rl-icon" aria-label="关闭" onClick={props.onClose}>×</button>
       </div>
       <div className="rl-tabs" role="tablist">
@@ -210,6 +236,19 @@ function Inspector(props: { session: string; row: Row; step: TraceRecord | undef
                 <div className="rl-prose">{think}</div>
               </>
             ) : null}
+            {record.stage === 'card' && record.relay !== undefined ? (
+              <>
+                <div className="rl-section-title">这一步切掉了什么</div>
+                <div className="rl-kv">
+                  <KeyValue label="覆盖范围">第 {record.relay.from}–{record.relay.to - 1} 条历史（共 {record.relay.to - record.relay.from} 条）</KeyValue>
+                  <KeyValue label="所属轮次">用户第 {record.relay.turn} 轮</KeyValue>
+                  <KeyValue label="卡片来源">{record.relay.fallback ? '自动摘要（模型没写出可用的卡）' : '模型自己写的'}</KeyValue>
+                </div>
+                <div className="rl-section-title">写进上下文的卡片</div>
+                <pre className="rl-pre">{record.relay.card || '（空卡）'}</pre>
+                <p className="rwkv-hint">这张卡会替换上面那些历史；此后的请求只能看到卡片，看不到被压缩的调用与结果原文。</p>
+              </>
+            ) : null}
             <div className="rl-section-title">模型写的动作</div>
             <pre className="rl-pre">{afterThink(record.output ?? '') || '（无）'}</pre>
             {step?.args && (record.outcome === 'run') ? (
@@ -244,7 +283,9 @@ export function TraceFrames(props: { session: string; records: readonly TraceRec
       generation = 0
       return
     }
-    if (!isGeneration(record)) return
+    // A handoff card is its own generation: it runs before the decision of the
+    // same request and is the reason that decision sees less history.
+    if (!isGeneration(record) && !isCard(record)) return
     generation++
     rows.push({ index, record, request, generation, first: generation === 1 })
   })
@@ -286,6 +327,7 @@ export function TraceFrames(props: { session: string; records: readonly TraceRec
                 <td className="rl-content">
                   <span className="rl-content-inner">
                     {row.record.stage === 'answer' ? <span className="rl-chip rl-chip-muted">收尾阶段</span> : null}
+                    <CutNote record={row.record} />
                     {row.record.finish === 'length' ? <span className="rl-chip rl-chip-warn">写满上限</span> : null}
                     <Preview record={row.record} />
                     {repairs.map(repair => <span key={repair} className="rl-chip rl-chip-warn" title={repair}>{REPAIR_LABEL[repair] ?? repair}</span>)}

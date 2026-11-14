@@ -135,6 +135,26 @@ export interface GenerationTrace {
   readonly outcome: string
   /** Every repair the output needed before it ran (parser + tool gate); empty for a clean output. */
   readonly repairs: readonly string[]
+  /**
+   * Card stage only: the history range this card replaces. The ledger shows it
+   * as the point where the leg was cut, so a reader can see what the model
+   * stopped being able to re-read.
+   */
+  readonly relay?: RelayTrace
+}
+
+/** What the relay cut before this step: covered history range and its user turn. */
+export interface RelayTrace {
+  /** First history item the card covers. */
+  readonly from: number
+  /** One past the last covered item. */
+  readonly to: number
+  /** 1-based user turn of the covered items. */
+  readonly turn: number
+  /** True when the fallback card was used instead of the model's recap. */
+  readonly fallback: boolean
+  /** The card text the model will see from now on. */
+  readonly card: string
 }
 
 export interface StepHooks {
@@ -298,13 +318,14 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
 
   const traced = (
     stage: 'decision' | 'answer' | 'card', prompt: string, output: string, result: GenerateResult, action: Action,
-    outcome: string, gateRepairs: readonly string[] = [],
+    outcome: string, gateRepairs: readonly string[] = [], relay?: RelayTrace,
   ) => {
     const parsed = action.type === 'tool' || action.type === 'exit' ? action.repairs : []
     hooks?.trace?.({
       stage, prompt, output, finish: result.finish, action: describe(action), outcome,
       repairs: [...parsed, ...gateRepairs],
       ...result.stop === undefined ? {} : { stop: result.stop },
+      ...relay === undefined ? {} : { relay },
     })
   }
   const parseOptions = { strict: !config.outputRepairs }
@@ -317,6 +338,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
    */
   const writeCard = async (need: RelayNeed, cards: readonly RelayCard[]): Promise<RelayCard> => {
     let text = ''
+    let pending: { output: string; result: GenerateResult; prompt: string } | undefined
     try {
       const entries: Entry[] = [
         { role: 'system', text: system },
@@ -324,13 +346,25 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       ]
       const { output, result, prompt } = await generate(entries, 'card', 'handoff recap')
       text = cleanCardText(output)
-      traced('card', prompt, output, result, { type: 'final', text }, text === '' ? 'card-empty' : 'card')
+      pending = { output, result, prompt }
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') throw error
       // Network or protocol failure: keep going with the fallback card.
     }
     const budget = Math.min(500, config.relay?.cardMaxTokens ?? 768)
     const card = makeCard(input.history, need, text !== '' ? text : fallbackCard(input.history, need, budget))
+    // The ledger records the cut itself, not just the generation: the card text
+    // and covered range are what the next prompt was actually built from, and
+    // the step prompt alone cannot show either.
+    const relay: RelayTrace = { from: need.start, to: need.end, turn: need.turn, fallback: text === '', card: card.text }
+    if (pending !== undefined) {
+      traced('card', pending.prompt, pending.output, pending.result, { type: 'final', text }, text === '' ? 'card-empty' : 'card', [], relay)
+    } else if (hooks?.trace !== undefined) {
+      // No generation to show (network or protocol failure): still mark the cut.
+      hooks.trace({
+        stage: 'card', prompt: '', output: '', finish: 'error', action: 'card', outcome: 'card-failed', repairs: [], relay,
+      })
+    }
     input.relay?.save?.(card)
     return card
   }

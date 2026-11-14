@@ -24,6 +24,17 @@ export interface TraceRecord {
   /** Step records: the arguments DSH received (long strings cut) and how they differ from the model's. */
   readonly args?: Record<string, unknown>
   readonly changes?: readonly ArgumentChange[]
+  /** Card records only: the history range this handoff card replaced. */
+  readonly relay?: RelayCardTrace
+}
+
+/** Where the relay cut the conversation, and the card the model reads instead. */
+export interface RelayCardTrace {
+  readonly from: number
+  readonly to: number
+  readonly turn: number
+  readonly fallback: boolean
+  readonly card: string
 }
 
 export interface ArgumentChange {
@@ -146,9 +157,13 @@ export const REPAIR_LABEL: Record<string, string> = {
 }
 
 export const isGeneration = (record: TraceRecord) => record.stage === 'decision' || record.stage === 'answer'
+/** A relay handoff card: a generation like any other, but its own row in the ledger. */
+export const isCard = (record: TraceRecord) => record.stage === 'card'
 
-/** The plugin touched this generation: a repair, a re-ask, a gate, a closeout. */
+/** The plugin touched this generation: a repair, a re-ask, a gate, a closeout, a fallback card. */
 export function touched(record: TraceRecord): boolean {
+  // A card that had to fall back to the generated summary is a crutch too.
+  if (isCard(record)) return record.relay?.fallback === true || record.outcome === 'card-empty' || record.outcome === 'card-failed'
   if (!isGeneration(record) || record.outcome === undefined) return false
   return !((record.outcome === 'run' || record.outcome === 'final') && (record.repairs ?? []).length === 0)
 }
