@@ -146,7 +146,7 @@ Assistant: <think                                           ← 模型从这里�
 
 ## 致谢
 
-这个插件站在下面这些项目上面：
+这个插件建立在下面这些项目之上，也借鉴了它们的协议和实现：
 
 - **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)**（MIT）：会话、工具、沙箱、插件机制和设置页框架都由它提供，动作协议和工具清单也按它的 Standard 提示词改。
 - **[RWKV](https://github.com/BlinkDL/RWKV-LM)**（Apache-2.0）：RWKV-7 G1 模型本体。续写式的 prompt 结构、思考块、工具调用格式和兜底链移植自 [RWKV-Agent](https://github.com/No-22-Github/RWKV-Agent)（更早的自研 harness）。
