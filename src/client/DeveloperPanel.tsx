@@ -14,6 +14,10 @@ export interface DeveloperSettings {
   traceDir: string
   outputRepairs: boolean
   guards: boolean
+  /** Experimental relay context; the switch edits `historyMode` in the Host schema. */
+  historyMode: 'full' | 'relay'
+  relayBudgetTokens: number
+  relayCardMaxTokens: number
 }
 
 export const DEVELOPER_DEFAULTS: DeveloperSettings = {
@@ -21,6 +25,9 @@ export const DEVELOPER_DEFAULTS: DeveloperSettings = {
   traceDir: '',
   outputRepairs: true,
   guards: true,
+  historyMode: 'full',
+  relayBudgetTokens: 8000,
+  relayCardMaxTokens: 768,
 }
 
 function Toggle(props: { label: string; hint: string; checked: boolean; disabled: boolean; onChange: (value: boolean) => void }) {
@@ -217,6 +224,30 @@ function DirInput(props: { value: string; disabled: boolean; onSave: (value: str
   )
 }
 
+/**
+ * A number the Host validates, so it is edited as text and written on blur or
+ * Enter: a half-typed value would otherwise be saved and refused.
+ */
+function NumberField(props: { value: number; onSave: (value: number) => void; disabled: boolean; placeholder?: string }) {
+  const [text, setText] = useState(String(props.value))
+  useEffect(() => setText(String(props.value)), [props.value])
+  const commit = () => {
+    const parsed = Number(text)
+    if (text.trim() === '' || !Number.isInteger(parsed) || parsed <= 0) {
+      setText(String(props.value))
+      return
+    }
+    if (parsed !== props.value) props.onSave(parsed)
+  }
+  return (
+    <input
+      className="rwkv-input" inputMode="numeric" value={text} disabled={props.disabled} placeholder={props.placeholder}
+      onChange={event => setText(event.target.value)} onBlur={commit}
+      onKeyDown={event => { if (event.key === 'Enter') commit() }}
+    />
+  )
+}
+
 export function DeveloperCard(props: {
   settings: DeveloperSettings
   disabled: boolean
@@ -238,9 +269,37 @@ export function DeveloperCard(props: {
           {settings.recordTraces ? '轨迹随会话保存' : '轨迹只在内存'}
           {settings.outputRepairs ? '' : ' · 修正已关'}
           {settings.guards ? '' : ' · 修复已关'}
+          {settings.historyMode === 'relay' ? ' · 接力上下文' : ''}
         </span>
       </summary>
       <div className="rwkv-developer-body">
+        <Toggle
+          label="实验性上下文管理（接力）" checked={settings.historyMode === 'relay'} disabled={off}
+          onChange={value => { void set('historyMode', value ? 'relay' : 'full') }}
+          hint={settings.historyMode === 'relay'
+            ? '已开启：早先的对话段被模型自己写的交接卡替换，只有最近一次工具调用和结果原样保留。每一轮用户消息开始处切断，卡片写在会话记录旁边，可随会话恢复。'
+            : '关闭时模型读完整对话。开启后，超过预算的早期步骤被一段六段式交接卡替换，用来压缩上下文。这是实验特性，只影响模型能看到的历史，不改变工具与提示词。'}
+        />
+        {settings.historyMode === 'relay' ? (
+          <div className="rwkv-grid">
+            <label className="rwkv-field">
+              <span className="rwkv-label">接力预算（token）</span>
+              <NumberField
+                value={settings.relayBudgetTokens} disabled={off} placeholder="8000"
+                onSave={value => { void set('relayBudgetTokens', value) }}
+              />
+              <p className="rwkv-hint">一段对话超过这个估算预算就写卡。最近一次工具调用和它的结果始终原样保留，不参与估算。</p>
+            </label>
+            <label className="rwkv-field">
+              <span className="rwkv-label">单张卡上限（token）</span>
+              <NumberField
+                value={settings.relayCardMaxTokens} disabled={off} placeholder="768"
+                onSave={value => { void set('relayCardMaxTokens', value) }}
+              />
+              <p className="rwkv-hint">写卡请求的输出上限，思考也算在里面。太小会让卡写不完而退回自动生成的摘要。</p>
+            </label>
+          </div>
+        ) : null}
         <Toggle
           label="原始运行轨迹落盘" checked={settings.recordTraces} disabled={off} onChange={value => { void set('recordTraces', value) }}
           hint="默认保存在 DSH 会话记录文件旁，会跟随原始会话一并删除。关闭后将不再落盘，仅保存在内存，DSH 运行时仍然可看。"
