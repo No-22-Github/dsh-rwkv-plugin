@@ -3,7 +3,9 @@ import { test } from 'node:test'
 import { addSeen, applyLineEdit, editSummary, formatRanges, sandboxPolicyFor, seenAfterEdit, syntaxRejection, unseenLines, unseenRejection } from '../src/core/line-edit.ts'
 import { introducedSyntaxError } from '../src/syntax-check.ts'
 import { buildCatalog, type DshToolSchema } from '../src/core/tools.ts'
-import { applyResultBudget, capReadResult, estimateTokens, readWindow, spillNotice, spillText, READ_SHOWN_EVENT, RESULT_TOKEN_BUDGET } from '../src/result-budget.ts'
+import { applyResultBudget, capReadResult, readWindow, spillNotice, spillText, toolResultTokens, READ_SHOWN_EVENT, RESULT_TOKEN_BUDGET } from '../src/result-budget.ts'
+import { toolResponse } from '../src/core/prompt.ts'
+import { countTokens, vocabSize } from '../src/tokenizer.ts'
 
 const FILE = 'a\nb\nc\nd\ne\n'
 
@@ -76,10 +78,12 @@ test('catalog: edit_lines replaces edit when offered', () => {
   assert.ok(without.some(tool => tool.dshName === 'edit'))
 })
 
+const webFetch = (body: string) => toolResponse('web_fetch', true, body)
+
 test('result budget: spill keeps head and tail and names the file', () => {
   const text = `HEAD${'x'.repeat(40_000)}TAIL`
-  const out = spillText(text, RESULT_TOKEN_BUDGET, bytes => spillNotice(bytes, '/spill/web_fetch.txt', 'Read it with read.'))
-  assert.ok(estimateTokens(out) <= RESULT_TOKEN_BUDGET, `${estimateTokens(out)} tokens`)
+  const out = spillText(text, RESULT_TOKEN_BUDGET, bytes => spillNotice(bytes, '/spill/web_fetch.txt', 'Read it with read.'), webFetch)
+  assert.ok(toolResultTokens('web_fetch', out) <= RESULT_TOKEN_BUDGET, `${toolResultTokens('web_fetch', out)} tokens`)
   assert.ok(out.startsWith('HEAD') && out.includes('TAIL\n\n(Omitted '))
   assert.match(out, /\n\n\[\.\.\.\]\n\n/)
   assert.match(out, /\(Omitted \d+ bytes\. Full formatted result stored at: \/spill\/web_fetch\.txt\. Read it with read\.\)$/)
@@ -91,23 +95,23 @@ test('result budget: spill keeps head and tail and names the file', () => {
 test('result budget: read is shortened at a line with a continuation footer', () => {
   const lines = Array.from({ length: 2000 }, (_, i) => `${i + 1}: ${'y'.repeat(40)}`)
   const text = `<path>/w/big.txt</path>\n<type>file</type>\n<content>\n${lines.join('\n')}\n\n(End of file - total 2000 lines)\n</content>`
-  const out = capReadResult(text, RESULT_TOKEN_BUDGET)
+  const out = capReadResult(text, RESULT_TOKEN_BUDGET, webFetch)
   assert.ok(out !== undefined)
-  assert.ok(estimateTokens(out) <= RESULT_TOKEN_BUDGET)
+  assert.ok(toolResultTokens('read', out) <= RESULT_TOKEN_BUDGET)
   const shown = /Showing lines 1-(\d+) of 2000\. Use offset=(\d+) to continue\.\)\n<\/content>$/.exec(out)
   assert.ok(shown, out.slice(-200))
   assert.equal(Number(shown[2]), Number(shown[1]) + 1)
   assert.ok(out.includes(`\n${shown[1]}: y`) && !out.includes(`\n${Number(shown[1]) + 1}: y`))
-  assert.equal(capReadResult(text.slice(0, 500), RESULT_TOKEN_BUDGET), undefined, 'short results untouched')
+  assert.equal(capReadResult(text.slice(0, 500), RESULT_TOKEN_BUDGET, webFetch), undefined, 'short results untouched')
 })
 
 test('result budget: read footer keeps the total when DSH gave one', () => {
   const lines = Array.from({ length: 900 }, (_, i) => `${i + 1}: ${'z'.repeat(40)}`)
   const wrap = (footer: string) => `<path>/w/f.txt</path>\n<type>file</type>\n<content>\n${lines.join('\n')}\n\n${footer}\n</content>`
   // read's own line-limit footer (offset/limit given): the total survives the cut.
-  assert.match(capReadResult(wrap('(Showing lines 1-900 of 4000. Use offset=901 to continue.)'), RESULT_TOKEN_BUDGET)!, /\(Showing lines 1-\d+ of 4000\. Use offset=\d+ to continue\.\)\n<\/content>$/)
+  assert.match(capReadResult(wrap('(Showing lines 1-900 of 4000. Use offset=901 to continue.)'), RESULT_TOKEN_BUDGET, webFetch)!, /\(Showing lines 1-\d+ of 4000\. Use offset=\d+ to continue\.\)\n<\/content>$/)
   // read's byte cap: no total known, DSH's byte-cap wording.
-  assert.match(capReadResult(wrap('(Output capped. Showing lines 1-900. Use offset=901 to continue.)'), RESULT_TOKEN_BUDGET)!, /\(Output capped\. Showing lines 1-\d+\. Use offset=\d+ to continue\.\)\n<\/content>$/)
+  assert.match(capReadResult(wrap('(Output capped. Showing lines 1-900. Use offset=901 to continue.)'), RESULT_TOKEN_BUDGET, webFetch)!, /\(Output capped\. Showing lines 1-\d+\. Use offset=\d+ to continue\.\)\n<\/content>$/)
 })
 
 test('result budget: readWindow reads the shown line numbers', () => {
@@ -180,12 +184,18 @@ const MEASURED: Record<string, { text: string; tokens: number }> = {
   }
 }
 
-test('result budget: the estimate does not fall below real RWKV token counts', () => {
+test('result budget: the tokenizer reproduces the recorded RWKV World counts exactly', () => {
   for (const [name, { text, tokens }] of Object.entries(MEASURED)) {
-    const estimate = estimateTokens(text)
-    assert.ok(estimate >= tokens, `${name}: estimate ${estimate} < real ${tokens}`)
-    assert.ok(estimate <= tokens * 2, `${name}: estimate ${estimate} more than twice real ${tokens}`)
+    const counted = toolResultTokens('web_fetch', text)
+    assert.equal(counted, tokens, `${name}: counted ${counted}, recorded ${tokens}`)
   }
+})
+
+test('tokenizer: vendored WASM is the World vocabulary the corpora were counted with', () => {
+  assert.equal(vocabSize(), 65_530)
+  assert.equal(countTokens('你好，RWKV！'), 6)
+  assert.equal(countTokens(''), 0)
+  for (const { text } of Object.values(MEASURED)) assert.equal(countTokens(text) > 0, true)
 })
 
 test('edit_lines: the write carries the session sandbox policy, never the deployment fallback', () => {

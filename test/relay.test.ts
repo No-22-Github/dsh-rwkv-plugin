@@ -6,7 +6,7 @@ import { analyzeTurn, type HistoryItem } from '../src/core/policy.ts'
 import {
   cleanCardText,
   cardEntries,
-  estimateItems,
+  itemTokens,
   fallbackCard,
   makeCard,
   planRelay,
@@ -100,7 +100,7 @@ test('relay: a new user turn cards the finished work and keeps the new task', as
 
 test('relay: an over-budget leg is cut without splitting a call from its result', () => {
   const lastCall = turnOne.length - 2 // c4
-  const budget = estimateItems(turnOne.slice(0, 6))
+  const budget = itemTokens(turnOne.slice(0, 6))
   const plan = planRelay(turnOne, [], { budgetTokens: budget, cardMaxTokens: 256 })
   assert.ok(plan.need !== undefined)
   assert.equal(plan.need!.turnEnd, false)
@@ -116,7 +116,7 @@ test('relay: an over-budget leg is cut without splitting a call from its result'
 })
 
 test('relay: the recap request has no per-step reminders; the execution prompt does', async () => {
-  const budget = estimateItems(turnOne.slice(0, 6))
+  const budget = itemTokens(turnOne.slice(0, 6))
   const generator = new ScriptedGenerator([
     recapOutput('recap: a.txt was edited; pytest failed.'),
     '>Done.</think>All set.',
@@ -165,7 +165,7 @@ test('relay: a recap that writes a tool call falls back to the deterministic car
     '<tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}</tool_call>',
     '>Reading.</think><tool_call>{"name":"read_file","arguments":{"path":"test_a.py"}}',
   ])
-  const budget = estimateItems(turnOne.slice(0, 6))
+  const budget = itemTokens(turnOne.slice(0, 6))
   const config: HarnessConfig = { ...DEFAULT_HARNESS, maxSteps: 5, relay: { budgetTokens: budget, cardMaxTokens: 256 } }
   const saved: RelayCard[] = []
   await decideStep({ history: turnOne, tools, config, generator, relay: { cards: [], save: card => saved.push(card) } })

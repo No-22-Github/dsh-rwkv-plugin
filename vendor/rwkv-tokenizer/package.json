@@ -1,0 +1,5 @@
+{
+  "name": "rwkv-tokenizer-vendored",
+  "private": true,
+  "type": "commonjs"
+}

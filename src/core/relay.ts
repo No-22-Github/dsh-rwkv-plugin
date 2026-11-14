@@ -11,7 +11,7 @@
 // (Step-3.7-Flash: 70.0 -> 66.8 at 48K/40K, 56.6 at 16K/12K on SWE-bench
 // Verified), hence the teacher gate before any bulk collection.
 
-import { estimateTokens } from '../result-budget.ts'
+import { countTokens } from '../tokenizer.ts'
 import type { Entry } from './prompt.ts'
 import { recordToolCall, toolResponse } from './prompt.ts'
 import { transcriptEntries, isMutatingCall, type HistoryItem } from './policy.ts'
@@ -110,10 +110,10 @@ function itemText(item: HistoryItem): string {
   }
 }
 
-/** Estimated RWKV tokens of the history items as prompt bytes. */
-export function estimateItems(items: readonly HistoryItem[]): number {
+/** Exact RWKV World tokens of the history items as prompt bytes. */
+export function itemTokens(items: readonly HistoryItem[]): number {
   let total = 0
-  for (const item of items) total += estimateTokens(itemText(item))
+  for (const item of items) total += countTokens(itemText(item))
   return total
 }
 
@@ -174,8 +174,8 @@ export function validCards(history: readonly HistoryItem[], cards: readonly Rela
 }
 
 /**
- * Largest cut of the leg whose estimate stays inside `budget`: cut only after a
- * completed call/result pair, never covering the most recent pair (its result
+ * Largest cut of the leg whose token count stays inside `budget`: cut only after
+ * a completed call/result pair, never covering the most recent pair (its result
  * is what the model is about to act on). No complete pair fits: no cut.
  */
 function cutIndex(history: readonly HistoryItem[], start: number, budget: number): number {
@@ -187,7 +187,7 @@ function cutIndex(history: readonly HistoryItem[], start: number, budget: number
   let total = 0
   let cut = start
   for (let index = start; index < history.length; index++) {
-    total += estimateTokens(itemText(history[index]!))
+    total += countTokens(itemText(history[index]!))
     if (history[index]!.kind !== 'result') continue
     // The pair ending here would swallow the most recent call: keep it verbatim.
     if (index + 1 > lastCall) break
@@ -222,7 +222,7 @@ export function planRelay(history: readonly HistoryItem[], cards: readonly Relay
   const leg = history.slice(legStart)
   // Nothing to recap before the model has observed anything.
   if (!leg.some(item => item.kind === 'call' || item.kind === 'result')) return { cards: valid, legStart }
-  if (estimateItems(leg) <= options.budgetTokens) return { cards: valid, legStart }
+  if (itemTokens(leg) <= options.budgetTokens) return { cards: valid, legStart }
   const end = cutIndex(history, legStart, options.budgetTokens)
   if (end <= legStart) return { cards: valid, legStart }
   // A card holding only the task (no observation yet) would summarise nothing.
@@ -330,10 +330,17 @@ export function cleanCardText(output: string): string {
 }
 
 function clampText(text: string, maxTokens: number): string {
-  if (estimateTokens(text) <= maxTokens) return text
+  if (countTokens(text) <= maxTokens) return text
   const lines = text.split('\n')
-  while (lines.length > 1 && estimateTokens(`${lines.join('\n')}\n…`) > maxTokens) lines.pop()
-  return `${lines.join('\n')}\n…`
+  let low = 1
+  let high = lines.length
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2)
+    const piece = `${lines.slice(0, middle).join('\n')}\n…`
+    if (countTokens(piece) <= maxTokens) low = middle
+    else high = middle - 1
+  }
+  return `${lines.slice(0, low).join('\n')}\n…`
 }
 
 /** Short, exact-enough rendering of call arguments for the fallback card. */

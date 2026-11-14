@@ -117,7 +117,7 @@ export const Config = z.object({
   historyMode: z.union(['full', 'relay']).default('full')
     .description('full: the model reads the whole conversation. relay: finished legs are replaced by model-written handoff cards; the most recent call/result pair stays verbatim and the duplicate-call gate restarts at each leg.').volatile(),
   relayBudgetTokens: z.natural().default(8000)
-    .description('relay: estimated token budget for the part of the leg that gets carded; the latest call/result pair is always kept.').volatile(),
+    .description('relay: exact RWKV token budget for the part of the leg that gets carded; the latest call/result pair is always kept.').volatile(),
   relayCardMaxTokens: z.natural().default(768)
     .description('relay: output cap of one handoff recap.').volatile(),
   recordTraces: z.boolean().default(true)

@@ -10,6 +10,7 @@
     "lib",
     "src",
     "scripts",
+    "vendor",
     "cordis.patch.yml"
   ],
   "scripts": {

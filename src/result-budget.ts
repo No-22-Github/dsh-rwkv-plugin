@@ -14,78 +14,48 @@
 // read is not spilled (the file is on disk already): its window is shortened
 // at a line boundary with read's own "Output capped ... Use offset=N" footer.
 //
-// Tokens are RWKV World tokens, estimated (see estimateTokens) so that the
-// estimate is rarely below the real count: better to show the model a little
-// less than to overflow it.
+// Tokens are exact RWKV World tokens (src/tokenizer.ts, the vendored
+// rwkv-tokenizer WASM). A result is measured as the <tool_response> the model
+// reads, JSON escaping included; the prompt's "User: " label and whitespace
+// cleanup are not counted (a few tokens, same as before). The budget is what
+// it says: 3000 RWKV tokens, not 3000 of an estimate.
 //
 // No DSH runtime imports: the pipeline's teacher plugin mounts the same hook.
 
-/** Estimated RWKV tokens a tool result may take inline (as the model sees it, JSON-escaped). */
+import { toolResponse } from './core/prompt.ts'
+import { countTokens } from './tokenizer.ts'
+
+/** RWKV tokens a tool result may take inline (as the model sees it, JSON-escaped). */
 export const RESULT_TOKEN_BUDGET = 3000
 
-/**
- * Tokens per character, by character class, of the JSON-escaped text the
- * model reads inside <tool_response>. Fitted on 3521 real tool results (eval
- * runs 2026-11-11 and the mix-20261111 training pack, 551 mostly Chinese) and
- * their 1000-character pieces against rwkv-tokenizer-go (rwkv_vocab_v20230424)
- * so that it overestimates: median estimate/real about 1.26, below the real
- * count for 0.3% of results and 0.8% of pieces, at worst about 0.78 (runs of
- * short identifiers, escaped byte strings). Re-measure with
- * scripts/calibrate-token-estimate.ts after a tokenizer or format change.
- */
-export const TOKEN_WEIGHTS = {
-  letter: 0.4,
-  digit: 1,
-  space: 0.2,
-  punctuation: 0.6,
-  cjk: 1.25,
-  other: 1,
-} as const
+/** `text` as the prompt will carry it: `<tool_response>` + JSON payload. */
+export type Wrap = (body: string) => string
 
-function charWeight(code: number): number {
-  if (code < 128) {
-    if ((code >= 65 && code <= 90) || (code >= 97 && code <= 122)) return TOKEN_WEIGHTS.letter
-    if (code >= 48 && code <= 57) return TOKEN_WEIGHTS.digit
-    if (code === 32 || code === 9 || code === 10 || code === 13) return TOKEN_WEIGHTS.space
-    return TOKEN_WEIGHTS.punctuation
-  }
-  if ((code >= 0x2e80 && code <= 0x9fff) || (code >= 0xf900 && code <= 0xfaff)
-    || (code >= 0xff00 && code <= 0xffef) || (code >= 0xac00 && code <= 0xd7af)) return TOKEN_WEIGHTS.cjk
-  return TOKEN_WEIGHTS.other
+/** Exact RWKV tokens of one tool result as the model reads it. */
+export function toolResultTokens(tool: string, body: string): number {
+  return countTokens(toolResponse(tool, true, body))
 }
 
-/** Weight of one character as it appears JSON-escaped ("\n" is a backslash and an n). */
-function escapedWeight(char: string): number {
-  const code = char.codePointAt(0) ?? 0
-  if (code >= 32 && code !== 34 && code !== 92) return charWeight(code)
-  let weight = 0
-  for (const part of JSON.stringify(char).slice(1, -1)) weight += charWeight(part.codePointAt(0) ?? 0)
-  return weight
-}
-
-/** Framing around a result (<tool_response>{"ok":true,"tool":...,"result":"...", "}</tool_response>). */
-const RESULT_OVERHEAD = 24
 const GAP = '\n\n[...]\n\n'
 
-/** Estimated RWKV tokens of `text` inside a tool response (rarely below the real count). */
-export function estimateTokens(text: string): number {
-  let weight = 0
-  for (const char of text) weight += escapedWeight(char)
-  return Math.ceil(weight) + RESULT_OVERHEAD
-}
-
-/** Longest prefix (or suffix) of `text` whose estimate stays within `tokens`; whole code points. */
-function fit(text: string, tokens: number, fromEnd: boolean): string {
+/**
+ * Longest prefix (or suffix) of `text` whose wrapped token count stays within
+ * `tokens`; whole code points. Token counts are not perfectly monotone in the
+ * cut point (a cut can split a token), so this is a binary search that accepts
+ * the largest tested prefix that fits.
+ */
+function fit(text: string, tokens: number, fromEnd: boolean, wrap: Wrap): string {
   const chars = Array.from(text)
-  let weight = 0
-  let count = 0
-  for (let i = 0; i < chars.length; i++) {
-    const next = weight + escapedWeight(chars[fromEnd ? chars.length - 1 - i : i]!)
-    if (next > tokens) break
-    weight = next
-    count++
+  const piece = (count: number): string =>
+    fromEnd ? chars.slice(chars.length - count).join('') : chars.slice(0, count).join('')
+  let low = 0
+  let high = chars.length
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2)
+    if (countTokens(wrap(piece(middle))) <= tokens) low = middle
+    else high = middle - 1
   }
-  return fromEnd ? chars.slice(chars.length - count).join('') : chars.slice(0, count).join('')
+  return piece(low)
 }
 
 /** DSH spill-policy's notice (notice.ts formatSpillNotice), so DSH and its UI recognise it. */
@@ -96,17 +66,26 @@ export function spillNotice(omittedBytes: number, locator: string, retrievalHint
 /**
  * `text` bounded to `budget` the way DSH spill-policy does it: half the room
  * for the head, half for the tail, the notice for the saved full text last.
- * `notice(omittedBytes)` renders that notice.
+ * `notice(omittedBytes)` renders that notice; `wrap` renders the bytes the
+ * model actually reads (default: the body as is).
  */
-export function spillText(text: string, budget: number, notice: (omittedBytes: number) => string): string {
+export function spillText(text: string, budget: number, notice: (omittedBytes: number) => string, wrap: Wrap = body => body): string {
+  if (countTokens(wrap(text)) <= budget) return text
   const totalBytes = Buffer.byteLength(text, 'utf8')
-  const reserved = estimateTokens(`${GAP}\n\n${notice(totalBytes)}`)
+  const reserved = countTokens(wrap(`${GAP}\n\n${notice(totalBytes)}`))
   const room = Math.max(0, budget - reserved)
-  const kept = fit(text, Math.ceil(room / 2), false)
+  const kept = fit(text, Math.ceil(room / 2), false, wrap)
   const rest = text.slice(kept.length)
-  const end = fit(rest, Math.floor(room / 2), true)
+  const end = fit(rest, Math.floor(room / 2), true, wrap)
   const omitted = Buffer.byteLength(rest.slice(0, rest.length - end.length), 'utf8')
-  return kept.length + end.length === 0 ? notice(omitted) : `${kept}${GAP}${end}\n\n${notice(omitted)}`
+  let bounded = kept.length + end.length === 0 ? notice(omitted) : `${kept}${GAP}${end}\n\n${notice(omitted)}`
+  // Head and tail are fitted separately; the joined text can be a token or two
+  // over. Drop whole lines from the tail until the real count fits.
+  while (countTokens(wrap(bounded)) > budget && bounded.includes('\n')) {
+    const at = bounded.lastIndexOf('\n')
+    bounded = bounded.slice(0, at)
+  }
+  return bounded
 }
 
 const READ_LINE = /^(\d+): /
@@ -139,8 +118,8 @@ export const READ_SHOWN_EVENT = 'rwkv/read-shown'
  * to fit `budget`, with read's own byte-cap footer; undefined when it already
  * fits or is not in that shape. At least one line is kept.
  */
-export function capReadResult(text: string, budget: number): string | undefined {
-  if (estimateTokens(text) <= budget) return undefined
+export function capReadResult(text: string, budget: number, wrap: Wrap = body => body): string | undefined {
+  if (countTokens(wrap(text)) <= budget) return undefined
   const open = text.indexOf('<content>\n')
   const close = text.lastIndexOf('\n</content>')
   if (open < 0 || close < open) return undefined
@@ -165,7 +144,7 @@ export function capReadResult(text: string, budget: number): string | undefined 
   let high = lines.length
   while (low < high) {
     const middle = Math.ceil((low + high) / 2)
-    if (estimateTokens(render(middle)) <= budget) low = middle
+    if (countTokens(wrap(render(middle))) <= budget) low = middle
     else high = middle - 1
   }
   return render(low)
@@ -216,13 +195,16 @@ export function applyResultBudget(ctx: unknown, options: ResultBudgetOptions): v
     const content = decision.content ?? result.content
     if (!content.every(block => block.type === 'text')) return decision
     const text = content.map(block => block.text ?? '').join('')
+    // Successful-frame bytes: for a failed result the wire says "error" instead
+    // of "result", a token or two either way.
+    const wrap: Wrap = body => toolResponse(exec.name, true, body)
     if (exec.name === 'read') {
-      const bounded = estimateTokens(text) <= budget ? undefined : capReadResult(text, budget)
+      const bounded = countTokens(wrap(text)) <= budget ? undefined : capReadResult(text, budget, wrap)
       const window = readWindow(bounded ?? text)
       if (window !== undefined) context.emit(READ_SHOWN_EVENT, exec, window)
       return bounded === undefined ? decision : { ...decision, kind: 'accept', content: [{ type: 'text', text: bounded }] }
     }
-    if (estimateTokens(text) <= budget) return decision
+    if (countTokens(wrap(text)) <= budget) return decision
     let bounded: string | undefined
     {
       const store = context.get('spillStore') as SpillStoreLike | undefined
@@ -237,7 +219,7 @@ export function applyResultBudget(ctx: unknown, options: ResultBudgetOptions): v
         suggestedName: `${exec.name}.txt`,
         content: text,
       })
-      bounded = spillText(text, budget, bytes => spillNotice(bytes, ref.locator, ref.retrievalHint))
+      bounded = spillText(text, budget, bytes => spillNotice(bytes, ref.locator, ref.retrievalHint), wrap)
     }
     return bounded === undefined ? decision : { ...decision, kind: 'accept', content: [{ type: 'text', text: bounded }] }
   })

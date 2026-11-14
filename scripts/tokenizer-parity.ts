@@ -1,14 +1,14 @@
-// Checks estimateTokens (src/result-budget.ts) against real RWKV World token
-// counts from rwkv-tokenizer-go, on tool results as the model sees them
-// (inside <tool_response>, JSON-escaped). The estimate should rarely be below
-// the real count: report how often it is, and by how much it overestimates.
+// Checks the vendored tokenizer (src/tokenizer.ts) against rwkv-tokenizer-go on
+// real tool results as the model reads them (inside <tool_response>,
+// JSON-escaped). Both must produce the same ids: the Go binary is the
+// reference every training-pack and evaluation token count was taken with.
 //
-//   node scripts/calibrate-token-estimate.ts [--tokenizer BIN] [--limit N] SOURCE...
+//   node scripts/tokenizer-parity.ts [--tokenizer BIN] [--limit N] SOURCE...
 //
 // SOURCE: DSH --json event logs (events-*.jsonl: tool_result events), files
 // holding one <tool_response>...</tool_response> segment, or directories of
 // either. Results shorter than 300 characters are skipped; duplicates once.
-// Every result is also cut into 1000-character pieces (the cut lands locally).
+// Exits non-zero when any sample differs, printing the first few.
 
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -17,7 +17,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { toolResponse } from '../src/core/prompt.ts'
-import { estimateTokens } from '../src/result-budget.ts'
+import { countTokens } from '../src/tokenizer.ts'
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -44,7 +44,13 @@ function add(tool: string, text: string): void {
 }
 
 function readSource(path: string): void {
-  if (statSync(path).isDirectory()) {
+  let stat
+  try {
+    stat = statSync(path)
+  } catch {
+    return
+  }
+  if (stat.isDirectory()) {
     for (const name of readdirSync(path)) readSource(join(path, name))
     return
   }
@@ -74,36 +80,28 @@ function readSource(path: string): void {
 
 for (const source of positionals) readSource(source)
 if (samples.length === 0) {
-  console.error('usage: node scripts/calibrate-token-estimate.ts [--tokenizer BIN] [--limit N] SOURCE...')
+  console.error('usage: node scripts/tokenizer-parity.ts [--tokenizer BIN] [--limit N] SOURCE...')
   process.exit(2)
 }
 
-function realTokens(text: string): number {
+function goTokens(text: string): number {
   const run = spawnSync(values.tokenizer!, ['encode'], { input: text, encoding: 'utf8', maxBuffer: 1 << 28 })
   if (run.status !== 0) throw new Error(`tokenizer failed: ${run.stderr}`)
   return run.stdout.split(/\s+/).filter(Boolean).length
 }
 
-/** The tool response the model reads; estimateTokens already counts the framing. */
+/** The tool response the model reads. */
 const wire = (tool: string, text: string) => toolResponse(tool, true, text)
 
-const whole: { tool: string; ratio: number }[] = []
-const pieces: number[] = []
+let identical = 0
+const different: { tool: string; wasm: number; go: number; preview: string }[] = []
 for (const { tool, text } of samples) {
-  whole.push({ tool, ratio: estimateTokens(text) / realTokens(wire(tool, text)) })
-  for (let at = 0; at + 1000 <= text.length && at < 6000; at += 1000) {
-    const piece = text.slice(at, at + 1000)
-    pieces.push(estimateTokens(piece) / realTokens(wire(tool, piece)))
-  }
+  const body = wire(tool, text)
+  const wasm = countTokens(body)
+  const go = goTokens(body)
+  if (wasm === go) identical++
+  else if (different.length < 10) different.push({ tool, wasm, go, preview: text.slice(0, 120) })
 }
-
-const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor((xs.length - 1) / 2)] ?? NaN
-const line = (label: string, xs: number[]) =>
-  `${label.padEnd(12)} n=${String(xs.length).padStart(5)}  below real ${(100 * xs.filter(x => x < 1).length / xs.length).toFixed(1).padStart(5)}%  `
-  + `min ${Math.min(...xs).toFixed(2)}  median ${median(xs).toFixed(2)}`
-console.log('estimate / real RWKV tokens')
-console.log(line('results', whole.map(x => x.ratio)))
-console.log(line('1000 chars', pieces))
-for (const tool of [...new Set(whole.map(x => x.tool))].sort()) {
-  console.log(line(`  ${tool}`, whole.filter(x => x.tool === tool).map(x => x.ratio)))
-}
+console.log(`samples ${samples.length}  identical ${identical}  different ${samples.length - identical}`)
+for (const row of different) console.log(JSON.stringify(row))
+if (different.length > 0) process.exit(1)
