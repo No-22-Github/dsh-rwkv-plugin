@@ -542,3 +542,34 @@ test('toolOverrides replace description and named argument placeholders only', (
   assert.equal(edited!.description, 'D')
   assert.equal(edited!.arguments, '{"file_path":"Path to edit","old_string":"O","new_string":"Literal replacement text"}')
 })
+
+test('web-research turns nudge early and close out at WEB_RESEARCH_MAX_STEPS without contradictory reminder', async () => {
+  const webTools = buildCatalog([
+    { name: 'web_search', description: '', parameters: {} },
+    { name: 'web_fetch', description: '', parameters: {} },
+  ], { mode: 'mapped', names: 'dsh' })
+  const makeWebHistory = (count: number): HistoryItem[] => {
+    const items: HistoryItem[] = [{ kind: 'user', text: 'Summarize RWKV engines' }]
+    for (let index = 0; index < count; index++) {
+      items.push({ kind: 'call', id: `w${index}`, name: 'web_search', args: { queries: [`rwkv engine query ${index}`] } })
+      items.push({ kind: 'result', id: `w${index}`, name: 'web_search', ok: true, text: `result ${index}` })
+    }
+    return items
+  }
+  // At 3 web calls (before cap 6), reminder nudges model to stop searching and answer soon.
+  const nudgeGen = new ScriptedGenerator(['>Done.</think>All answered.'])
+  await decideStep({ history: makeWebHistory(3), tools: webTools, config: DEFAULT_HARNESS, generator: nudgeGen })
+  assert.match(nudgeGen.prompts[0]!, /Stop searching and synthesize a clear answer/)
+
+  // At 6 web calls with no mutations, closeout runs immediately even if maxSteps is 15.
+  const capGen = new ScriptedGenerator(['>Done.</think>Synthesized answer.'])
+  const capped = await decideStep({
+    history: makeWebHistory(6),
+    tools: webTools,
+    config: { ...DEFAULT_HARNESS, maxSteps: 15 },
+    generator: capGen,
+  })
+  assert.deepEqual(capped.decision, { type: 'final', text: 'Synthesized answer.', via: 'answer-stage' })
+  assert.doesNotMatch(capGen.prompts[0]!, /Call another tool only for a specific missing fact/)
+  assert.match(capGen.prompts[0]!, /Tool execution is complete and tools are now unavailable/)
+})

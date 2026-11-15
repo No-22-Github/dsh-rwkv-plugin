@@ -3,7 +3,7 @@
 // runner_turn.go, runner_answer_fallback.go). DSH executes the tools and keeps
 // the history, so the turn state is rebuilt from that history on every request.
 
-import { recordToolCall, toolResponse, type Entry } from './prompt.ts'
+import { recordToolCall, toolResponse, type Entry, type ThinkingMode } from './prompt.ts'
 import type { ParseErrorKind } from './parse.ts'
 import type { Args, WireTool } from './tools.ts'
 
@@ -147,6 +147,70 @@ function canonical(value: unknown): unknown {
   return value
 }
 
+export const WEB_RESEARCH_MAX_STEPS = 6
+
+export function isWebTool(name: string): boolean {
+  return name === 'web_search' || name === 'web_fetch'
+}
+
+export function extractSearchQueries(args: Args): string[] {
+  if (Array.isArray(args.queries)) {
+    return args.queries.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+  }
+  if (typeof args.query === 'string' && args.query.trim() !== '') {
+    return [args.query]
+  }
+  return []
+}
+
+export function normalizeSearchQuery(query: string): string {
+  return query.toLowerCase().trim().replace(/\s+/g, ' ').split(' ').filter(Boolean).sort().join(' ')
+}
+
+function normalizeFetchUrl(raw: string): string {
+  const trimmed = raw.trim()
+  try {
+    const parsed = new URL(trimmed)
+    parsed.hash = ''
+    if (parsed.pathname.length > 1 && parsed.pathname.endsWith('/')) {
+      parsed.pathname = parsed.pathname.slice(0, -1)
+    }
+    return parsed.toString()
+  } catch {
+    const base = trimmed.split('#')[0] ?? trimmed
+    return base.length > 1 ? base.replace(/\/+$/, '') : base
+  }
+}
+
+export function normalizedCallKey(name: string, args: Args): string {
+  if (name === 'web_fetch') {
+    if (typeof args.url === 'string') return callKey(name, { ...args, url: normalizeFetchUrl(args.url) })
+    if (Array.isArray(args.urls)) {
+      return callKey(name, {
+        ...args,
+        urls: args.urls.map(item => typeof item === 'string' ? normalizeFetchUrl(item) : item),
+      })
+    }
+  }
+  return callKey(name, args)
+}
+
+export function wrapUpReminder(state: TurnState, effectiveMaxSteps: number, thinking: ThinkingMode): string | undefined {
+  const last = state.results[state.results.length - 1]
+  if (last === undefined || !last.ok) return undefined
+  const payloadRule = thinking === 'full' ? 'Do not repeat the Tool payload.' : 'Do not open a <think> block or repeat the Tool payload.'
+  const remaining = effectiveMaxSteps - state.steps
+  if (remaining <= 1) {
+    return `Use the Tool results above to answer the user directly now.\nFinal tool step budget reached (${state.steps}/${effectiveMaxSteps}). Do not call another tool; write your final answer now from the evidence already collected.\n${payloadRule}`
+  }
+  const webHeavy = state.mutatingCalls === 0 && state.webCalls >= 3
+  const stepHeavy = state.steps >= 4 && state.steps >= Math.ceil(effectiveMaxSteps * 0.5)
+  if (webHeavy || stepHeavy) {
+    return `Use the Tool results above to answer the current task now (${state.steps} tool calls already used).\nStop searching and synthesize a clear answer with what you already have, unless one single specific fact is strictly missing.\nNever repeat a successful tool call. ${payloadRule}`
+  }
+  return undefined
+}
+
 export function callKey(name: string, args: Args): string {
   return `${name}\u0000${JSON.stringify(canonical(args))}`
 }
@@ -189,12 +253,18 @@ export interface TurnState {
   readonly steps: number
   readonly results: readonly TurnResult[]
   readonly successfulCalls: number
+  readonly webCalls: number
+  readonly mutatingCalls: number
   /**
    * Successful calls since the latest successful mutating call (that call
    * included): rereading a file or rerunning a test after a change is not a
    * repeat, but repeating the change itself, or any call since, still is.
    */
   readonly successKeys: ReadonlySet<string>
+  /** Web calls executed anywhere in the current turn (never cleared by relay cuts or local edits). */
+  readonly webKeys: ReadonlySet<string>
+  /** Normalized individual web_search queries already run in the current turn. */
+  readonly seenSearchQueries: ReadonlySet<string>
   /** Failed call key → successful-call count when it failed (no success since = same epoch). */
   readonly failedEpochs: ReadonlyMap<string, number>
   readonly consecutiveFailedTool: string
@@ -222,35 +292,60 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
   const start = currentTurnStart(history)
   const gateStart = Math.max(start, options.duplicateFrom ?? start)
   const first = history[start]
-  const calls = new Map<string, { key: string; mutating: boolean }>()
+  const calls = new Map<string, { name: string; args: Args; key: string; mutating: boolean; web: boolean }>()
   const successKeys = new Set<string>()
+  const webKeys = new Set<string>()
+  const seenSearchQueries = new Set<string>()
   const failedEpochs = new Map<string, number>()
   const results: TurnResult[] = []
   let successfulCalls = 0
+  let webCalls = 0
+  let mutatingCalls = 0
   let consecutiveFailedTool = ''
   let consecutiveFailures = 0
   for (let index = start; index < history.length; index++) {
     const item = history[index]!
     if (item.kind === 'call') {
-      calls.set(item.id, { key: callKey(item.name, item.args), mutating: isMutatingCall(item.name, item.args) })
+      const web = isWebTool(item.name)
+      const key = web ? normalizedCallKey(item.name, item.args) : callKey(item.name, item.args)
+      calls.set(item.id, { name: item.name, args: item.args, key, mutating: isMutatingCall(item.name, item.args), web })
     }
     if (item.kind !== 'result') continue
-    const { key, mutating } = calls.get(item.id) ?? { key: callKey(item.name, {}), mutating: false }
+    const call = calls.get(item.id)
+    const web = call?.web ?? isWebTool(item.name)
+    const key = call?.key ?? callKey(item.name, {})
+    const mutating = call?.mutating ?? false
     results.push({ name: item.name, ok: item.ok })
-    if (index < gateStart) continue
+    if (web) webCalls++
+    if (item.ok && mutating) mutatingCalls++
+    if (web && item.ok) {
+      webKeys.add(key)
+      if (item.name === 'web_search' && call !== undefined) {
+        for (const query of extractSearchQueries(call.args)) {
+          seenSearchQueries.add(normalizeSearchQuery(query))
+        }
+      }
+    }
+    if (!web && index < gateStart) continue
     if (item.ok) {
-      if (mutating) successKeys.clear()
-      successKeys.add(key)
-      failedEpochs.delete(key)
-      successfulCalls++
-      consecutiveFailedTool = ''
-      consecutiveFailures = 0
+      if (index >= gateStart) {
+        if (mutating) successKeys.clear()
+        successKeys.add(key)
+        failedEpochs.delete(key)
+        successfulCalls++
+        consecutiveFailedTool = ''
+        consecutiveFailures = 0
+      } else if (web) {
+        failedEpochs.delete(key)
+      }
     } else {
       failedEpochs.set(key, successfulCalls)
-      if (item.name === consecutiveFailedTool) consecutiveFailures++
-      else {
-        consecutiveFailedTool = item.name
-        consecutiveFailures = 1
+      if (index >= gateStart) {
+        if (item.name === consecutiveFailedTool) consecutiveFailures++
+        else {
+          consecutiveFailedTool = item.name
+          consecutiveFailures = 1
+        }
       }
     }
   }
@@ -259,7 +354,11 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
     steps: results.length,
     results,
     successfulCalls,
+    webCalls,
+    mutatingCalls,
     successKeys,
+    webKeys,
+    seenSearchQueries,
     failedEpochs,
     consecutiveFailedTool,
     consecutiveFailures,

@@ -266,10 +266,13 @@ export interface RelayEntryOptions {
   readonly reminders?: boolean
 }
 
-/** Entries for an execution prompt: the cards, then the current leg verbatim. */
+/**
+ * Entries for an execution prompt: the cards, then the current leg verbatim,
+ * ending with the current turn's user request right before `Assistant:`.
+ */
 export function relayEntries(history: readonly HistoryItem[], cards: readonly RelayCard[], options: RelayEntryOptions): Entry[] {
   const legStart = cards.length > 0 ? cards[cards.length - 1]!.at : 0
-  return [
+  const entries: Entry[] = [
     ...cardEntries(cards),
     ...transcriptEntries(history.slice(legStart), {
       tools: options.tools,
@@ -278,13 +281,34 @@ export function relayEntries(history: readonly HistoryItem[], cards: readonly Re
       ...options.reminders === undefined ? {} : { reminders: options.reminders },
     }),
   ]
+  if (options.reminders !== false && history.length > 0) {
+    const user = lastUserIndex(history)
+    const task = user >= 0 ? history[user]!.text : ''
+    const hasToolSinceUser = user >= 0 && history.slice(user + 1).some(item => item.kind === 'call' || item.kind === 'result')
+    if (task !== '' && (legStart > user || hasToolSinceUser) && entries[entries.length - 1]?.text !== task) {
+      entries.push({ role: 'user', text: task })
+    }
+  }
+  return entries
 }
 
-/** Entries for the recap request: prior cards, the covered range, the nudge. */
+/**
+ * Entries for the recap request: at most the previous card of the same turn
+ * (carrying the turn's task), the covered range of this turn, and the nudge.
+ * Earlier turns' cards are omitted so each card only summarises its own turn.
+ */
 export function recapEntries(history: readonly HistoryItem[], cards: readonly RelayCard[], need: RelayNeed, options: RelayEntryOptions): Entry[] {
+  const sameTurn = cards.filter(card => card.turn === need.turn)
+  const lastCard = sameTurn[sameTurn.length - 1]
+  const slice = history.slice(need.start, need.end)
+  const prefix: Entry[] = lastCard !== undefined
+    ? [{ role: 'user', text: cardBlock(lastCard, sameTurn.length, true) }]
+    : !slice.some(item => item.kind === 'user') && need.task !== ''
+      ? [{ role: 'user', text: need.task }]
+      : []
   return [
-    ...cardEntries(cards),
-    ...transcriptEntries(history.slice(need.start, need.end), {
+    ...prefix,
+    ...transcriptEntries(slice, {
       tools: options.tools,
       postToolReminder: '',
       ...options.maxResultChars === undefined ? {} : { maxResultChars: options.maxResultChars },
@@ -308,7 +332,7 @@ export function makeCard(history: readonly HistoryItem[], need: RelayNeed, text:
 /** Prompt tags inside card text would read as protocol to the model: drop them. */
 const PROTOCOL_TAG = /<\/?(?:think|tool_call|tool_response)(?:\s[^>]*)?>/gi
 
-const THINK_END = '<｜end▁of▁thinking｜>'
+const THINK_END = '</think>'
 
 /**
  * The model's recap output as card text: no leading think block (an unclosed

@@ -10,6 +10,7 @@ import {
   fallbackCard,
   makeCard,
   planRelay,
+  recapEntries,
   validCards,
   type RelayCard,
 } from '../src/core/relay.ts'
@@ -38,7 +39,7 @@ const tools = buildCatalog([
   { name: 'write', description: '', parameters: {} },
 ], { mode: 'mapped' })
 
-const THINK_END = '<｜end▁of▁thinking｜>'
+const THINK_END = '</think>'
 /** A recap generation as the thinking wire shows it: withheld opener, then the card. */
 const recapOutput = (text: string) => `>I will summarise the work so far.${THINK_END}${text}`
 
@@ -87,6 +88,8 @@ test('relay: a new user turn cards the finished work and keeps the new task', as
   assert.match(execution, /Task: Rename the timeout field/)
   assert.match(execution, /1\. Objective: rename the timeout field/)
   assert.match(execution, /Now add a short note/)
+  assert.equal(execution.split('Now add a short note about it to README.md.').length - 1, 1)
+  assert.ok(execution.endsWith('User: Now add a short note about it to README.md.\n\nAssistant: <think'))
   assert.doesNotMatch(execution, /FAILED test_a\.py::test_timeout/) // covered by the card
   assert.doesNotMatch(execution, /1\talpha/) // the old tool result is gone
 
@@ -125,6 +128,7 @@ test('relay: the recap request has no per-step reminders; the execution prompt d
   await decideStep({ history: turnOne, tools, config, generator, relay: { cards: [] } })
   assert.doesNotMatch(generator.prompts[0]!, /Use the Tool results above/)
   assert.match(generator.prompts[1]!, /Use the Tool results above/)
+  assert.ok(generator.prompts[1]!.endsWith('Choose a different useful tool or answer with the limitation. Do not guess.\n\nUser: Rename the timeout field in a.txt and run the tests.\n\nAssistant: <think'))
 })
 
 test('relay: card blocks number the parts and repeat the task only on the first', () => {
@@ -249,4 +253,133 @@ test('relay: a card that fell back to the summary is marked as such in the trace
   assert.equal(card.outcome, 'card-empty')
   assert.equal(card.relay?.fallback, true)
   assert.ok((card.relay?.card.length ?? 0) > 0, 'the summary the model will read is recorded')
+})
+
+test('relay: recapEntries omits prior-turn cards and keeps at most the last same-turn card', () => {
+  const history: HistoryItem[] = [
+    ...turnOne,
+    { kind: 'user', text: 'Turn 2 question' },
+    { kind: 'call', id: 't2c1', name: 'read_file', args: { path: 'c.txt' } },
+    { kind: 'result', id: 't2c1', name: 'read_file', ok: true, text: 'c content' },
+    { kind: 'call', id: 't2c2', name: 'read_file', args: { path: 'd.txt' } },
+    { kind: 'result', id: 't2c2', name: 'read_file', ok: true, text: 'd content' },
+    { kind: 'call', id: 't2c3', name: 'read_file', args: { path: 'e.txt' } },
+    { kind: 'result', id: 't2c3', name: 'read_file', ok: true, text: 'e content' },
+  ]
+  const cardTurn1 = makeCard(history, { start: 0, end: turnOne.length, turnEnd: true, turn: 1, task: turnOne[0]!.text }, 'turn 1 recap body')
+  const firstPartEnd = turnOne.length + 3 // user + t2c1 call/result
+  const secondPartEnd = turnOne.length + 5 // + t2c2 call/result
+  const thirdPartEnd = turnOne.length + 7 // + t2c3 call/result
+
+  // First card of Turn 2: must NOT include Turn 1's card.
+  const entriesPart1 = recapEntries(
+    history,
+    [cardTurn1],
+    { start: turnOne.length, end: firstPartEnd, turnEnd: false, turn: 2, task: 'Turn 2 question' },
+    { tools, postToolReminder: '' },
+  )
+  assert.ok(!entriesPart1.some(e => e.text.includes('turn 1 recap body')))
+  assert.equal(entriesPart1[0]?.text, 'Turn 2 question')
+
+  // Third card of Turn 2: includes only part 2 of Turn 2 (with Task), not Turn 1 and not part 1 of Turn 2.
+  const cardTurn2Part1 = makeCard(history, { start: turnOne.length, end: firstPartEnd, turnEnd: false, turn: 2, task: 'Turn 2 question' }, 'turn 2 part 1 body')
+  const cardTurn2Part2 = makeCard(history, { start: firstPartEnd, end: secondPartEnd, turnEnd: false, turn: 2, task: 'Turn 2 question' }, 'turn 2 part 2 body')
+  const entriesPart3 = recapEntries(
+    history,
+    [cardTurn1, cardTurn2Part1, cardTurn2Part2],
+    { start: secondPartEnd, end: thirdPartEnd, turnEnd: true, turn: 2, task: 'Turn 2 question' },
+    { tools, postToolReminder: '' },
+  )
+  assert.ok(!entriesPart3.some(e => e.text.includes('turn 1 recap body')))
+  assert.ok(!entriesPart3.some(e => e.text.includes('turn 2 part 1 body')))
+  assert.match(entriesPart3[0]!.text, /^\[Handoff recap · turn 2 · part 2\]\nTask: Turn 2 question\nturn 2 part 2 body$/)
+})
+
+test('relay: retry and answer-stage additions stay before the trailing user task', async () => {
+  const history: HistoryItem[] = [
+    { kind: 'user', text: 'Check a.txt' },
+    { kind: 'call', id: 'c1', name: 'read_file', args: { path: 'a.txt' } },
+    { kind: 'result', id: 'c1', name: 'read_file', ok: true, text: 'hello' },
+  ]
+  const generator = new ScriptedGenerator([
+    `>Repeat.${THINK_END}<tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}`,
+    `>Done.${THINK_END}hello`,
+  ])
+  const config: HarnessConfig = { ...DEFAULT_HARNESS, maxSteps: 5, relay: { budgetTokens: 100_000, cardMaxTokens: 256 } }
+  const step = await decideStep({ history, tools, config, generator, relay: { cards: [] } })
+  assert.equal(step.decision.type, 'final')
+  assert.equal(generator.prompts.length, 2)
+  const retryPrompt = generator.prompts[1]!
+  assert.match(retryPrompt, /repeats a successful call/)
+  assert.ok(retryPrompt.endsWith('\n\nUser: Check a.txt\n\nAssistant: <think'))
+})
+
+test('relay: web_fetch and web_search stay deduplicated across mid-turn card cuts', async () => {
+  const { readFileSync } = await import('node:fs')
+  const dshSchemas = JSON.parse(readFileSync(new URL('./fixtures/dsh-tool-schemas.json', import.meta.url), 'utf8'))
+  const webTools = buildCatalog(dshSchemas, { mode: 'mapped', names: 'dsh' })
+  const history: HistoryItem[] = [
+    { kind: 'user', text: 'Find RWKV engine info' },
+    { kind: 'call', id: 'w1', name: 'web_search', args: { queries: ['RWKV C++ engine 2025 2026'] } },
+    { kind: 'result', id: 'w1', name: 'web_search', ok: true, text: `Results ${LONG}` },
+    { kind: 'call', id: 'w2', name: 'web_fetch', args: { url: 'https://example.com/repo#1' } },
+    { kind: 'result', id: 'w2', name: 'web_fetch', ok: true, text: 'Page not found (404)' },
+  ]
+  // Simulate a mid-turn card covering w1..w2 so legStart moves past them.
+  const state = analyzeTurn(history, { duplicateFrom: history.length })
+  assert.equal(state.webCalls, 2)
+  assert.ok(state.seenSearchQueries.has('2025 2026 c++ engine rwkv'))
+
+  // Re-fetching without #1 or re-searching same words in reversed order must hit duplicate gate.
+  const generator = new ScriptedGenerator([
+    `>Retry URL.${THINK_END}<tool_call>{"name":"web_fetch","arguments":{"url":"https://example.com/repo"}}`,
+    `>Re-search.${THINK_END}<tool_call>{"name":"web_search","arguments":{"queries":["rwkv engine c++ 2026 2025"]}}`,
+    `>Okay.${THINK_END}Here is the summary.`,
+  ])
+  const card = makeCard(history, { start: 0, end: 3, turnEnd: false, turn: 1, task: 'Find RWKV engine info' }, '1. Objective: x')
+  const step = await decideStep({
+    history,
+    tools: webTools,
+    config: { ...DEFAULT_HARNESS, maxSteps: 10, relay: { budgetTokens: 100_000, cardMaxTokens: 256 } },
+    generator,
+    relay: { cards: [card] },
+  })
+  assert.deepEqual(step.decision, { type: 'final', text: 'Here is the summary.', via: 'answer-stage' })
+  assert.match(generator.prompts[1]!, /repeats a successful call/)
+  // answerStage strips "Call another tool" and puts the closeout ban AFTER the user task.
+  const answerPrompt = generator.prompts[2]!
+  assert.doesNotMatch(answerPrompt, /Call another tool only for a specific missing fact/)
+  assert.ok(answerPrompt.indexOf('User: Find RWKV engine info') < answerPrompt.indexOf('Tool execution is complete and tools are now unavailable'))
+  assert.ok(answerPrompt.endsWith('If they are insufficient, say what could not be verified.\n\nAssistant: <think'))
+})
+
+test('relay: card truncated mid-body after </think> continues once cleanly', async () => {
+  class CardLengthGenerator implements Generator {
+    readonly prompts: string[] = []
+    private calls = 0
+    generate(request: GenerateRequest): Promise<GenerateResult> {
+      this.prompts.push(request.prompt)
+      this.calls++
+      if (this.calls === 1) {
+        return Promise.resolve({ text: `>Plan.${THINK_END}1. Objective: x\n2. Facts: partial`, finish: 'length', completionTokens: 256 })
+      }
+      if (this.calls === 2) {
+        return Promise.resolve({ text: ' and complete.\n6. Remaining plan: done.', finish: 'stop', completionTokens: 20 })
+      }
+      return Promise.resolve({ text: `>Answer.${THINK_END}Done.`, finish: 'stop', completionTokens: 10 })
+    }
+  }
+  const generator = new CardLengthGenerator()
+  const saved: RelayCard[] = []
+  const budget = itemTokens(turnOne.slice(0, 6))
+  await decideStep({
+    history: turnOne,
+    tools,
+    config: { ...DEFAULT_HARNESS, maxSteps: 10, relay: { budgetTokens: budget, cardMaxTokens: 256 } },
+    generator,
+    relay: { cards: [], save: card => saved.push(card) },
+  })
+  assert.equal(saved.length, 1)
+  assert.match(saved[0]!.text, /partial and complete\./)
+  assert.match(saved[0]!.text, /6\. Remaining plan: done\./)
 })

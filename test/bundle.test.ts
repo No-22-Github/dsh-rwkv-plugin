@@ -40,6 +40,6 @@ test('bundle: the developer panel switches relay context on the live field', () 
   assert.ok(panel.includes("set('relayCardMaxTokens'"), 'the panel writes the card output cap')
   // The defaults the page renders when the Host has no value yet must match the
   // schema defaults, or the first paint shows a different budget than the one used.
-  assert.ok(panel.includes('relayBudgetTokens: 8000'))
-  assert.ok(panel.includes('relayCardMaxTokens: 768'))
+  assert.ok(panel.includes('relayBudgetTokens: 12000'))
+  assert.ok(panel.includes('relayCardMaxTokens: 1024'))
 })

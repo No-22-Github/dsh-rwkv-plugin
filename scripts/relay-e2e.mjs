@@ -20,7 +20,7 @@ const PLUGIN = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DSH = resolve(PLUGIN, '../deepseek-harness')
 const ROOT = join(tmpdir(), 'rwkv-relay-e2e')
 const PORT = 18099
-const THINK_END = '<｜end▁of▁thinking｜>'
+const THINK_END = '</think>'
 const MARKER_A = 'AAAA-observer-alpha'
 const MARKER_B = 'BBBB-observer-beta'
 

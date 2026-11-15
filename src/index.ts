@@ -116,9 +116,9 @@ export const Config = z.object({
     .description('Harness interventions: format re-asks, duplicate / failure gates, over-budget think close, answer-stage re-asks and fallbacks. Off: the model\'s output stands.').volatile(),
   historyMode: z.union(['full', 'relay']).default('full')
     .description('full: the model reads the whole conversation. relay: finished legs are replaced by model-written handoff cards; the most recent call/result pair stays verbatim and the duplicate-call gate restarts at each leg.').volatile(),
-  relayBudgetTokens: z.natural().default(8000)
+  relayBudgetTokens: z.natural().default(12000)
     .description('relay: exact RWKV token budget for the part of the leg that gets carded; the latest call/result pair is always kept.').volatile(),
-  relayCardMaxTokens: z.natural().default(768)
+  relayCardMaxTokens: z.natural().default(1024)
     .description('relay: output cap of one handoff recap.').volatile(),
   recordTraces: z.boolean().default(true)
     .description('Write RWKV traces (prompt bytes + raw output, outcome, repairs) to disk: rwkv-trace.jsonl next to each DSH session log, or traceDir. They are always kept in memory for the RWKV tab.').volatile(),

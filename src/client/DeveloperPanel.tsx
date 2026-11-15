@@ -26,8 +26,8 @@ export const DEVELOPER_DEFAULTS: DeveloperSettings = {
   outputRepairs: true,
   guards: true,
   historyMode: 'full',
-  relayBudgetTokens: 8000,
-  relayCardMaxTokens: 768,
+  relayBudgetTokens: 12000,
+  relayCardMaxTokens: 1024,
 }
 
 function Toggle(props: { label: string; hint: string; checked: boolean; disabled: boolean; onChange: (value: boolean) => void }) {
@@ -285,7 +285,7 @@ export function DeveloperCard(props: {
             <label className="rwkv-field">
               <span className="rwkv-label">接力预算（token）</span>
               <NumberField
-                value={settings.relayBudgetTokens} disabled={off} placeholder="8000"
+                value={settings.relayBudgetTokens} disabled={off} placeholder="12000"
                 onSave={value => { void set('relayBudgetTokens', value) }}
               />
               <p className="rwkv-hint">一段对话超过这个估算预算就写卡。最近一次工具调用和它的结果始终原样保留，不参与估算。</p>
@@ -293,7 +293,7 @@ export function DeveloperCard(props: {
             <label className="rwkv-field">
               <span className="rwkv-label">单张卡上限（token）</span>
               <NumberField
-                value={settings.relayCardMaxTokens} disabled={off} placeholder="768"
+                value={settings.relayCardMaxTokens} disabled={off} placeholder="1024"
                 onSave={value => { void set('relayCardMaxTokens', value) }}
               />
               <p className="rwkv-hint">写卡请求的输出上限，思考也算在里面。太小会让卡写不完而退回自动生成的摘要。</p>

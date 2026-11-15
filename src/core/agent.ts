@@ -23,12 +23,18 @@ import {
   DUPLICATE_FAILED_REMINDER,
   duplicateRetryReminder,
   EMPTY_EXIT_REASK,
+  extractSearchQueries,
+  isWebTool,
+  normalizedCallKey,
+  normalizeSearchQuery,
   oneStageAnswerInstruction,
   POST_TOOL_REMINDER,
   POST_TOOL_REMINDER_THINK,
   salvageAnswerProse,
   toolFailureReminder,
   transcriptEntries,
+  WEB_RESEARCH_MAX_STEPS,
+  wrapUpReminder,
   type HistoryItem,
   type TurnState,
 } from './policy.ts'
@@ -94,7 +100,7 @@ export interface HarnessConfig {
 export const DEFAULT_HARNESS: HarnessConfig = {
   thinking: 'full',
   historyEmptyThink: true,
-  maxSteps: 15,
+  maxSteps: 10,
   maxConsecutiveFailures: 2,
   protocolRetries: 2,
   decisionMaxTokens: 4096,
@@ -232,6 +238,8 @@ class ThinkSplitter {
 const MAX_THINK_STOP_RESUMES = 4
 /** Extra tokens after force-closing a think that ran out of budget. */
 const THINK_CLOSE_TOKENS = 1024
+/** Extra tokens to finish a handoff card body if it hit cardMaxTokens mid-sentence. */
+const CARD_FINISH_TOKENS = 384
 
 function describe(action: Action): string {
   switch (action.type) {
@@ -310,6 +318,13 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       const next = await input.generator.generate({ ...request, prompt: prompt + closed, maxTokens: THINK_CLOSE_TOKENS }, onDelta)
       generations++
       text = closed + next.text
+      spent += next.completionTokens ?? countTokens(next.text)
+      result = { ...next, text }
+    }
+    if (stage === 'card' && config.guards && result.finish === 'length' && (!opening || !thinkOpen(opening + text))) {
+      const next = await input.generator.generate({ ...request, prompt: prompt + text, maxTokens: CARD_FINISH_TOKENS }, onDelta)
+      generations++
+      text += next.text
       spent += next.completionTokens ?? countTokens(next.text)
       result = { ...next, text }
     }
@@ -392,18 +407,64 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
     ]
   }
 
+  const effectiveMaxSteps = config.guards && state.mutatingCalls === 0 && state.webCalls > 0 && state.steps === state.webCalls
+    ? Math.min(config.maxSteps, WEB_RESEARCH_MAX_STEPS)
+    : config.maxSteps
+  const pacingReminder = config.guards ? wrapUpReminder(state, effectiveMaxSteps, config.thinking) : undefined
+  if (pacingReminder !== undefined) {
+    for (let index = base.length - 1; index >= 0; index--) {
+      if (base[index]!.role === 'user' && base[index]!.text === reminder) {
+        base = [...base.slice(0, index), { role: 'user', text: pacingReminder }, ...base.slice(index + 1)]
+        break
+      }
+    }
+  }
+
+  const withoutStepReminder = (entries: readonly Entry[]): Entry[] => entries.filter(
+    entry => !(entry.role === 'user' && (entry.text === reminder || entry.text === pacingReminder)),
+  )
+
+  const withExtra = (entries: readonly Entry[], additions: readonly Entry[]): Entry[] => {
+    if (additions.length === 0) return [...entries]
+    if (config.relay === undefined || state.task === '') return [...entries, ...additions]
+    const last = entries[entries.length - 1]
+    if (last?.role === 'user' && last.text === state.task) {
+      const hasEarlierTask = entries.slice(0, -1).some(
+        entry => entry.role === 'user' && (entry.text === state.task || entry.text.includes(`\nTask: ${state.task}\n`)),
+      )
+      if (hasEarlierTask || !additions.some(entry => entry.role === 'assistant')) {
+        return [...entries.slice(0, -1), ...additions, last]
+      }
+    }
+    return [...entries, ...additions, { role: 'user', text: state.task }]
+  }
+
+  /**
+   * Closeout prompt order: strip per-step "call another tool" reminders,
+   * place any retry prelude and the user's question before the final no-tool
+   * instruction so "tools are now unavailable" sits right before Assistant:.
+   */
+  const stageAnswerEntries = (prelude: readonly string[]): Entry[] => {
+    const cleaned = withoutStepReminder(base)
+    const retryPrefix = extra.length === 0 ? cleaned : withExtra(cleaned, extra)
+    if (config.relay !== undefined && state.task !== '' && (retryPrefix[retryPrefix.length - 1]?.text !== state.task)) {
+      retryPrefix.push({ role: 'user', text: state.task })
+    }
+    return [
+      ...retryPrefix,
+      ...prelude.map(text => ({ role: 'user' as const, text })),
+      { role: 'user', text: oneStageAnswerInstruction() },
+    ]
+  }
+
   /**
    * The forced closeout: tools withdrawn, plain-text answer from the evidence
    * so far. allowTools: the closeout came from unparseable output, not from a
    * policy (step limit, repeated call), so a valid tool call the model still
    * makes is run instead of being thrown away.
    */
-  const answerStage = async (entries: readonly Entry[], prelude: readonly string[], allowTools = false): Promise<StepResult> => {
-    const staged: Entry[] = [
-      ...entries,
-      ...prelude.map(text => ({ role: 'user' as const, text })),
-      { role: 'user', text: oneStageAnswerInstruction() },
-    ]
+  const answerStage = async (prelude: readonly string[], allowTools = false): Promise<StepResult> => {
+    const staged: Entry[] = stageAnswerEntries(prelude)
     let lastOutput = ''
     let opener: string | undefined
     for (let attempt = 0; attempt < (config.guards ? 3 : 1); attempt++) {
@@ -444,15 +505,15 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
     return done({ type: 'final', text: answerFallbackSummary(state.task, state.results), via: 'summary' })
   }
 
-  if (state.steps >= config.maxSteps) return answerStage(base, [])
-
   const extra: Entry[] = []
+  if (state.steps >= effectiveMaxSteps) return answerStage([])
+
   let protocolRetries = 0
   let duplicateRetryUsed = false
   let blockedRetries = 0
   for (let attempt = 0; attempt < config.protocolRetries + 4; attempt++) {
     const label = attempt === 0 ? 'decide' : 're-ask'
-    const { output, result, prompt } = await generate([...base, ...extra], 'decision', label)
+    const { output, result, prompt } = await generate(withExtra(base, extra), 'decision', label)
     if (result.finish === 'cancelled') throw new DOMException('aborted', 'AbortError')
     const action = parseAction(output, result.finish, parseOptions)
     const note = (outcome: string, gateRepairs?: readonly string[]) => traced('decision', prompt, output, result, action, outcome, gateRepairs)
@@ -472,7 +533,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
         }
         note(config.guards ? 'empty-exit' : 'raw')
         if (!config.guards) return done(rawFinal(output))
-        return answerStage([...base, ...extra], [EMPTY_EXIT_REASK], true)
+        return answerStage([EMPTY_EXIT_REASK], true)
       case 'tool': {
         const gated = gateToolCall(action, state, tools, config, duplicateRetryUsed)
         if (gated.type === 'run') {
@@ -480,13 +541,13 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
           return done({ type: 'tool', tool: gated.tool, args: gated.args, rawArgs: action.args, repairs: [...action.repairs, ...gated.repairs] })
         }
         note(gated.type === 'rejected' ? `rejected ${gated.reason}` : gated.type)
-        if (gated.type === 'closeout') return answerStage([...base, ...extra], [gated.reminder])
+        if (gated.type === 'closeout') return answerStage([gated.reminder])
         if (gated.type === 'duplicate-retry') duplicateRetryUsed = true
         // Rejected without execution. The rejected call is echoed only for
         // unknown/blocked tools, which get a failed tool result like the Go
         // runner records; a repeated call is never echoed (RWKV copies it).
         extra.push(...gated.receipt)
-        if (++blockedRetries > 3) return config.guards ? answerStage([...base, ...extra], []) : done(rawFinal(output))
+        if (++blockedRetries > 3) return config.guards ? answerStage([]) : done(rawFinal(output))
         continue
       }
       case 'error':
@@ -497,7 +558,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
     // Unparseable or empty output: one correction per retry, no echo of a
     // truncated think (it would be re-read and continued).
     if (++protocolRetries > config.protocolRetries) {
-      return state.steps > 0 ? answerStage([...base, ...extra], [], true) : done({
+      return state.steps > 0 ? answerStage([], true) : done({
         type: 'final',
         text: answerFallbackSummary(state.task, state.results),
         via: 'summary',
@@ -506,7 +567,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
     const kind = action.type === 'error' ? action.kind : 'empty'
     extra.push({ role: 'user', text: correction(kind) })
   }
-  return answerStage([...base, ...extra], [], true)
+  return answerStage([], true)
 }
 
 type Gate =
@@ -540,14 +601,17 @@ function gateToolCall(
   const { args, repairs } = config.outputRepairs ? repairArguments(tool, action.args, resolved.aliased) : { args: action.args, repairs: [] }
   if (!config.guards) return { type: 'run', tool, args, repairs }
   const key = callKey(tool.name, args)
-  if (state.successKeys.has(key)) {
+  const webKey = isWebTool(tool.dshName) || isWebTool(tool.name) ? normalizedCallKey(tool.name, args) : undefined
+  const webQueries = (tool.dshName === 'web_search' || tool.name === 'web_search') ? extractSearchQueries(args) : []
+  const allSeenQueries = webQueries.length > 0 && webQueries.every(query => state.seenSearchQueries.has(normalizeSearchQuery(query)))
+  if (state.successKeys.has(key) || (webKey !== undefined && state.webKeys.has(webKey)) || allSeenQueries) {
     // harness v26: the first repeat of a successful call gets one more decision.
     if (!duplicateRetryUsed) {
       return { type: 'duplicate-retry', receipt: [{ role: 'user', text: duplicateRetryReminder(tools) }] }
     }
     return { type: 'closeout', reminder: DUPLICATE_ANSWER_REMINDER }
   }
-  if (state.failedEpochs.get(key) === state.successfulCalls) {
+  if (state.failedEpochs.get(key) === state.successfulCalls || (webKey !== undefined && state.failedEpochs.get(webKey) === state.successfulCalls)) {
     return { type: 'closeout', reminder: state.successfulCalls > 0 ? DUPLICATE_ANSWER_REMINDER : DUPLICATE_FAILED_REMINDER }
   }
   if (tool.name === state.consecutiveFailedTool && state.consecutiveFailures >= config.maxConsecutiveFailures) {
