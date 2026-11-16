@@ -27,7 +27,7 @@ export const DEVELOPER_DEFAULTS: DeveloperSettings = {
   outputRepairs: true,
   guards: true,
   historyMode: 'full',
-  worklistMinFoldTokens: 6000,
+  worklistMinFoldTokens: 8000,
   worklistBudgetTokens: 12000,
   worklistKeepRecentPairs: 2,
 }
@@ -297,7 +297,7 @@ export function DeveloperCard(props: {
             <label className="rwkv-field">
               <span className="rwkv-label">折叠最低水位（RWKV token）</span>
               <NumberField
-                value={settings.worklistMinFoldTokens} min={0} disabled={off} placeholder="6000"
+                value={settings.worklistMinFoldTokens} min={0} disabled={off} placeholder="8000"
                 onSave={value => { void set('worklistMinFoldTokens', value) }}
               />
               <p className="rwkv-hint">提示词低于该水位时，todo_update 只记录 note 不触发折叠裁剪；达到后才开始温和折叠早期步骤。</p>

@@ -51,7 +51,7 @@ export interface WorklistOptions {
   /**
    * Minimum RWKV prompt tokens required before a noted `todo_update` triggers
    * history folding (low watermark). Below this threshold, `todo_update` still
-   * updates the list and notes without folding earlier steps. Default: 6000
+   * updates the list and notes without folding earlier steps. Default: 8000
    * in plugin config (0 when omitted in low-level `foldWorklist`).
    */
   readonly minFoldTokens?: number
@@ -85,7 +85,7 @@ export interface WorklistOptions {
   readonly systemGuidance?: boolean
 }
 
-export const DEFAULT_WORKLIST_MIN_FOLD_TOKENS = 6000
+export const DEFAULT_WORKLIST_MIN_FOLD_TOKENS = 8000
 export const DEFAULT_WORKLIST_BUDGET_TOKENS = 12000
 export const DEFAULT_WORKLIST_HARD_SLACK_TOKENS = 3000
 export const DEFAULT_BACKBONE_MAX_TOKENS = 5000
