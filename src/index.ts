@@ -47,6 +47,7 @@ export interface Settings {
   historyMode: 'full' | 'relay' | 'worklist'
   relayBudgetTokens: number
   relayCardMaxTokens: number
+  worklistMinFoldTokens: number
   worklistBudgetTokens: number
   worklistKeepRecentPairs: number
   recordTraces: boolean
@@ -122,8 +123,10 @@ export const Config = z.object({
     .description('relay: exact RWKV token budget for the part of the leg that gets carded; the latest call/result pair is always kept.').volatile(),
   relayCardMaxTokens: z.natural().default(768)
     .description('relay: output cap of one handoff recap.').volatile(),
+  worklistMinFoldTokens: z.natural().default(6000)
+    .description('worklist: minimum RWKV prompt tokens (low watermark) before a noted `todo_update` folds earlier tool outputs.').volatile(),
   worklistBudgetTokens: z.natural().default(12000)
-    .description('worklist: total RWKV prompt token budget before attaching a non-withdrawn budget reminder (`todo_plan` / `todo_update`).').volatile(),
+    .description('worklist: total RWKV prompt token budget (high watermark) before attaching a non-withdrawn budget reminder (`todo_plan` / `todo_update`).').volatile(),
   worklistKeepRecentPairs: z.natural().default(2)
     .description('worklist: recent workspace call/result pairs kept right before a noted `todo_update` checkpoint (gentle folding).').volatile(),
   recordTraces: z.boolean().default(true)
@@ -165,6 +168,7 @@ function settingsOf(config: Config): AdapterSettings {
     ...config.historyMode.get() === 'worklist'
       ? {
           worklist: {
+            minFoldTokens: config.worklistMinFoldTokens.get(),
             budgetTokens: config.worklistBudgetTokens.get(),
             keepRecentPairs: config.worklistKeepRecentPairs.get(),
           },

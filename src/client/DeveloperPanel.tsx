@@ -16,6 +16,7 @@ export interface DeveloperSettings {
   guards: boolean
   /** Context management mode; edits `historyMode` in the Host schema. */
   historyMode: 'full' | 'worklist'
+  worklistMinFoldTokens: number
   worklistBudgetTokens: number
   worklistKeepRecentPairs: number
 }
@@ -26,6 +27,7 @@ export const DEVELOPER_DEFAULTS: DeveloperSettings = {
   outputRepairs: true,
   guards: true,
   historyMode: 'full',
+  worklistMinFoldTokens: 6000,
   worklistBudgetTokens: 12000,
   worklistKeepRecentPairs: 2,
 }
@@ -271,7 +273,7 @@ export function DeveloperCard(props: {
           {settings.recordTraces ? '轨迹随会话保存' : '轨迹只在内存'}
           {settings.outputRepairs ? '' : ' · 修正已关'}
           {settings.guards ? '' : ' · 修复已关'}
-          {historyMode === 'worklist' ? ` · 状态化工单（${settings.worklistBudgetTokens}）` : ''}
+          {historyMode === 'worklist' ? ` · 状态化工单（${settings.worklistMinFoldTokens} / ${settings.worklistBudgetTokens}）` : ''}
         </span>
       </summary>
       <div className="rwkv-developer-body">
@@ -293,7 +295,15 @@ export function DeveloperCard(props: {
         {historyMode === 'worklist' ? (
           <div className="rwkv-grid">
             <label className="rwkv-field">
-              <span className="rwkv-label">工单预算水位（RWKV token）</span>
+              <span className="rwkv-label">折叠最低水位（RWKV token）</span>
+              <NumberField
+                value={settings.worklistMinFoldTokens} min={0} disabled={off} placeholder="6000"
+                onSave={value => { void set('worklistMinFoldTokens', value) }}
+              />
+              <p className="rwkv-hint">提示词低于该水位时，todo_update 只记录 note 不触发折叠裁剪；达到后才开始温和折叠早期步骤。</p>
+            </label>
+            <label className="rwkv-field">
+              <span className="rwkv-label">提醒最高水位（RWKV token）</span>
               <NumberField
                 value={settings.worklistBudgetTokens} disabled={off} placeholder="12000"
                 onSave={value => { void set('worklistBudgetTokens', value) }}

@@ -49,9 +49,16 @@ export interface WorklistItem {
 
 export interface WorklistOptions {
   /**
+   * Minimum RWKV prompt tokens required before a noted `todo_update` triggers
+   * history folding (low watermark). Below this threshold, `todo_update` still
+   * updates the list and notes without folding earlier steps. Default: 6000
+   * in plugin config (0 when omitted in low-level `foldWorklist`).
+   */
+  readonly minFoldTokens?: number
+  /**
    * Total RWKV token budget (system prompt + folded history + step reminders)
-   * before nudging the model to checkpoint established facts into `todo_update`.
-   * Default: 12000.
+   * before nudging the model to checkpoint established facts into `todo_update`
+   * (high watermark). Default: 12000.
    */
   readonly budgetTokens: number
   /**
@@ -78,6 +85,7 @@ export interface WorklistOptions {
   readonly systemGuidance?: boolean
 }
 
+export const DEFAULT_WORKLIST_MIN_FOLD_TOKENS = 6000
 export const DEFAULT_WORKLIST_BUDGET_TOKENS = 12000
 export const DEFAULT_WORKLIST_HARD_SLACK_TOKENS = 3000
 export const DEFAULT_BACKBONE_MAX_TOKENS = 5000
@@ -406,6 +414,7 @@ function foldCompletedTurn(history: readonly HistoryItem[], from: number, to: nu
 
 export interface FoldWorklistInput {
   readonly systemTokens: number
+  readonly minFoldTokens?: number
   readonly budgetTokens: number
   readonly hardCapTokens?: number
   readonly backboneMaxTokens?: number
@@ -456,6 +465,7 @@ function buildActiveWindow(
   endIndex: number,
   pairsSub: readonly CallPair[],
   nudges: readonly InternalNudge[],
+  activeCheckpoints: ReadonlySet<number>,
   options: {
     readonly baseOverhead: number
     readonly hardCap: number
@@ -467,7 +477,7 @@ function buildActiveWindow(
     readonly bareTok: readonly number[]
   },
 ): ActiveWindowResult {
-  const lastCheckpoint = [...pairsSub].reverse().find(pair => pair.notedUpdate)
+  const lastCheckpoint = [...pairsSub].reverse().find(pair => pair.notedUpdate && activeCheckpoints.has(pair.callIndex))
   const firstPlanPair = pairsSub.find(pair => pair.ok && pair.name === TODO_PLAN_TOOL)
   const unclosedPlanPair = lastCheckpoint === undefined
     ? [...pairsSub].reverse().find(pair => pair.ok && isWorklistTool(pair.name))
@@ -690,6 +700,7 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
   const turnStart = userStarts.length === 1 ? 0 : userStarts[userStarts.length - 1]!
   const pairs = collectPairs(history, turnStart, history.length)
   const baseOverhead = input.systemTokens + priorTokens + (input.reminderTokens ?? 0)
+  const minFoldTokens = Math.max(0, input.minFoldTokens ?? 0)
   const hardCap = input.hardCapTokens ?? (input.budgetTokens + DEFAULT_WORKLIST_HARD_SLACK_TOKENS)
   const keepRecentCount = Math.max(0, input.keepRecentPairs ?? DEFAULT_KEEP_RECENT_PAIRS)
   const keepInitialPlan = input.keepInitialPlan !== false
@@ -723,49 +734,68 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
   // across future steps, each triggered reminder stays permanently anchored to
   // its step transition until that segment itself is folded out by a checkpoint.
   const triggeredNudges: InternalNudge[] = []
-  if (input.recordedNudges !== undefined) {
-    const byResult = new Map(input.recordedNudges.map(n => [n.afterResultIndex, n.kind]))
-    for (let k = 0; k < pairs.length; k++) {
-      const kind = byResult.get(pairs[k]!.resultIndex)
-      if (kind !== undefined) {
-        triggeredNudges.push({ pairIndex: k, afterResultIndex: pairs[k]!.resultIndex, kind })
+  const activeCheckpoints = new Set<number>()
+  const recordedByResult = input.recordedNudges !== undefined
+    ? new Map(input.recordedNudges.map(n => [n.afterResultIndex, n.kind]))
+    : undefined
+
+  for (let k = 0; k < pairs.length; k++) {
+    const pair = pairs[k]!
+    const pairsSub = pairs.slice(0, k + 1)
+
+    if (pair.notedUpdate) {
+      if (minFoldTokens <= 0) {
+        activeCheckpoints.add(pair.callIndex)
+      } else {
+        const winBeforeFold = buildActiveWindow(
+          history, turnStart, pair.resultIndex + 1, pairsSub, triggeredNudges, activeCheckpoints, windowOpts,
+        )
+        if (winBeforeFold.totalTokens >= minFoldTokens) {
+          activeCheckpoints.add(pair.callIndex)
+        }
       }
     }
-  } else {
-    for (let k = 0; k < pairs.length; k++) {
-      const pair = pairs[k]!
-      const pairsSub = pairs.slice(0, k + 1)
-      const isFinalStepOverride = input.forceNudge !== undefined && k === pairs.length - 1 && pair.resultIndex === history.length - 1
-      if (isFinalStepOverride) {
-        if (input.forceNudge) {
-          const hasPlanAtK = pairsSub.some(p => p.ok && isWorklistTool(p.name))
-          triggeredNudges.push({
-            pairIndex: k,
-            afterResultIndex: pair.resultIndex,
-            kind: hasPlanAtK ? 'checkpoint' : 'init',
-          })
-        }
-        continue
-      }
 
-      const winAtK = buildActiveWindow(history, turnStart, pair.resultIndex + 1, pairsSub, triggeredNudges, windowOpts)
-      const lastCheckpointAtK = [...pairsSub].reverse().find(p => p.notedUpdate)
-      const checkpointPairIdx = lastCheckpointAtK !== undefined ? pairsSub.indexOf(lastCheckpointAtK) : -1
-      const searchAfter = lastCheckpointAtK !== undefined ? lastCheckpointAtK.resultIndex + 1 : turnStart
-      const unfoldedWs = pairsSub.filter(p => p.callIndex >= searchAfter && !isWorklistTool(p.name)).length
-      const hasPlanAtK = pairsSub.some(p => p.ok && isWorklistTool(p.name))
-      const kind: WorklistNudgeKind = hasPlanAtK ? 'checkpoint' : 'init'
-      const cooldown = kind === 'init' ? INIT_NUDGE_COOLDOWN_STEPS : CHECKPOINT_NUDGE_COOLDOWN_STEPS
-      const prevSameKind = [...triggeredNudges].reverse().find(n => n.pairIndex > checkpointPairIdx && n.kind === kind)
-      const onCooldown = prevSameKind !== undefined && (k - prevSameKind.pairIndex) < cooldown
-
-      if (!onCooldown && unfoldedWs >= 1 && winAtK.totalTokens > input.budgetTokens) {
+    if (recordedByResult !== undefined) {
+      const kind = recordedByResult.get(pair.resultIndex)
+      if (kind !== undefined) {
         triggeredNudges.push({ pairIndex: k, afterResultIndex: pair.resultIndex, kind })
       }
+      continue
+    }
+
+    const isFinalStepOverride = input.forceNudge !== undefined && k === pairs.length - 1 && pair.resultIndex === history.length - 1
+    if (isFinalStepOverride) {
+      if (input.forceNudge) {
+        const hasPlanAtK = pairsSub.some(p => p.ok && isWorklistTool(p.name))
+        triggeredNudges.push({
+          pairIndex: k,
+          afterResultIndex: pair.resultIndex,
+          kind: hasPlanAtK ? 'checkpoint' : 'init',
+        })
+      }
+      continue
+    }
+
+    const winAtK = buildActiveWindow(
+      history, turnStart, pair.resultIndex + 1, pairsSub, triggeredNudges, activeCheckpoints, windowOpts,
+    )
+    const lastCheckpointAtK = [...pairsSub].reverse().find(p => p.notedUpdate && activeCheckpoints.has(p.callIndex))
+    const checkpointPairIdx = lastCheckpointAtK !== undefined ? pairsSub.indexOf(lastCheckpointAtK) : -1
+    const searchAfter = lastCheckpointAtK !== undefined ? lastCheckpointAtK.resultIndex + 1 : turnStart
+    const unfoldedWs = pairsSub.filter(p => p.callIndex >= searchAfter && !isWorklistTool(p.name)).length
+    const hasPlanAtK = pairsSub.some(p => p.ok && isWorklistTool(p.name))
+    const kind: WorklistNudgeKind = hasPlanAtK ? 'checkpoint' : 'init'
+    const cooldown = kind === 'init' ? INIT_NUDGE_COOLDOWN_STEPS : CHECKPOINT_NUDGE_COOLDOWN_STEPS
+    const prevSameKind = [...triggeredNudges].reverse().find(n => n.pairIndex > checkpointPairIdx && n.kind === kind)
+    const onCooldown = prevSameKind !== undefined && (k - prevSameKind.pairIndex) < cooldown
+
+    if (!onCooldown && unfoldedWs >= 1 && winAtK.totalTokens > input.budgetTokens) {
+      triggeredNudges.push({ pairIndex: k, afterResultIndex: pair.resultIndex, kind })
     }
   }
 
-  const finalWin = buildActiveWindow(history, turnStart, history.length, pairs, triggeredNudges, windowOpts)
+  const finalWin = buildActiveWindow(history, turnStart, history.length, pairs, triggeredNudges, activeCheckpoints, windowOpts)
   const recorded: RecordedWorklistNudge[] = triggeredNudges.map(({ afterResultIndex, kind }) => ({ afterResultIndex, kind }))
 
   return {
@@ -780,6 +810,7 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
 
 export interface WorklistEntryOptions extends TranscriptOptions {
   readonly systemTokens: number
+  readonly minFoldTokens?: number
   readonly budgetTokens: number
   readonly hardCapTokens?: number
   readonly backboneMaxTokens?: number
@@ -798,6 +829,7 @@ export function worklistEntries(
   const reminderTokens = options.reminders === false || !options.postToolReminder ? 0 : countTokens(options.postToolReminder)
   const fold = foldWorklist(history, {
     systemTokens: options.systemTokens,
+    ...options.minFoldTokens === undefined ? {} : { minFoldTokens: options.minFoldTokens },
     budgetTokens: options.budgetTokens,
     ...options.hardCapTokens === undefined ? {} : { hardCapTokens: options.hardCapTokens },
     ...options.backboneMaxTokens === undefined ? {} : { backboneMaxTokens: options.backboneMaxTokens },

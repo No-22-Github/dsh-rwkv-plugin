@@ -379,3 +379,45 @@ test('worklist UI: advancing to next in_progress auto-completes noted item and T
     { content: '[3] Run tests', status: 'pending' },
   ])
 })
+
+test('worklist minFoldTokens low watermark: skips folding below threshold without retroactive folding', () => {
+  const planOut = '[1] [in_progress] Read\n[2] [pending] Edit'
+  const u1Out = '[1] [completed] Read\n  note: read a.py\n[2] [in_progress] Edit'
+  const u2Out = '[1] [completed] Read\n  note: read a.py\n[2] [completed] Edit\n  note: edited a.py'
+  const bigChunk = 'alpha beta gamma delta epsilon '.repeat(400)
+  const history: HistoryItem[] = [
+    { kind: 'user', text: 'Update a.py and b.py.' },
+    { kind: 'call', id: 'p1', name: 'todo_plan', args: { items: ['Read', 'Edit'] } },
+    { kind: 'result', id: 'p1', name: 'todo_plan', ok: true, text: planOut },
+    { kind: 'call', id: 'r1', name: 'read', args: { file_path: '/app/a.py' } },
+    { kind: 'result', id: 'r1', name: 'read', ok: true, text: 'def f(): return 1' },
+    { kind: 'call', id: 'r2', name: 'read', args: { file_path: '/app/b.py' } },
+    { kind: 'result', id: 'r2', name: 'read', ok: true, text: 'def g(): return 2' },
+    { kind: 'call', id: 'r3', name: 'read', args: { file_path: '/app/c.py' } },
+    { kind: 'result', id: 'r3', name: 'read', ok: true, text: 'def h(): return 3' },
+    // Early noted todo_update while total prompt is well below minFoldTokens (3000): should NOT fold r1.
+    { kind: 'call', id: 'u1', name: 'todo_update', args: { id: 1, status: 'completed', note: 'read a.py' } },
+    { kind: 'result', id: 'u1', name: 'todo_update', ok: true, text: u1Out },
+    // Later large read pushes prompt past minFoldTokens (3000): u1 must NOT retroactively fold!
+    { kind: 'call', id: 'r4', name: 'read', args: { file_path: '/app/big.py' } },
+    { kind: 'result', id: 'r4', name: 'read', ok: true, text: bigChunk },
+  ]
+
+  const belowWatermark = foldWorklist(history.slice(0, 11), { systemTokens: 1000, minFoldTokens: 3000, budgetTokens: 12000 })
+  assert.equal(belowWatermark.checkpointAt, undefined, 'below minFoldTokens does not activate checkpoint')
+  assert.ok(belowWatermark.items.some(item => item.kind === 'call' && item.id === 'r1'), 'keeps earliest read when below minFoldTokens')
+
+  const afterGrowthNoNewUpdate = foldWorklist(history, { systemTokens: 1000, minFoldTokens: 3000, budgetTokens: 12000 })
+  assert.equal(afterGrowthNoNewUpdate.checkpointAt, undefined, 'earlier below-watermark todo_update never retroactively folds')
+  assert.ok(afterGrowthNoNewUpdate.items.some(item => item.kind === 'call' && item.id === 'r1'), 'keeps r1 without retroactive fold')
+
+  // Once above minFoldTokens, a new noted todo_update triggers folding normally.
+  const withSecondUpdate: HistoryItem[] = [
+    ...history,
+    { kind: 'call', id: 'u2', name: 'todo_update', args: { id: 2, status: 'completed', note: 'edited a.py' } },
+    { kind: 'result', id: 'u2', name: 'todo_update', ok: true, text: u2Out },
+  ]
+  const aboveWatermark = foldWorklist(withSecondUpdate, { systemTokens: 1000, minFoldTokens: 3000, budgetTokens: 12000 })
+  assert.equal(aboveWatermark.checkpointAt, 13, 'noted todo_update above minFoldTokens activates checkpoint')
+  assert.ok(!aboveWatermark.items.some(item => item.kind === 'call' && item.id === 'r1'), 'folds oldest read beyond keepRecentPairs')
+})
