@@ -95,24 +95,31 @@ test('tolerant-edit hook: blocks syntax-breaking edits before disk write, delega
   let nextCalls = 0
   let writtenPolicy: unknown
   const observed: unknown[] = []
+  const mockFs = {
+    resolve: async (p: string) => ({ displayPath: p }),
+    readText: async (t: { displayPath: string }) => files.get(`/ws/${t.displayPath}`)!,
+    editText: async (t: { displayPath: string }, edit: { oldString: string; newString: string }, _intent: unknown, _sig: unknown, policy: unknown) => {
+      writtenPolicy = policy
+      const before = files.get(`/ws/${t.displayPath}`)!
+      const after = before.replace(edit.oldString, edit.newString)
+      files.set(`/ws/${t.displayPath}`, after)
+      return { version: 'v2', before, after }
+    },
+    processPath: (t: { displayPath: string }) => `/ws/${t.displayPath}`,
+  }
 
   applyTolerantEdit({
-    fs: {
-      resolve: async (p: string) => ({ displayPath: p }),
-      readText: async (t: { displayPath: string }) => files.get(`/ws/${t.displayPath}`)!,
-      editText: async (t: { displayPath: string }, edit: { oldString: string; newString: string }, _intent: unknown, _sig: unknown, policy: unknown) => {
-        writtenPolicy = policy
-        const before = files.get(`/ws/${t.displayPath}`)!
-        const after = before.replace(edit.oldString, edit.newString)
-        files.set(`/ws/${t.displayPath}`, after)
-        return { version: 'v2', before, after }
-      },
-      processPath: (t: { displayPath: string }) => `/ws/${t.displayPath}`,
+    get fs() {
+      throw new Error('cannot get property "fs" without inject')
     },
     on: (_ev: string, fn: typeof listener) => { listener = fn },
     waterfall: async () => ({ version: 'v1' }),
     emit: (...args: unknown[]) => { observed.push(args) },
-    get: (name: string) => name === 'sandboxPolicy' ? { resolve: () => 'session-policy-token' } : undefined,
+    get: (name: string) => {
+      if (name === 'fs') return mockFs
+      if (name === 'sandboxPolicy') return { resolve: () => 'session-policy-token' }
+      return undefined
+    },
   }, {
     providers: () => ['rwkv'],
     enabled: () => true,
@@ -154,4 +161,54 @@ test('tolerant-edit hook: blocks syntax-breaking edits before disk write, delega
   assert.equal(observed.length, 1)
   assert.match(drifted.content[0].text, /updated successfully\.\nMatched the edit at lines 3-4 of v\.ts ignoring indentation; re-indented/)
   assert.equal(files.get('/ws/v.ts'), 'export class Svc {\n  run(x: number): number {\n    const base = 10\n    return x + base\n  }\n}\n')
+})
+
+test('tolerant-edit: strips copied read line-number prefixes and refuses silent no-op context resets', () => {
+  const cssFile = '.card {\n  padding: 1rem;\n}\n.deprecated {\n  color: #444;\n  display: block;\n}\n'
+  const stripped = resolveTolerantEdit(
+    cssFile,
+    '4: .deprecated {\n5:   color: #444;\n6:   display: block;\n7: }',
+    '4: .deprecated {\n5:   color: #0a7d55;\n6:   display: block;\n7: }',
+    'site.css',
+  )
+  assert.equal(stripped.kind, 'repaired')
+  if (stripped.kind === 'repaired') {
+    assert.equal(stripped.oldString, '.deprecated {\n  color: #444;\n  display: block;\n}')
+    assert.equal(stripped.newString, '.deprecated {\n  color: #0a7d55;\n  display: block;\n}')
+    assert.match(stripped.note, /stripping line-number prefixes/)
+  }
+
+  // Model accidentally writes the target new line into both old_string and new_string in a similar block.
+  const javaFile = [
+    'public class Service {',
+    '    public int processOrder(int count, int discount, int tax, int shipping, int fee) {',
+    '        int subtotal = count * 10;',
+    '        int total = subtotal - discount;',
+    '        return total + tax + shipping + fee;',
+    '    }',
+    '}',
+    '',
+  ].join('\n')
+  const noop = resolveTolerantEdit(
+    javaFile,
+    [
+      '    public int processOrder(int count, int discount, int tax, int shipping, int fee) {',
+      '        int subtotal = count * 10;',
+      '        int total = subtotal - discount + 5;',
+      '        return total + tax + shipping + fee;',
+      '    }',
+    ].join('\n'),
+    [
+      '    public int processOrder(int count, int discount, int tax, int shipping, int fee) {',
+      '        int subtotal = count * 10;',
+      '        int total = subtotal - discount + 5;',
+      '        return total + tax + shipping + fee;',
+      '    }',
+    ].join('\n'),
+    'Service.java',
+  )
+  assert.equal(noop.kind, 'refused')
+  if (noop.kind === 'refused') {
+    assert.match(noop.message, /already contains the modified text instead of the current file text/)
+  }
 })

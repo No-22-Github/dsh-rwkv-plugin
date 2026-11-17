@@ -380,6 +380,17 @@ function isSingleIndentedLine(oldText: string, newText: string): boolean {
   return /^[ \t]/.test(body) && !body.includes('\n') && (old !== body || toLF(newText).includes('\n'))
 }
 
+function hasAllLineNumberPrefixes(text: string): boolean {
+  const nonEmpty = text.split('\n').filter(line => line !== '')
+  return nonEmpty.length > 0
+    && nonEmpty.every(line => /^\s*\d+: ?/.test(line))
+    && nonEmpty.some(line => /^\s*\d+: /.test(line))
+}
+
+function stripLineNumberPrefixes(text: string): string {
+  return text.split('\n').map(line => (line === '' ? '' : line.replace(/^\s*\d+: ?/, ''))).join('\n')
+}
+
 /**
  * Resolve a single `{ oldString, newString }` edit against `rawContent`,
  * preserving CRLF when present. Exact unique matches return `{ kind: 'exact' }`.
@@ -431,13 +442,51 @@ export function resolveTolerantEdit(
       : { kind: 'exact' }
   }
 
-  const result = findRegion(content, oldLF)
+  // Strip accidental `123: ` line-number prefixes copied from `read` output.
+  let effectiveOldLF = oldLF
+  let effectiveNewLF = newLF
+  let strippedPrefixes = false
+  if (hasAllLineNumberPrefixes(oldLF) && !content.includes(oldLF)) {
+    const candidateOld = stripLineNumberPrefixes(oldLF)
+    if (candidateOld.trim() !== '') {
+      effectiveOldLF = candidateOld
+      strippedPrefixes = true
+      if (hasAllLineNumberPrefixes(newLF)) {
+        effectiveNewLF = stripLineNumberPrefixes(newLF)
+      }
+      const strippedAt = content.indexOf(effectiveOldLF)
+      if (strippedAt >= 0 && content.indexOf(effectiveOldLF, strippedAt + 1) < 0) {
+        if (effectiveOldLF === effectiveNewLF) {
+          return {
+            kind: 'refused',
+            message: `Could not apply edit in ${displayPath}: old_string and new_string are identical after stripping line-number prefixes.`,
+          }
+        }
+        return {
+          kind: 'repaired',
+          oldString: restoreEol(effectiveOldLF),
+          newString: restoreEol(effectiveNewLF),
+          note: `Matched the edit at line ${lineAt(content, strippedAt)} of ${displayPath} after stripping line-number prefixes.`,
+        }
+      }
+    }
+  }
+
+  const result = findRegion(content, effectiveOldLF)
   if (result.kind === 'match') {
     const { match } = result
     const exact = content.slice(match.start, match.end)
-    const fit = fitReplacement(newLF, match)
+    const fit = fitReplacement(effectiveNewLF, match)
     const range = match.firstLine === match.lastLine ? `line ${match.firstLine}` : `lines ${match.firstLine}-${match.lastLine}`
+    if (fit.text === exact) {
+      return {
+        kind: 'refused',
+        message: `Could not apply edit in ${displayPath}: old_string already contains the modified text instead of the current file text at ${range}. `
+          + `Copy old_string from these exact lines:\n${exact}`,
+      }
+    }
     let note = `Matched the edit at ${range} of ${displayPath} ${LEVEL_TEXT[match.level]}`
+    if (strippedPrefixes) note += ' after stripping line-number prefixes'
     if (match.similarity !== undefined) note += ` (${Math.round(match.similarity * 100)}% similar)`
     if (fit.reindented) note += '; re-indented the replacement to the file'
     if (fit.kept > 0) note += `; kept ${fit.kept} unchanged line(s) as the file has them`
@@ -451,8 +500,8 @@ export function resolveTolerantEdit(
     }
   }
 
-  if (result.kind === 'none' && result.closest && newLF.trim().length >= 8) {
-    const present = findRegion(content, newLF)
+  if (result.kind === 'none' && result.closest && effectiveNewLF.trim().length >= 8) {
+    const present = findRegion(content, effectiveNewLF)
     const { firstLine, lastLine } = result.closest
     if (present.kind === 'match' && present.match.level !== 'similar' && present.match.firstLine <= lastLine && present.match.lastLine >= firstLine) {
       return {

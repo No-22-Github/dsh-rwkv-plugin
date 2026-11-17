@@ -90,7 +90,8 @@ export function applyTolerantEdit(ctx: unknown, options: TolerantEditOptions): v
     if (exec.name !== 'edit' || exec.parent !== undefined || !options.enabled()) return next()
     const provider = providerOf(exec)
     if (provider === undefined || !options.providers().includes(provider)) return next()
-    const fs = host.fs
+    // `rwkv-llm` only injects `llm`; read `fs` via Cordis `.get('fs')` like `result-budget.ts`.
+    const fs = host.get('fs') as FsLike | undefined
     if (fs === undefined || typeof exec.arguments !== 'object' || exec.arguments === null) return next()
 
     const args = exec.arguments as {
