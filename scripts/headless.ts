@@ -36,7 +36,7 @@ const { values, positionals } = parseArgs({
     model: { type: 'string' },
     state: { type: 'string' },
     adapter: { type: 'string' },
-    'empty-think': { type: 'boolean', default: false },
+    'empty-think': { type: 'boolean', default: true },
     thinking: { type: 'string', default: 'full' },
     'max-steps': { type: 'string', default: '15' },
     'context-window': { type: 'string', default: '32768' },
@@ -51,12 +51,16 @@ const { values, positionals } = parseArgs({
     // YAML rows appended to the generated cordis.patch.yml (eval overlays: extra
     // plugins, web provider selection). Top-level list items, same indentation.
     'extra-patch': { type: 'string' },
-    // File edit mode: 'line-edit' (default), 'tolerant', or 'literal'.
+    // File edit mode: 'tolerant' (default), 'line-edit', or 'literal'.
     'edit-mode': { type: 'string' },
-    // Mount the edit_lines tool (src/line-edit.ts); kept for --edit-mode line-edit or explicit --no-line-edit.
+    // Mount the edit_lines tool (src/line-edit.ts); kept for --edit-mode line-edit or explicit --line-edit.
     'line-edit': { type: 'boolean' },
     // Native literal edit without tolerance: an explicit opt-out for A/B runs.
     'native-edit': { type: 'boolean', default: false },
+    // Context management mode: 'auto-fold' (default), 'full', 'worklist', or 'relay'.
+    'history-mode': { type: 'string' },
+    'worklist-min-fold': { type: 'string' },
+    'worklist-budget': { type: 'string' },
     // Mount the stateful worklist tools (src/todo.ts); shown to the model only when historyMode is 'worklist'.
     todo: { type: 'boolean', default: true },
     // System prompt ends with the current date (off: eval prompts match the training rows).
@@ -123,9 +127,27 @@ const indent = values.installed ? '    ' : '        '
 const extraPluginConfig = values['plugin-config'] ? JSON.parse(values['plugin-config']) as Record<string, unknown> : {}
 const resolvedEditMode = values['edit-mode']
   ?? (typeof extraPluginConfig.editMode === 'string' ? extraPluginConfig.editMode : undefined)
-  ?? (values['native-edit'] || values['line-edit'] === false ? 'literal' : 'line-edit')
+  ?? (values['native-edit'] ? 'literal' : values['line-edit'] === true ? 'line-edit' : 'tolerant')
 if (resolvedEditMode !== 'tolerant' && resolvedEditMode !== 'line-edit' && resolvedEditMode !== 'literal') {
   throw new Error(`--edit-mode must be tolerant, line-edit, or literal (got ${String(resolvedEditMode)})`)
+}
+const resolvedHistoryMode = values['history-mode']
+  ?? (typeof extraPluginConfig.historyMode === 'string' ? extraPluginConfig.historyMode : undefined)
+  ?? 'auto-fold'
+if (resolvedHistoryMode !== 'auto-fold' && resolvedHistoryMode !== 'full' && resolvedHistoryMode !== 'worklist' && resolvedHistoryMode !== 'relay') {
+  throw new Error(`--history-mode must be auto-fold, full, worklist, or relay (got ${String(resolvedHistoryMode)})`)
+}
+const resolvedMinFold = values['worklist-min-fold'] !== undefined
+  ? Number(values['worklist-min-fold'])
+  : typeof extraPluginConfig.worklistMinFoldTokens === 'number' ? extraPluginConfig.worklistMinFoldTokens : undefined
+const resolvedBudget = values['worklist-budget'] !== undefined
+  ? Number(values['worklist-budget'])
+  : typeof extraPluginConfig.worklistBudgetTokens === 'number' ? extraPluginConfig.worklistBudgetTokens : undefined
+if (resolvedMinFold !== undefined && (!Number.isInteger(resolvedMinFold) || resolvedMinFold < 0)) {
+  throw new Error(`--worklist-min-fold must be a non-negative integer (got ${String(resolvedMinFold)})`)
+}
+if (resolvedBudget !== undefined && (!Number.isInteger(resolvedBudget) || resolvedBudget <= 0)) {
+  throw new Error(`--worklist-budget must be a positive integer (got ${String(resolvedBudget)})`)
 }
 
 writeFileSync(join(profileDir, 'cordis.patch.yml'), [
@@ -136,10 +158,13 @@ writeFileSync(join(profileDir, 'cordis.patch.yml'), [
   `${indent}maxSteps: ${Number(values['max-steps'])}`,
   `${indent}currentDate: ${values['current-date']}`,
   `${indent}editMode: ${json(resolvedEditMode)}`,
+  `${indent}historyMode: ${json(resolvedHistoryMode)}`,
+  ...(resolvedMinFold === undefined ? [] : [`${indent}worklistMinFoldTokens: ${resolvedMinFold}`]),
+  ...(resolvedBudget === undefined ? [] : [`${indent}worklistBudgetTokens: ${resolvedBudget}`]),
   ...(values['time-zone'] ? [`${indent}timeZone: ${json(values['time-zone'])}`] : []),
   ...(values['trace-dir'] ? [`${indent}traceDir: ${json(resolve(values['trace-dir']))}`] : []),
   ...Object.entries(extraPluginConfig)
-    .filter(([key]) => key !== 'editMode')
+    .filter(([key]) => !['editMode', 'historyMode', 'worklistMinFoldTokens', 'worklistBudgetTokens'].includes(key))
     .map(([key, value]) => `${indent}${key}: ${json(value)}`),
   `${indent}models:`,
   ...modelRows.map(row => `${indent}  ${row}`),
@@ -148,7 +173,7 @@ writeFileSync(join(profileDir, 'cordis.patch.yml'), [
       ? 'dsh-rwkv-plugin/line-edit'
       : pathToFileURL(join(pluginRoot, fromSource ? 'src/line-edit.ts' : 'lib/line-edit.js')).href)}`]
     : []),
-  ...(values.todo
+  ...(values.todo && resolvedHistoryMode === 'worklist'
     ? ['- insert:', '    - id: rwkv-todo', `      name: ${json(values.installed
       ? 'dsh-rwkv-plugin/todo'
       : pathToFileURL(join(pluginRoot, fromSource ? 'src/todo.ts' : 'lib/todo.js')).href)}`]

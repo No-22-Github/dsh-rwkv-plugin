@@ -14,7 +14,7 @@
       config:
         id: rwkv
         name: RWKV Agent
-        description: 专为 RWKV-7 G1 模型准备：默认终端、文件（edit_lines）和网页 8 个工具，开启状态化工单后自动挂载 todo_plan / todo_update。
+        description: 专为 RWKV-7 G1 模型准备：默认容错编辑（edit）+ 历史思考留空 + 自动折叠上下文（Auto-Fold），并按配置支持切换 edit_lines 或状态化工单。
         order: 9
         plugins:
           # Same persona as the Standard preset.

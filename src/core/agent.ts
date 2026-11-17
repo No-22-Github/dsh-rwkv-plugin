@@ -101,7 +101,7 @@ export interface HarnessConfig {
 
 export const DEFAULT_HARNESS: HarnessConfig = {
   thinking: 'full',
-  historyEmptyThink: false,
+  historyEmptyThink: true,
   maxSteps: 15,
   maxConsecutiveFailures: 2,
   protocolRetries: 2,
@@ -268,13 +268,14 @@ function describe(action: Action): string {
 export async function decideStep(input: StepInput): Promise<StepResult> {
   const { config, tools, hooks } = input
   const reminder = config.thinking === 'full' ? POST_TOOL_REMINDER_THINK : POST_TOOL_REMINDER
+  const worklistGuidance = config.worklist?.passive === true ? false : config.worklist?.systemGuidance
   const system = systemPrompt(
     tools,
     config.thinking,
     config.taskContract,
     input.systemHead,
     config.dateLine,
-    config.worklist?.systemGuidance === undefined ? undefined : { worklistGuidance: config.worklist.systemGuidance },
+    worklistGuidance === undefined ? undefined : { worklistGuidance },
   )
   let promptTokens = 0
   let completionTokens = 0

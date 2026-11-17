@@ -68,7 +68,7 @@ const AGENT_FAST: Sampling = { temperature: 0.3, topK: 65536, topP: 0.5, presenc
 
 const RUN_DEFAULTS: RunSettings = {
   thinking: 'full',
-  historyEmptyThink: false,
+  historyEmptyThink: true,
   maxSteps: 15,
   maxConsecutiveFailures: 2,
   protocolRetries: 2,
@@ -338,7 +338,7 @@ function ModelEditor(props: {
             <Field label="历史步骤不带思考">
               <SelectInput
                 value={draft.historyEmptyThink === undefined ? '' : draft.historyEmptyThink ? 'on' : 'off'} disabled={disabled}
-                options={[['', '跟随运行参数'], ['off', '关（保留全量历史思考）'], ['on', '开（兼容旧空思考权重）']] as const}
+                options={[['', '跟随运行参数'], ['on', '开（默认，历史思考留空）'], ['off', '关（保留全量历史思考）']] as const}
                 onChange={value => set('historyEmptyThink', value === '' ? undefined : value === 'on')}
               />
             </Field>
@@ -445,10 +445,10 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
             onChange={value => update({ thinking: value })}
           />
         </Field>
-        <Field label="历史步骤思考" hint="默认保留完整思维链；留空仅用于兼容旧版空思考训练权重">
+        <Field label="历史步骤思考" hint="默认留空，只保留当前步思考（避免 RWKV 复读和稀释长上下文记忆）">
           <Segment
             value={draft.historyEmptyThink ? 'empty' : 'keep'} disabled={disabled}
-            options={[['keep', '保留'], ['empty', '留空']] as const}
+            options={[['empty', '留空（推荐）'], ['keep', '保留']] as const}
             onChange={value => update({ historyEmptyThink: value === 'empty' })}
           />
         </Field>

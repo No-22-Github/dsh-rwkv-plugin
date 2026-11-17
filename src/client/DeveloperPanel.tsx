@@ -17,7 +17,7 @@ export interface DeveloperSettings {
   /** File editing mode; edits `editMode` in the Host schema. */
   editMode: 'tolerant' | 'line-edit' | 'literal'
   /** Context management mode; edits `historyMode` in the Host schema. */
-  historyMode: 'full' | 'worklist'
+  historyMode: 'auto-fold' | 'full' | 'worklist'
   worklistMinFoldTokens: number
   worklistBudgetTokens: number
   worklistKeepRecentPairs: number
@@ -28,8 +28,8 @@ export const DEVELOPER_DEFAULTS: DeveloperSettings = {
   traceDir: '',
   outputRepairs: true,
   guards: true,
-  editMode: 'line-edit',
-  historyMode: 'full',
+  editMode: 'tolerant',
+  historyMode: 'auto-fold',
   worklistMinFoldTokens: 8000,
   worklistBudgetTokens: 12000,
   worklistKeepRecentPairs: 2,
@@ -267,7 +267,7 @@ export function DeveloperCard(props: {
     setBusy(false)
   }
   const off = disabled || busy
-  const historyMode = settings.historyMode === 'worklist' ? 'worklist' : 'full'
+  const historyMode = settings.historyMode === 'worklist' ? 'worklist' : settings.historyMode === 'full' ? 'full' : 'auto-fold'
   return (
     <details className="rwkv-card rwkv-developer">
       <summary className="rwkv-head rwkv-developer-summary">
@@ -277,7 +277,11 @@ export function DeveloperCard(props: {
           {settings.outputRepairs ? '' : ' · 修正已关'}
           {settings.guards ? '' : ' · 修复已关'}
           {settings.editMode === 'tolerant' ? ' · 召回容错编辑' : settings.editMode === 'literal' ? ' · 原生精确编辑' : ' · 行号编辑'}
-          {historyMode === 'worklist' ? ` · 状态化工单（${settings.worklistMinFoldTokens} / ${settings.worklistBudgetTokens}）` : ''}
+          {historyMode === 'auto-fold'
+            ? ` · 自动折叠（${settings.worklistMinFoldTokens} / ${settings.worklistBudgetTokens}）`
+            : historyMode === 'worklist'
+              ? ` · 状态化工单（${settings.worklistMinFoldTokens} / ${settings.worklistBudgetTokens}）`
+              : ''}
         </span>
       </summary>
       <div className="rwkv-developer-body">
@@ -305,16 +309,19 @@ export function DeveloperCard(props: {
             className="rwkv-input" value={historyMode} disabled={off}
             onChange={event => { void set('historyMode', event.target.value) }}
           >
+            <option value="auto-fold">自动折叠（默认） / Auto-Fold</option>
             <option value="full">完整对话 / Full</option>
             <option value="worklist">状态化工单（实验性） / WorkList (Experimental)</option>
           </select>
           <p className="rwkv-hint">
-            {historyMode === 'worklist'
-              ? '已开启状态化工单：模型通过 todo_plan 与 todo_update 维护子目标和阶段性 note；写入 note 后温和折叠早期输出（保留初始计划与最近几步工具结果），未建表时自动走兜底台账压缩，并同步渲染到桌面右侧 Todo 面板。'
-              : '默认读取完整对话，不挂载状态化工单工具。'}
+            {historyMode === 'auto-fold'
+              ? '推荐：低于折叠水位（默认 8k）保持完整对话零损耗；跨多轮或单轮超预算（默认 12k）时由插件自动将较早步骤的工具输出收成单行记录，只保留最近几步原文，不挂载 todo 工具。'
+              : historyMode === 'worklist'
+                ? '已开启状态化工单：模型通过 todo_plan 与 todo_update 维护子目标和阶段性 note；写入 note 后温和折叠早期输出（保留初始计划与最近几步工具结果），未建表时自动走兜底台账压缩，并同步渲染到桌面右侧 Todo 面板。'
+                : '读取完整对话，不做折叠与压缩，不挂载状态化工单工具。'}
           </p>
         </label>
-        {historyMode === 'worklist' ? (
+        {historyMode === 'auto-fold' || historyMode === 'worklist' ? (
           <div className="rwkv-grid">
             <label className="rwkv-field">
               <span className="rwkv-label">折叠最低水位（RWKV token）</span>
@@ -322,23 +329,31 @@ export function DeveloperCard(props: {
                 value={settings.worklistMinFoldTokens} min={0} disabled={off} placeholder="8000"
                 onSave={value => { void set('worklistMinFoldTokens', value) }}
               />
-              <p className="rwkv-hint">提示词低于该水位时，todo_update 只记录 note 不触发折叠裁剪；达到后才开始温和折叠早期步骤。</p>
+              <p className="rwkv-hint">
+                {historyMode === 'auto-fold'
+                  ? '总上下文低于该水位时，跨多轮对话也完整保留原文不折叠；达到后从最早的旧轮次开始折叠。'
+                  : '提示词低于该水位时，todo_update 只记录 note 不触发折叠裁剪；达到后才开始温和折叠早期步骤。'}
+              </p>
             </label>
             <label className="rwkv-field">
-              <span className="rwkv-label">提醒最高水位（RWKV token）</span>
+              <span className="rwkv-label">单轮折叠上限（RWKV token）</span>
               <NumberField
                 value={settings.worklistBudgetTokens} disabled={off} placeholder="12000"
                 onSave={value => { void set('worklistBudgetTokens', value) }}
               />
-              <p className="rwkv-hint">提示词超过该水位时，在工具结果后追加不撤回的预算提醒（未建表提醒 todo_plan，已建表提醒 todo_update 写 note）；超出硬上限（+3000）自动将旧步压成行级台账。</p>
+              <p className="rwkv-hint">
+                {historyMode === 'auto-fold'
+                  ? '当前轮超过该水位时，自动将最旧步骤的原始输出折叠成单行操作记录（保留最近几步原文）。'
+                  : '提示词超过该水位时，在工具结果后追加不撤回的预算提醒；超出硬上限（+3000）自动将旧步压成行级台账。'}
+              </p>
             </label>
             <label className="rwkv-field">
-              <span className="rwkv-label">折叠保留最近步数</span>
+              <span className="rwkv-label">保留最近原文步数</span>
               <NumberField
                 value={settings.worklistKeepRecentPairs} min={0} disabled={off} placeholder="2"
                 onSave={value => { void set('worklistKeepRecentPairs', value) }}
               />
-              <p className="rwkv-hint">每次 todo_update 写入 note 折叠早期输出时，额外原样保留检查点前最近几步工作区工具调用与结果（默认 2），避免折叠后断片重读。</p>
+              <p className="rwkv-hint">折叠早期输出时，额外原样保留最近几步工作区工具调用与结果原文（默认 2），避免折叠后重读。</p>
             </label>
           </div>
         ) : null}

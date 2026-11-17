@@ -83,6 +83,13 @@ export interface WorklistOptions {
   readonly keepInitialPlan?: boolean
   /** Whether to inject `WORKLIST_SYSTEM_GUIDANCE` into the system prompt (default: true). */
   readonly systemGuidance?: boolean
+  /**
+   * Auto-fold (`passive: true`): omit active `todo_*` tools, guidance, and
+   * budget nudges; keep full prior turns until total prompt hits
+   * `minFoldTokens` (default 8000), and deterministically fold oldest in-turn
+   * steps past `budgetTokens` (default 12000) while keeping `keepRecentPairs`.
+   */
+  readonly passive?: boolean
 }
 
 export const DEFAULT_WORKLIST_MIN_FOLD_TOKENS = 8000
@@ -403,7 +410,7 @@ function foldCompletedTurn(history: readonly HistoryItem[], from: number, to: nu
     const item = history[index]!
     if (hasFinal && fallbackPair !== undefined && index === fallbackPair.resultIndex && item.kind === 'result') {
       out.push(compactPriorResult(item))
-    } else if (lastWorklist !== undefined && index === lastWorklist.callIndex && item.kind === 'call' && item.reasoning) {
+    } else if ((item.kind === 'call' || item.kind === 'assistant') && item.reasoning) {
       out.push({ ...item, reasoning: undefined })
     } else {
       out.push(item)
@@ -430,6 +437,8 @@ export interface FoldWorklistInput {
   readonly forceNudge?: boolean
   /** Whether to emit a live tail reminder on the current step (default: true). */
   readonly emitLiveNudge?: boolean
+  /** Passive auto-fold mode: watermark-gated cross-turn & in-turn folding with zero nudges or todo checkpoints. */
+  readonly passive?: boolean
 }
 
 export interface WorklistFoldResult {
@@ -468,11 +477,13 @@ function buildActiveWindow(
   activeCheckpoints: ReadonlySet<number>,
   options: {
     readonly baseOverhead: number
+    readonly budgetTokens: number
     readonly hardCap: number
     readonly keepRecentCount: number
     readonly keepInitialPlan: boolean
     readonly emptyThink: boolean
     readonly emitLiveNudge: boolean
+    readonly passive: boolean
     readonly fullTok: readonly number[]
     readonly bareTok: readonly number[]
   },
@@ -635,12 +646,25 @@ function buildActiveWindow(
     }
   }
 
-  //   Phase 2 — if raw tool results still exceed `hardCap`, drop the oldest
-  //             non-anchor workspace call/result pairs and record them in a
-  //             compact 1-line-per-step ledger at the top of the turn.
+  //   Phase 2 — in passive auto-fold mode, deterministically fold oldest
+  //             in-turn pairs past `budgetTokens` while retaining at least
+  //             `keepRecentCount` pairs verbatim; then enforce `hardCap` safety
+  //             ceiling across both modes.
   const droppablePairs = pairsSub.filter(pair =>
     keptSet.has(pair.callIndex) && !protectedCallIndices.has(pair.callIndex),
   )
+  if (options.passive) {
+    const keepFloor = Math.max(1, options.keepRecentCount)
+    while (droppablePairs.length > keepFloor && built.tokens > options.budgetTokens) {
+      const oldest = droppablePairs.shift()!
+      droppedByHardCap.push(oldest)
+      keptSet.delete(oldest.callIndex)
+      keptSet.delete(oldest.resultIndex)
+      currentIndices = currentIndices.filter(i => i !== oldest.callIndex && i !== oldest.resultIndex)
+      duplicateFrom = Math.max(duplicateFrom, oldest.resultIndex + 1)
+      built = assemble()
+    }
+  }
   while (droppablePairs.length > 1 && built.tokens > options.hardCap) {
     const oldest = droppablePairs.shift()!
     droppedByHardCap.push(oldest)
@@ -682,12 +706,49 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
     return { items: [...history], duplicateFrom: 0, promptTokens: tok }
   }
 
+  const passive = input.passive === true
+  const minFoldTokens = Math.max(0, input.minFoldTokens ?? 0)
+  const turnStart = userStarts.length === 1 ? 0 : userStarts[userStarts.length - 1]!
   const backboneMax = input.backboneMaxTokens ?? DEFAULT_BACKBONE_MAX_TOKENS
   const priorTurns: HistoryItem[][] = []
-  for (let t = 0; t < userStarts.length - 1; t++) {
-    const from = t === 0 ? 0 : userStarts[t]!
-    const to = userStarts[t + 1]!
-    priorTurns.push(foldCompletedTurn(history, from, to))
+  if (passive && userStarts.length > 1) {
+    const rawTurns: HistoryItem[][] = []
+    const foldedTurns: HistoryItem[][] = []
+    for (let t = 0; t < userStarts.length - 1; t++) {
+      const from = t === 0 ? 0 : userStarts[t]!
+      const to = userStarts[t + 1]!
+      rawTurns.push(history.slice(from, to))
+      foldedTurns.push(foldCompletedTurn(history, from, to))
+    }
+    const activeRawTokens = itemsTokens(history.slice(turnStart), emptyThink)
+    const baseFixed = input.systemTokens + (input.reminderTokens ?? 0)
+    if (minFoldTokens > 0) {
+      for (const raw of rawTurns) priorTurns.push(raw)
+      let totalPrior = priorTurns.reduce((sum, turn) => sum + itemsTokens(turn, emptyThink), 0)
+      for (let t = 0; t < priorTurns.length; t++) {
+        if (baseFixed + totalPrior + activeRawTokens < minFoldTokens) break
+        const oldTok = itemsTokens(priorTurns[t]!, emptyThink)
+        const newTok = itemsTokens(foldedTurns[t]!, emptyThink)
+        priorTurns[t] = foldedTurns[t]!
+        totalPrior += newTok - oldTok
+      }
+      // Fold any remaining un-folded prior turns before dropping whole turns at `backboneMax`.
+      for (let t = 0; t < priorTurns.length && totalPrior > backboneMax; t++) {
+        if (priorTurns[t] === foldedTurns[t]) continue
+        const oldTok = itemsTokens(priorTurns[t]!, emptyThink)
+        const newTok = itemsTokens(foldedTurns[t]!, emptyThink)
+        priorTurns[t] = foldedTurns[t]!
+        totalPrior += newTok - oldTok
+      }
+    } else {
+      for (const folded of foldedTurns) priorTurns.push(folded)
+    }
+  } else {
+    for (let t = 0; t < userStarts.length - 1; t++) {
+      const from = t === 0 ? 0 : userStarts[t]!
+      const to = userStarts[t + 1]!
+      priorTurns.push(foldCompletedTurn(history, from, to))
+    }
   }
   // High-water mark on completed prior turns (only hit in 15+ turn marathon chats).
   let priorTokens = priorTurns.reduce((sum, turn) => sum + itemsTokens(turn, emptyThink), 0)
@@ -697,10 +758,8 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
   }
   const priorItems = priorTurns.flat()
 
-  const turnStart = userStarts.length === 1 ? 0 : userStarts[userStarts.length - 1]!
   const pairs = collectPairs(history, turnStart, history.length)
   const baseOverhead = input.systemTokens + priorTokens + (input.reminderTokens ?? 0)
-  const minFoldTokens = Math.max(0, input.minFoldTokens ?? 0)
   const hardCap = input.hardCapTokens ?? (input.budgetTokens + DEFAULT_WORKLIST_HARD_SLACK_TOKENS)
   const keepRecentCount = Math.max(0, input.keepRecentPairs ?? DEFAULT_KEEP_RECENT_PAIRS)
   const keepInitialPlan = input.keepInitialPlan !== false
@@ -720,11 +779,13 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
 
   const windowOpts = {
     baseOverhead,
+    budgetTokens: input.budgetTokens,
     hardCap,
     keepRecentCount,
     keepInitialPlan,
     emptyThink,
     emitLiveNudge,
+    passive,
     fullTok,
     bareTok,
   }
@@ -739,7 +800,7 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
     ? new Map(input.recordedNudges.map(n => [n.afterResultIndex, n.kind]))
     : undefined
 
-  for (let k = 0; k < pairs.length; k++) {
+  for (let k = 0; !passive && k < pairs.length; k++) {
     const pair = pairs[k]!
     const pairsSub = pairs.slice(0, k + 1)
 
@@ -819,9 +880,10 @@ export interface WorklistEntryOptions extends TranscriptOptions {
   readonly historyEmptyThink?: boolean
   readonly recordedNudges?: readonly RecordedWorklistNudge[]
   readonly forceNudge?: boolean
+  readonly passive?: boolean
 }
 
-/** Build RWKV prompt entries (after System:) + TurnState gate boundary for `worklist` mode. */
+/** Build RWKV prompt entries (after System:) + TurnState gate boundary for `worklist` / `auto-fold` mode. */
 export function worklistEntries(
   history: readonly HistoryItem[],
   options: WorklistEntryOptions,
@@ -839,6 +901,7 @@ export function worklistEntries(
     ...options.historyEmptyThink === undefined ? {} : { historyEmptyThink: options.historyEmptyThink },
     ...options.recordedNudges === undefined ? {} : { recordedNudges: options.recordedNudges },
     ...options.forceNudge === undefined ? {} : { forceNudge: options.forceNudge },
+    ...options.passive === undefined ? {} : { passive: options.passive },
     emitLiveNudge: options.reminders !== false,
   })
   const entries = transcriptEntries(fold.items, options)

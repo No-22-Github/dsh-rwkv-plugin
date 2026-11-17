@@ -230,24 +230,21 @@ test('worklist: consecutive worklist spin guard blocks a third consecutive bookk
   if (step.decision.type === 'tool') assert.equal(step.decision.tool.name, 'read')
 })
 
-test('full CoT history (historyEmptyThink=false): keeps unfolded reasoning and collapses blank lines inside think', async () => {
+test('historyEmptyThink defaults to true; explicit false keeps unfolded reasoning and collapses blank lines', async () => {
   const tools = buildCatalog(offeredWithTodo, { mode: 'mapped', names: 'dsh' })
   const history: HistoryItem[] = [
     { kind: 'user', text: 'Inspect and edit a.ts.' },
     { kind: 'call', id: 'c1', name: 'read', args: { file_path: 'a.ts' }, reasoning: 'First paragraph.\n\nSecond paragraph.' },
     { kind: 'result', id: 'c1', name: 'read', ok: true, text: '1: const x = 1' },
   ]
-  const gen = new ScriptedGenerator([
-    '>Now answer.</think>x is 1.',
-  ])
-  await decideStep({ history, tools, config: DEFAULT_HARNESS, generator: gen })
-  assert.equal(DEFAULT_HARNESS.historyEmptyThink, false)
-  assert.match(gen.prompts[0]!, /Assistant: <think>First paragraph\.\nSecond paragraph\.<\/think><tool_call>/)
-
-  // Legacy empty-think mode still strips past reasoning when requested.
   const genEmpty = new ScriptedGenerator(['>Now answer.</think>x is 1.'])
-  await decideStep({ history, tools, config: { ...DEFAULT_HARNESS, historyEmptyThink: true }, generator: genEmpty })
+  await decideStep({ history, tools, config: DEFAULT_HARNESS, generator: genEmpty })
+  assert.equal(DEFAULT_HARNESS.historyEmptyThink, true)
   assert.match(genEmpty.prompts[0]!, /Assistant: <think><\/think><tool_call>/)
+
+  const genFull = new ScriptedGenerator(['>Now answer.</think>x is 1.'])
+  await decideStep({ history, tools, config: { ...DEFAULT_HARNESS, historyEmptyThink: false }, generator: genFull })
+  assert.match(genFull.prompts[0]!, /Assistant: <think>First paragraph\.\nSecond paragraph\.<\/think><tool_call>/)
 })
 
 test('worklist: non-withdrawn budget reminders preserve strict append-only prefix continuity and cooldown', async () => {
@@ -420,4 +417,90 @@ test('worklist minFoldTokens low watermark: skips folding below threshold withou
   const aboveWatermark = foldWorklist(withSecondUpdate, { systemTokens: 1000, minFoldTokens: 3000, budgetTokens: 12000 })
   assert.equal(aboveWatermark.checkpointAt, 13, 'noted todo_update above minFoldTokens activates checkpoint')
   assert.ok(!aboveWatermark.items.some(item => item.kind === 'call' && item.id === 'r1'), 'folds oldest read beyond keepRecentPairs')
+})
+
+test('auto-fold (passive: true): hides todo tools/guidance/nudges, keeps short multi-turn intact under minFoldTokens, and folds past budgetTokens', async () => {
+  const toolsWithoutTodo = buildCatalog(offeredWithTodo, { mode: 'mapped', names: 'dsh', exclude: [TODO_PLAN_TOOL, TODO_UPDATE_TOOL] })
+  assert.ok(!toolsWithoutTodo.some(t => t.name === TODO_PLAN_TOOL || t.name === TODO_UPDATE_TOOL))
+
+  // 1. Short 3-turn conversation under minFoldTokens (8000): keeps all intermediate read/edit steps verbatim.
+  const shortMultiTurn: HistoryItem[] = [
+    { kind: 'user', text: 'Turn 1: write resume.html.' },
+    { kind: 'call', id: 't1r', name: 'read', args: { file_path: '/app/template.html' }, reasoning: 'STALE_R1' },
+    { kind: 'result', id: 't1r', name: 'read', ok: true, text: '<html><body>old</body></html>' },
+    { kind: 'call', id: 't1w', name: 'write', args: { file_path: '/app/resume.html', content: '<html><body>v1</body></html>' } },
+    { kind: 'result', id: 't1w', name: 'write', ok: true, text: 'wrote /app/resume.html' },
+    { kind: 'assistant', text: 'Created resume.html.', reasoning: 'STALE_A1' },
+    { kind: 'user', text: 'Turn 2: change background to light blue.' },
+    { kind: 'call', id: 't2w', name: 'write', args: { file_path: '/app/resume.html', content: '<html><body style="background:#e6f4ff">v1</body></html>' } },
+    { kind: 'result', id: 't2w', name: 'write', ok: true, text: 'wrote /app/resume.html' },
+    { kind: 'assistant', text: 'Changed background to light blue.' },
+    { kind: 'user', text: 'Turn 3: tighten intro text.' },
+  ]
+  const shortFold = foldWorklist(shortMultiTurn, {
+    systemTokens: 800,
+    minFoldTokens: 8000,
+    budgetTokens: 12000,
+    historyEmptyThink: true,
+    passive: true,
+  })
+  assert.ok(shortFold.items.some(item => item.kind === 'call' && item.id === 't1r'), 'short multi-turn under minFoldTokens keeps turn 1 intermediate read verbatim')
+  assert.ok(!shortFold.items.some(item => item.kind === 'note' && item.text.includes('Earlier workspace steps')), 'short multi-turn emits no fold ledger')
+
+  // 2. When total prompt reaches minFoldTokens (e.g. 950), oldest completed turn folds to ledger + final pair (with reasoning stripped).
+  const crossedFold = foldWorklist(shortMultiTurn, {
+    systemTokens: 800,
+    minFoldTokens: 950,
+    budgetTokens: 12000,
+    historyEmptyThink: false,
+    passive: true,
+  })
+  assert.ok(!crossedFold.items.some(item => item.kind === 'call' && item.id === 't1r'), 'oldest turn above minFoldTokens folds intermediate steps')
+  assert.ok(crossedFold.items.some(item => item.kind === 'note' && item.text.includes('- read /app/template.html -> ok')), 'folded turn records deterministic ledger')
+  for (const item of crossedFold.items.slice(0, 6)) {
+    if (item.kind === 'call' || item.kind === 'assistant') {
+      assert.equal(item.reasoning, undefined, 'folded prior turn clears stale reasoning on fallback pair and final reply')
+    }
+  }
+
+  // 3. In-turn overflow past budgetTokens (1600) deterministically folds oldest steps to ledger while keeping recent 2 pairs + zero nudges/guidance.
+  const chunk = 'const line = "payload token filler";\n'.repeat(55)
+  const inTurnLong: HistoryItem[] = [
+    { kind: 'user', text: 'Fix service bug.' },
+    { kind: 'call', id: 's1', name: 'read', args: { file_path: '/app/a.ts' } },
+    { kind: 'result', id: 's1', name: 'read', ok: true, text: `OLD_S1\n${chunk}` },
+    { kind: 'call', id: 's2', name: 'read', args: { file_path: '/app/b.ts' } },
+    { kind: 'result', id: 's2', name: 'read', ok: true, text: `KEEP_S2\n${chunk}` },
+    { kind: 'call', id: 's3', name: 'read', args: { file_path: '/app/c.ts' } },
+    { kind: 'result', id: 's3', name: 'read', ok: true, text: `KEEP_S3\n${chunk}` },
+  ]
+  const gen = new ScriptedGenerator(['>All clear.</think>Fixed.'])
+  await decideStep({
+    history: inTurnLong,
+    tools: toolsWithoutTodo,
+    config: {
+      ...DEFAULT_HARNESS,
+      worklist: { passive: true, systemGuidance: false, minFoldTokens: 800, budgetTokens: 1600, hardCapTokens: 5000, keepRecentPairs: 2 },
+    },
+    generator: gen,
+  })
+  const prompt = gen.prompts[0]!
+  assert.ok(!prompt.includes('todo_plan'), 'auto-fold prompt omits todo_plan from system/tools/nudges')
+  assert.ok(!prompt.includes('call todo_plan early'), 'auto-fold prompt omits WORKLIST_SYSTEM_GUIDANCE')
+  assert.ok(!prompt.includes(WORKLIST_INIT_NUDGE), 'auto-fold never emits INIT_NUDGE')
+  assert.ok(prompt.includes('- read /app/a.ts -> ok'), 'oldest in-turn step folded into deterministic ledger')
+  assert.ok(!prompt.includes('OLD_S1'), 'folded raw payload removed')
+  assert.ok(prompt.includes('KEEP_S2') && prompt.includes('KEEP_S3'), 'recent 2 workspace pairs kept verbatim')
+
+  const passiveFold = foldWorklist(inTurnLong, {
+    systemTokens: 800,
+    minFoldTokens: 800,
+    budgetTokens: 1600,
+    hardCapTokens: 5000,
+    keepRecentPairs: 2,
+    historyEmptyThink: true,
+    passive: true,
+  })
+  assert.equal(passiveFold.nudge, undefined)
+  assert.equal(passiveFold.duplicateFrom, 3, 'duplicateFrom advances past folded step 1')
 })

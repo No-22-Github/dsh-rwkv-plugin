@@ -46,7 +46,7 @@ export interface Settings {
   outputRepairs: boolean
   guards: boolean
   editMode: 'tolerant' | 'line-edit' | 'literal'
-  historyMode: 'full' | 'relay' | 'worklist'
+  historyMode: 'auto-fold' | 'full' | 'relay' | 'worklist'
   relayBudgetTokens: number
   relayCardMaxTokens: number
   worklistMinFoldTokens: number
@@ -87,7 +87,7 @@ export const Config = z.object({
   thinking: z.union(['off', 'full']).default(DEFAULT_HARNESS.thinking)
     .description('full = agent-wire-think-v1.0 (prompt ends with "Assistant: <think"); off = agent-wire-v1.0.').volatile(),
   historyEmptyThink: z.boolean().default(DEFAULT_HARNESS.historyEmptyThink)
-    .description('false (default): keep full past-step thinking in history; true: legacy empty <think></think> before past assistant steps.').volatile(),
+    .description('true (default): empty <think></think> before past assistant steps; false: keep full past-step thinking in history.').volatile(),
   maxSteps: z.natural().default(DEFAULT_HARNESS.maxSteps).description('Tool calls per user turn before the forced closeout.').volatile(),
   maxConsecutiveFailures: z.natural().default(DEFAULT_HARNESS.maxConsecutiveFailures).volatile(),
   protocolRetries: z.natural().default(DEFAULT_HARNESS.protocolRetries).volatile(),
@@ -119,10 +119,10 @@ export const Config = z.object({
     .description('Fix near-miss output: parser repairs, tool name / argument aliases, scalar coercion, DSH value repairs, path repair. Off: exact protocol form only, arguments reach DSH as written.').volatile(),
   guards: z.boolean().default(DEFAULT_HARNESS.guards)
     .description('Harness interventions: format re-asks, duplicate / failure gates, over-budget think close, answer-stage re-asks and fallbacks. Off: the model\'s output stands.').volatile(),
-  editMode: z.union(['tolerant', 'line-edit', 'literal']).default('line-edit')
-    .description('line-edit: coordinate-based `edit_lines` (default). tolerant: standard `edit` with recall-tolerant matching, auto-reindent, dual-anchor sliding-window guard, and pre-write syntax check. literal: stock exact `edit`.').volatile(),
-  historyMode: z.union(['full', 'relay', 'worklist']).default('full')
-    .description('full: the model reads the whole conversation. relay: finished legs are replaced by model-written handoff cards. worklist: `todo_plan` + `todo_update` carry step order and notes while folding intermediate tool outputs.').volatile(),
+  editMode: z.union(['tolerant', 'line-edit', 'literal']).default('tolerant')
+    .description('tolerant (default): standard `edit` with recall-tolerant matching, auto-reindent, dual-anchor sliding-window guard, and pre-write syntax check. line-edit: coordinate-based `edit_lines`. literal: stock exact `edit`.').volatile(),
+  historyMode: z.union(['auto-fold', 'full', 'relay', 'worklist']).default('auto-fold')
+    .description('auto-fold (default): keeps full history under minFoldTokens, then deterministically folds oldest steps to a 1-line ledger without todo tools. full: renders the whole conversation. worklist: active `todo_plan` + `todo_update`. relay: model-written handoff cards.').volatile(),
   relayBudgetTokens: z.natural().default(8000)
     .description('relay: exact RWKV token budget for the part of the leg that gets carded; the latest call/result pair is always kept.').volatile(),
   relayCardMaxTokens: z.natural().default(768)
@@ -170,9 +170,11 @@ function settingsOf(config: Config): AdapterSettings {
     ...config.historyMode.get() === 'relay'
       ? { relay: { budgetTokens: config.relayBudgetTokens.get(), cardMaxTokens: config.relayCardMaxTokens.get() } }
       : {},
-    ...config.historyMode.get() === 'worklist'
+    ...config.historyMode.get() === 'auto-fold' || config.historyMode.get() === 'worklist'
       ? {
           worklist: {
+            passive: config.historyMode.get() === 'auto-fold',
+            ...(config.historyMode.get() === 'auto-fold' ? { systemGuidance: false } : {}),
             minFoldTokens: config.worklistMinFoldTokens.get(),
             budgetTokens: config.worklistBudgetTokens.get(),
             keepRecentPairs: config.worklistKeepRecentPairs.get(),

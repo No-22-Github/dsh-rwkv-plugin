@@ -79,7 +79,7 @@ export interface AdapterSettings {
   readonly traces?: TraceLocation
   /** Turn-relay context; absent: the full history is rendered. */
   readonly relay?: RelayOptions
-  /** Stateful worklist context; absent: `todo_plan` / `todo_update` stay hidden. */
+  /** Stateful worklist or passive auto-fold context; absent: full history, and `todo_*` stay hidden unless active `worklist` (`passive !== true`). */
   readonly worklist?: WorklistOptions
   readonly log?: (message: string) => void
 }
@@ -203,7 +203,7 @@ export class RwkvAdapter extends LlmAdapter {
     const exclude = [
       ...this.settings.excludeTools,
       ...(this.settings.editMode !== undefined && this.settings.editMode !== 'line-edit' ? ['edit_lines'] : []),
-      ...(this.settings.worklist === undefined ? [TODO_PLAN_TOOL, TODO_UPDATE_TOOL] : []),
+      ...(this.settings.worklist === undefined || this.settings.worklist.passive === true ? [TODO_PLAN_TOOL, TODO_UPDATE_TOOL] : []),
     ]
     const catalog = buildCatalog(options.tools ?? [], { mode: this.settings.toolMode, names, exclude, overrides: this.settings.toolOverrides })
     const history = historyFromMessages(options.messages, catalog, { includeDeveloper: this.settings.includeDeveloper, names, dropTimeContext: this.settings.currentDate === true })
