@@ -551,8 +551,8 @@ function firstSentence(text: string): string {
 
 export function buildCatalog(offered: readonly DshToolSchema[], options: CatalogOptions): WireTool[] {
   const exclude = new Set(options.exclude ?? [])
-  // The line-range edit replaces the literal one wherever it is mounted.
-  if (offered.some(tool => tool.name === 'edit_lines')) exclude.add('edit')
+  // The line-range edit replaces the literal one wherever it is mounted and active.
+  if (offered.some(tool => tool.name === 'edit_lines') && !exclude.has('edit_lines')) exclude.add('edit')
   // Stateful worklist replaces DSH's whole-list `todo_write` when offered and active.
   if (offered.some(tool => tool.name === TODO_PLAN_TOOL) && !exclude.has(TODO_PLAN_TOOL)) exclude.add('todo_write')
   const tools: WireTool[] = []

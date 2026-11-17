@@ -41,6 +41,8 @@ test('bundle: the RWKV preset mounts the stateful worklist plugin and exports ./
 // non-volatile field would look right and silently apply only after a restart.
 test('bundle: the developer panel switches relay and worklist context on live fields', () => {
   const schema = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const editMode = schema.slice(schema.indexOf('editMode: z.union'))
+  assert.ok(editMode.slice(0, 400).includes('.volatile()'), 'editMode must be volatile, or switching edit modes needs a reload')
   const historyMode = schema.slice(schema.indexOf('historyMode: z.union'))
   assert.ok(historyMode.slice(0, 500).includes('.volatile()'), 'historyMode must be volatile, or the switch needs a reload')
   const worklistBudget = schema.slice(schema.indexOf('worklistBudgetTokens: z.natural'))
@@ -48,6 +50,8 @@ test('bundle: the developer panel switches relay and worklist context on live fi
   const worklistKeep = schema.slice(schema.indexOf('worklistKeepRecentPairs: z.natural'))
   assert.ok(worklistKeep.slice(0, 300).includes('.volatile()'), 'worklistKeepRecentPairs must be volatile')
   const panel = readFileSync(new URL('../src/client/DeveloperPanel.tsx', import.meta.url), 'utf8')
+  assert.ok(panel.includes("set('editMode'"), 'the panel writes editMode')
+  assert.ok(panel.includes("editMode: 'tolerant'"), 'the panel defaults editMode to tolerant')
   assert.ok(panel.includes("set('historyMode'"), 'the panel writes historyMode')
   assert.ok(panel.includes("set('relayBudgetTokens'"), 'the panel writes the relay budget')
   assert.ok(panel.includes("set('relayCardMaxTokens'"), 'the panel writes the card output cap')

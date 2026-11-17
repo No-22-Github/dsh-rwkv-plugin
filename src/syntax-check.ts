@@ -6,8 +6,11 @@
 
 import { spawn } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import * as nodeModule from 'node:module'
 import { tmpdir } from 'node:os'
 import { extname, join } from 'node:path'
+
+const stripTsTypes = (nodeModule as { stripTypeScriptTypes?: (code: string, options?: { mode?: string }) => string }).stripTypeScriptTypes
 
 const TIMEOUT_MS = 10_000
 
@@ -65,12 +68,27 @@ async function nodeCheck(text: string, extension: string): Promise<string | unde
   }
 }
 
+function tsOrJsStripCheck(text: string): string | undefined {
+  if (!stripTsTypes) return undefined
+  try {
+    stripTsTypes(text, { mode: 'strip' })
+    return ''
+  } catch (error) {
+    const firstLine = (error instanceof Error ? error.message : String(error)).split('\n')[0]!
+    return `SyntaxError: ${firstLine}`
+  }
+}
+
 /** The first syntax error in `text` as a file named `path`, '' when it parses, undefined when unchecked. */
 export async function syntaxError(text: string, path: string): Promise<string | undefined> {
   const extension = extname(path).toLowerCase()
   switch (extension) {
     case '.py':
       return run('python3', ['-c', PYTHON_CHECK, path], text)
+    case '.ts':
+    case '.mts':
+    case '.cts':
+      return tsOrJsStripCheck(text)
     case '.js':
     case '.mjs':
     case '.cjs':

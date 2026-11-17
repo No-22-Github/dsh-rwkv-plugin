@@ -14,6 +14,8 @@ export interface DeveloperSettings {
   traceDir: string
   outputRepairs: boolean
   guards: boolean
+  /** File editing mode; edits `editMode` in the Host schema. */
+  editMode: 'tolerant' | 'line-edit' | 'literal'
   /** Context management mode; edits `historyMode` in the Host schema. */
   historyMode: 'full' | 'relay' | 'worklist'
   relayBudgetTokens: number
@@ -27,6 +29,7 @@ export const DEVELOPER_DEFAULTS: DeveloperSettings = {
   traceDir: '',
   outputRepairs: true,
   guards: true,
+  editMode: 'tolerant',
   historyMode: 'full',
   relayBudgetTokens: 8000,
   relayCardMaxTokens: 768,
@@ -274,6 +277,7 @@ export function DeveloperCard(props: {
           {settings.recordTraces ? '轨迹随会话保存' : '轨迹只在内存'}
           {settings.outputRepairs ? '' : ' · 修正已关'}
           {settings.guards ? '' : ' · 修复已关'}
+          {settings.editMode === 'line-edit' ? ' · 行号编辑' : settings.editMode === 'literal' ? ' · 原生精确编辑' : ' · 召回容错编辑'}
           {settings.historyMode === 'relay'
             ? ` · 接力上下文（${settings.relayBudgetTokens}）`
             : settings.historyMode === 'worklist'
@@ -282,6 +286,24 @@ export function DeveloperCard(props: {
         </span>
       </summary>
       <div className="rwkv-developer-body">
+        <label className="rwkv-field">
+          <span className="rwkv-label">文件编辑模式</span>
+          <select
+            className="rwkv-input" value={settings.editMode} disabled={off}
+            onChange={event => { void set('editMode', event.target.value) }}
+          >
+            <option value="tolerant">召回容错编辑（tolerant：标准 edit + 自动对齐 + 首尾防滑窗 + 语法守卫）</option>
+            <option value="line-edit">行号区间编辑（line-edit：edit_lines）</option>
+            <option value="literal">原生精确编辑（literal：不做容错修复）</option>
+          </select>
+          <p className="rwkv-hint">
+            {settings.editMode === 'tolerant'
+              ? '使用标准 edit 工具契约（兼容通用训练轨迹），自动消解 RWKV 线性状态的缩进、空行与轻微字符回忆漂移，通过双端首尾锚点防止大块漏抄滑窗，并在落盘前校验 .py/.ts/.js/.sh/.json 语法。'
+              : settings.editMode === 'line-edit'
+                ? '使用按行号替换的 edit_lines（隐藏标准 edit）。适合整段重写，但连续修改同一文件时需模型自行计算行号平移。'
+                : '使用 DSH 原生精确子串匹配 edit，关闭容错与语法守卫，适合作为基线对照。'}
+          </p>
+        </label>
         <label className="rwkv-field">
           <span className="rwkv-label">上下文管理模式</span>
           <select

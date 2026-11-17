@@ -64,6 +64,8 @@ export interface AdapterSettings {
   readonly toolMode: ToolMode
   /** dsh: DSH tool names and DSH's system prompt (filtered); trained: the agent-tool-v3 names and the Go-aligned prompt. */
   readonly toolNames: ToolNames
+  /** tolerant / literal hide `edit_lines` so standard `edit` is offered; line-edit keeps `edit_lines`. */
+  readonly editMode?: 'tolerant' | 'line-edit' | 'literal'
   readonly excludeTools: readonly string[]
   /** Experiment-only catalog text replacements (see ToolOverride); empty in normal use. */
   readonly toolOverrides?: Readonly<Record<string, ToolOverride>>
@@ -198,9 +200,11 @@ export class RwkvAdapter extends LlmAdapter {
       ...this.settings.worklist === undefined ? {} : { worklist: this.settings.worklist },
     }
     const names = this.settings.toolNames
-    const exclude = this.settings.worklist === undefined
-      ? [...this.settings.excludeTools, TODO_PLAN_TOOL, TODO_UPDATE_TOOL]
-      : this.settings.excludeTools
+    const exclude = [
+      ...this.settings.excludeTools,
+      ...(this.settings.editMode !== undefined && this.settings.editMode !== 'line-edit' ? ['edit_lines'] : []),
+      ...(this.settings.worklist === undefined ? [TODO_PLAN_TOOL, TODO_UPDATE_TOOL] : []),
+    ]
     const catalog = buildCatalog(options.tools ?? [], { mode: this.settings.toolMode, names, exclude, overrides: this.settings.toolOverrides })
     const history = historyFromMessages(options.messages, catalog, { includeDeveloper: this.settings.includeDeveloper, names, dropTimeContext: this.settings.currentDate === true })
     const systemHead = names === 'dsh' ? dshSystemSections(options.system ?? systemText(options.messages)) : undefined
