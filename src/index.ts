@@ -10,6 +10,7 @@ import { DEFAULT_HARNESS } from './core/agent.ts'
 import type { ToolMode, ToolNames } from './core/tools.ts'
 import { applyResultBudget } from './result-budget.ts'
 import { handleServerRoute, handleTraceRoute } from './routes.ts'
+import { applyTolerantEdit } from './tolerant-edit.ts'
 import { TraceLocation } from './traces.ts'
 
 export const name = 'rwkv-llm'
@@ -44,6 +45,7 @@ export interface Settings {
   loopGuard: boolean
   outputRepairs: boolean
   guards: boolean
+  editMode: 'tolerant' | 'line-edit' | 'literal'
   historyMode: 'full' | 'relay' | 'worklist'
   relayBudgetTokens: number
   relayCardMaxTokens: number
@@ -117,6 +119,8 @@ export const Config = z.object({
     .description('Fix near-miss output: parser repairs, tool name / argument aliases, scalar coercion, DSH value repairs, path repair. Off: exact protocol form only, arguments reach DSH as written.').volatile(),
   guards: z.boolean().default(DEFAULT_HARNESS.guards)
     .description('Harness interventions: format re-asks, duplicate / failure gates, over-budget think close, answer-stage re-asks and fallbacks. Off: the model\'s output stands.').volatile(),
+  editMode: z.union(['tolerant', 'line-edit', 'literal']).default('line-edit')
+    .description('line-edit: coordinate-based `edit_lines` (default). tolerant: standard `edit` with recall-tolerant matching, auto-reindent, dual-anchor sliding-window guard, and pre-write syntax check. literal: stock exact `edit`.').volatile(),
   historyMode: z.union(['full', 'relay', 'worklist']).default('full')
     .description('full: the model reads the whole conversation. relay: finished legs are replaced by model-written handoff cards. worklist: `todo_plan` + `todo_update` carry step order and notes while folding intermediate tool outputs.').volatile(),
   relayBudgetTokens: z.natural().default(8000)
@@ -156,6 +160,7 @@ function settingsOf(config: Config): AdapterSettings {
     },
     toolMode: config.toolMode.get(),
     toolNames: config.toolNames.get(),
+    editMode: config.editMode.get(),
     excludeTools: config.excludeTools.get(),
     ...Object.keys(config.toolOverrides.get()).length ? { toolOverrides: config.toolOverrides.get() } : {},
     includeDeveloper: config.includeDeveloper.get(),
@@ -184,6 +189,13 @@ export function apply(ctx: Context, config: Config): void {
   ctx.llm.registerAdapter(config.providers, adapter)
   // Long tool results in RWKV sessions: cut once when the tool runs, the rest saved to a file.
   applyResultBudget(ctx, { providers: () => config.providers, log: message => console.log(`[rwkv-llm] ${message}`) })
+  // Recall-tolerant matching, dual-anchor sliding guard, and pre-write syntax check on standard `edit`.
+  applyTolerantEdit(ctx, {
+    providers: () => config.providers,
+    enabled: () => config.editMode.get() === 'tolerant',
+    outputRepairs: () => config.outputRepairs.get(),
+    syntaxGuard: () => config.guards.get(),
+  })
   // Server model list and state list / upload / delete for the settings page, behind the /api
   // bridge's authentication (client-connection runs this waterfall only for
   // admitted requests). Absent in compositions without a Web connection.
