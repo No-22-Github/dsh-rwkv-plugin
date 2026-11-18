@@ -353,7 +353,7 @@ function formatFoldedStepsNote(pairs: readonly CallPair[], history: readonly His
       history[pair.resultIndex] as Extract<HistoryItem, { kind: 'result' }>,
     ),
   )
-  return `[Earlier workspace steps in this turn (raw outputs folded):\n${lines.join('\n')}]`
+  return `[Earlier workspace steps in this turn (raw outputs folded; re-read a file before calling edit if its read output is no longer shown):\n${lines.join('\n')}]`
 }
 
 function compactPriorResult(item: Extract<HistoryItem, { kind: 'result' }>): HistoryItem {
@@ -439,6 +439,8 @@ export interface FoldWorklistInput {
   readonly emitLiveNudge?: boolean
   /** Passive auto-fold mode: watermark-gated cross-turn & in-turn folding with zero nudges or todo checkpoints. */
   readonly passive?: boolean
+  /** Session working directory for normalizing relative vs absolute paths in `foldedUnread`. */
+  readonly cwd?: string
 }
 
 export interface WorklistFoldResult {
@@ -454,6 +456,73 @@ export interface WorklistFoldResult {
   readonly nudges?: readonly RecordedWorklistNudge[]
   /** Original history index of the active checkpoint `todo_update` call, if one folded the current turn. */
   readonly checkpointAt?: number
+  /** Normalized file paths whose earlier read/write output was folded out without a subsequent verbatim read/write in `items`. */
+  readonly foldedUnread: readonly string[]
+}
+
+const READ_WRITE_TOOLS: ReadonlySet<string> = new Set(['read', 'read_file', 'write', 'write_file'])
+const PRIOR_TURN_FOLDED_MARKER = '...(prior-turn output folded)...'
+
+function normalizePosixPath(raw: string): string {
+  const isAbs = raw.startsWith('/')
+  const parts: string[] = []
+  for (const part of raw.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') {
+      if (parts.length > 0 && parts[parts.length - 1] !== '..') parts.pop()
+      else if (!isAbs) parts.push('..')
+      continue
+    }
+    parts.push(part)
+  }
+  if (isAbs) return `/${parts.join('/')}`
+  return parts.length > 0 ? parts.join('/') : '.'
+}
+
+function canonicalToolTarget(raw: unknown, cwd?: string): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const trimmed = raw.trim()
+  if (trimmed === '') return undefined
+  if (trimmed.startsWith('/')) return normalizePosixPath(trimmed)
+  if (cwd !== undefined && cwd.trim() !== '') {
+    const base = cwd.trim().replace(/\/+$/, '') || '/'
+    return normalizePosixPath(`${base}/${trimmed}`)
+  }
+  return normalizePosixPath(trimmed)
+}
+
+/**
+ * Files whose earlier successful `read` or `write` output was folded out of
+ * `foldedItems` without a subsequent verbatim `read` or `write` remaining in
+ * the active window.
+ */
+export function foldedUnreadPaths(
+  history: readonly HistoryItem[],
+  foldedItems: readonly HistoryItem[],
+  cwd?: string,
+): string[] {
+  const everObserved = new Set<string>()
+  for (const pair of collectPairs(history, 0, history.length)) {
+    if (!pair.ok || !READ_WRITE_TOOLS.has(pair.name)) continue
+    const callItem = history[pair.callIndex] as Extract<HistoryItem, { kind: 'call' }>
+    const target = canonicalToolTarget(callItem.args.file_path ?? callItem.args.path, cwd)
+    if (target !== undefined) everObserved.add(target)
+  }
+  if (everObserved.size === 0) return []
+
+  const visibleInWindow = new Set<string>()
+  for (const pair of collectPairs(foldedItems, 0, foldedItems.length)) {
+    if (!pair.ok || !READ_WRITE_TOOLS.has(pair.name)) continue
+    const callItem = foldedItems[pair.callIndex] as Extract<HistoryItem, { kind: 'call' }>
+    const resultItem = foldedItems[pair.resultIndex] as Extract<HistoryItem, { kind: 'result' }>
+    if ((pair.name === 'read' || pair.name === 'read_file') && resultItem.text.includes(PRIOR_TURN_FOLDED_MARKER)) {
+      continue
+    }
+    const target = canonicalToolTarget(callItem.args.file_path ?? callItem.args.path, cwd)
+    if (target !== undefined) visibleInWindow.add(target)
+  }
+
+  return [...everObserved].filter(path => !visibleInWindow.has(path))
 }
 
 interface InternalNudge extends RecordedWorklistNudge {
@@ -693,7 +762,7 @@ function buildActiveWindow(
 export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklistInput): WorklistFoldResult {
   const emptyThink = input.historyEmptyThink ?? false
   if (history.length === 0) {
-    return { items: [], duplicateFrom: 0, promptTokens: input.systemTokens }
+    return { items: [], duplicateFrom: 0, promptTokens: input.systemTokens, foldedUnread: [] }
   }
 
   // Partition into user turns; any leading runtime notes attach to turn 0.
@@ -703,7 +772,7 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
   }
   if (userStarts.length === 0) {
     const tok = input.systemTokens + itemsTokens(history, emptyThink)
-    return { items: [...history], duplicateFrom: 0, promptTokens: tok }
+    return { items: [...history], duplicateFrom: 0, promptTokens: tok, foldedUnread: [] }
   }
 
   const passive = input.passive === true
@@ -858,14 +927,16 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
 
   const finalWin = buildActiveWindow(history, turnStart, history.length, pairs, triggeredNudges, activeCheckpoints, windowOpts)
   const recorded: RecordedWorklistNudge[] = triggeredNudges.map(({ afterResultIndex, kind }) => ({ afterResultIndex, kind }))
+  const items = [...priorItems, ...finalWin.items]
 
   return {
-    items: [...priorItems, ...finalWin.items],
+    items,
     duplicateFrom: finalWin.duplicateFrom,
     promptTokens: finalWin.totalTokens,
     ...(finalWin.liveNudge !== undefined ? { nudge: finalWin.liveNudge } : {}),
     ...(recorded.length > 0 ? { nudges: recorded } : {}),
     ...(finalWin.checkpointAt !== undefined ? { checkpointAt: finalWin.checkpointAt } : {}),
+    foldedUnread: foldedUnreadPaths(history, items, input.cwd),
   }
 }
 
@@ -881,6 +952,7 @@ export interface WorklistEntryOptions extends TranscriptOptions {
   readonly recordedNudges?: readonly RecordedWorklistNudge[]
   readonly forceNudge?: boolean
   readonly passive?: boolean
+  readonly cwd?: string
 }
 
 /** Build RWKV prompt entries (after System:) + TurnState gate boundary for `worklist` / `auto-fold` mode. */
@@ -902,6 +974,7 @@ export function worklistEntries(
     ...options.recordedNudges === undefined ? {} : { recordedNudges: options.recordedNudges },
     ...options.forceNudge === undefined ? {} : { forceNudge: options.forceNudge },
     ...options.passive === undefined ? {} : { passive: options.passive },
+    ...options.cwd === undefined ? {} : { cwd: options.cwd },
     emitLiveNudge: options.reminders !== false,
   })
   const entries = transcriptEntries(fold.items, options)

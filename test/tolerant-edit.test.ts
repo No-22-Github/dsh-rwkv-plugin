@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import { buildCatalog, type DshToolSchema } from '../src/core/tools.ts'
 import { findRegion, reindent, resolveTolerantEdit } from '../src/core/tolerant-edit.ts'
 import { introducedSyntaxError } from '../src/syntax-check.ts'
+import { setFoldedUnreadPaths } from '../src/folded-read-guard.ts'
 import { applyTolerantEdit } from '../src/tolerant-edit.ts'
 
 test('tolerant-edit: catalog restores standard edit when edit_lines is excluded', () => {
@@ -211,4 +212,62 @@ test('tolerant-edit: strips copied read line-number prefixes and refuses silent 
   if (noop.kind === 'refused') {
     assert.match(noop.message, /already contains the modified text instead of the current file text/)
   }
+})
+
+test('tolerant-edit hook: blocks blind edits to folded-unread files until re-read', async () => {
+  let listener: ((exec: any, next: () => Promise<any>) => Promise<any>) | undefined
+  let nextCalls = 0
+  const mockFs = {
+    resolve: async (p: string) => ({ displayPath: p }),
+    readText: async () => 'const x = 1\n',
+    editText: async () => ({ version: 'v2', before: 'const x = 1\n', after: 'const x = 2\n' }),
+    processPath: (t: { displayPath: string }) => `/ws/${t.displayPath}`,
+  }
+  applyTolerantEdit({
+    on: (_ev: string, fn: typeof listener) => { listener = fn },
+    emit: () => {},
+    get: (name: string) => {
+      if (name === 'fs') return mockFs
+      if (name === 'workingDirectory') return { ensure: async () => '/ws' }
+      return undefined
+    },
+  }, {
+    providers: () => ['rwkv'],
+    enabled: () => true,
+    outputRepairs: () => true,
+    syntaxGuard: () => true,
+    foldedReadGuard: () => true,
+  })
+
+  const makeExec = (extra?: Record<string, unknown>) => ({
+    name: 'edit',
+    arguments: { file_path: 'a.ts', old_string: 'const x = 1', new_string: 'const x = 2', ...extra },
+    agent: { session: { header: { id: 'sess-fold-1' } }, options: { provider: 'rwkv' } },
+  })
+
+  setFoldedUnreadPaths('sess-fold-1', ['/ws/a.ts'])
+  const blocked = await listener!(makeExec(), async () => {
+    nextCalls++
+    return { content: [{ type: 'text', text: 'delegated' }], isError: false }
+  })
+  assert.equal(blocked.isError, true)
+  assert.equal(nextCalls, 0)
+  assert.match(blocked.content[0].text, /folded out of the active context window/)
+
+  // Also blocks replace_all edits on folded-unread files.
+  const blockedAll = await listener!(makeExec({ replace_all: true }), async () => {
+    nextCalls++
+    return { content: [{ type: 'text', text: 'delegated' }], isError: false }
+  })
+  assert.equal(blockedAll.isError, true)
+  assert.equal(nextCalls, 0)
+
+  // Clearing folded-unread (e.g., after re-read) allows the edit to proceed.
+  setFoldedUnreadPaths('sess-fold-1', [])
+  const allowed = await listener!(makeExec(), async () => {
+    nextCalls++
+    return { content: [{ type: 'text', text: 'delegated' }], isError: false }
+  })
+  assert.equal(allowed.isError, false)
+  assert.equal(nextCalls, 1)
 })

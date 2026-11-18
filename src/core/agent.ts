@@ -190,6 +190,7 @@ export interface StepInput {
   readonly generator: Generator
   readonly signal?: AbortSignal
   readonly sessionId?: string
+  readonly cwd?: string
   readonly hooks?: StepHooks
   /** Head of the system block in place of the trained opener (DSH's filtered system prompt). */
   readonly systemHead?: string
@@ -205,6 +206,7 @@ export interface StepResult {
   readonly promptTokens: number
   readonly completionTokens: number
   readonly generations: number
+  readonly foldedUnread?: readonly string[]
 }
 
 /** Streams the reasoning of a withheld "<think" generation: drops the closing ">", stops at </think>. */
@@ -369,7 +371,14 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
   }
   const parseOptions = { strict: !config.outputRepairs }
 
-  const done = (decision: Decision): StepResult => ({ decision, promptTokens, completionTokens, generations })
+  let foldedUnread: readonly string[] | undefined
+  const done = (decision: Decision): StepResult => ({
+    decision,
+    promptTokens,
+    completionTokens,
+    generations,
+    ...(foldedUnread !== undefined ? { foldedUnread } : {}),
+  })
 
   /**
    * Ask the model for a handoff card. A recap that fails or writes protocol
@@ -420,8 +429,10 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       postToolReminder: reminder,
       systemTokens: countTokens(system),
       historyEmptyThink: config.historyEmptyThink,
+      ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
       ...config.worklist,
     })
+    foldedUnread = fold.foldedUnread
     liveWorklistNudge = fold.nudge
     worklistTrace = {
       promptTokens: fold.promptTokens,

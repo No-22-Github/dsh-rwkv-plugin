@@ -500,7 +500,28 @@ test('auto-fold (passive: true): hides todo tools/guidance/nudges, keeps short m
     keepRecentPairs: 2,
     historyEmptyThink: true,
     passive: true,
+    cwd: '/app',
   })
   assert.equal(passiveFold.nudge, undefined)
   assert.equal(passiveFold.duplicateFrom, 3, 'duplicateFrom advances past folded step 1')
+  assert.deepEqual(passiveFold.foldedUnread, ['/app/a.ts'], 'folded read step marks a.ts unread until re-read')
+  assert.ok(prompt.includes('re-read a file before calling edit'), 'ledger header reminds to re-read folded files')
+
+  // Re-reading a.ts brings it back into the active window and clears foldedUnread.
+  const rereadHistory: HistoryItem[] = [
+    ...inTurnLong,
+    { kind: 'call', id: 's4', name: 'read', args: { file_path: 'a.ts' } },
+    { kind: 'result', id: 's4', name: 'read', ok: true, text: '1: re-read\n' },
+  ]
+  const afterReread = foldWorklist(rereadHistory, {
+    systemTokens: 800,
+    minFoldTokens: 800,
+    budgetTokens: 1600,
+    hardCapTokens: 5000,
+    keepRecentPairs: 2,
+    historyEmptyThink: true,
+    passive: true,
+    cwd: '/app',
+  })
+  assert.ok(!afterReread.foldedUnread.includes('/app/a.ts'), 'relative re-read clears foldedUnread for /app/a.ts')
 })

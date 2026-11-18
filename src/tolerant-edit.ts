@@ -9,8 +9,10 @@
 // syntax-checked in memory before touching disk, and written atomically with
 // the session's `fs/edit-intent` guard and `sandboxPolicy`.
 
+import { resolve } from 'node:path'
 import { sandboxPolicyFor } from './core/line-edit.ts'
 import { resolveTolerantEdit } from './core/tolerant-edit.ts'
+import { isFoldedUnreadPath } from './folded-read-guard.ts'
 import { introducedSyntaxError } from './syntax-check.ts'
 
 interface FsTargetLike { readonly displayPath: string }
@@ -56,6 +58,7 @@ export interface TolerantEditOptions {
   readonly enabled: () => boolean
   readonly outputRepairs: () => boolean
   readonly syntaxGuard: () => boolean
+  readonly foldedReadGuard?: () => boolean
 }
 
 function providerOf(exec: ExecLike): string | undefined {
@@ -100,15 +103,7 @@ export function applyTolerantEdit(ctx: unknown, options: TolerantEditOptions): v
       new_string?: unknown
       replace_all?: unknown
     }
-    if (
-      typeof args.file_path !== 'string' || args.file_path.trim() === '' ||
-      typeof args.old_string !== 'string' || args.old_string === '' ||
-      typeof args.new_string !== 'string' ||
-      args.old_string === args.new_string ||
-      args.replace_all === true
-    ) {
-      return next()
-    }
+    if (typeof args.file_path !== 'string' || args.file_path.trim() === '') return next()
 
     const workingDirectory = host.get('workingDirectory') as { ensure(agent: unknown, signal?: AbortSignal): Promise<string> } | undefined
     const cwd = exec.agent === undefined || workingDirectory === undefined
@@ -120,6 +115,24 @@ export function applyTolerantEdit(ctx: unknown, options: TolerantEditOptions): v
     let before: string
     try {
       target = await fs.resolve(args.file_path, resolveOpts)
+      if ((options.foldedReadGuard?.() ?? true) && isFoldedUnreadPath(exec.agent?.session?.header?.id, [
+        fs.processPath(target),
+        target.displayPath,
+        ...(cwd !== undefined ? [resolve(cwd, args.file_path.trim())] : []),
+      ])) {
+        return errorResult(
+          `The earlier read output for ${target.displayPath} was folded out of the active context window. `
+          + `Call \`read\` on ${target.displayPath} again to inspect its current content before calling \`edit\`.`,
+        )
+      }
+      if (
+        typeof args.old_string !== 'string' || args.old_string === '' ||
+        typeof args.new_string !== 'string' ||
+        args.old_string === args.new_string ||
+        args.replace_all === true
+      ) {
+        return next()
+      }
       before = await fs.readText(target, exec.signal)
     } catch {
       // Missing file or unreadable path: let DSH's own edit handler report its canonical error.

@@ -21,11 +21,26 @@ export function runtimeCwd(history: readonly HistoryItem[]): string | undefined 
   return undefined
 }
 
+const GHOST_WORKSPACE_ROOTS = [
+  '/home/user/project',
+  '/home/user',
+  '/workspace',
+  '/home/agent',
+  '/app',
+] as const
+
 function repairPath(path: string, cwd: string): string {
   if (!isAbsolute(path) || existsSync(path)) return path
   const parent = dirname(cwd)
   const candidates: string[] = []
   if (path.startsWith(`${parent}/`) && !path.startsWith(`${cwd}/`)) candidates.push(join(cwd, path.slice(parent.length + 1)))
+  for (const root of GHOST_WORKSPACE_ROOTS) {
+    if (path === root) {
+      candidates.push(cwd)
+    } else if (path.startsWith(`${root}/`) && cwd !== root && !cwd.startsWith(`${root}/`)) {
+      candidates.push(join(cwd, path.slice(root.length + 1)))
+    }
+  }
   candidates.push(join(cwd, basename(path)))
   return candidates.find(candidate => existsSync(candidate)) ?? path
 }

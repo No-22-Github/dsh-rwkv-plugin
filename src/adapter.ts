@@ -25,6 +25,7 @@ import { historyFromMessages, systemText } from './history.ts'
 import { RelayCardStore } from './relay-store.ts'
 import { argumentChanges, clipArguments, memoryTraces, TraceLocation, type ArgumentChange } from './traces.ts'
 import { repairToolPaths, runtimeCwd } from './paths.ts'
+import { setFoldedUnreadPaths } from './folded-read-guard.ts'
 
 /** Pending appends per trace file, so records keep their order. */
 const traceWrites = new Map<string, Promise<void>>()
@@ -228,6 +229,7 @@ export class RwkvAdapter extends LlmAdapter {
       push({ type: 'reasoning-delta', index: 0, text })
     }
     const sessionId = options.sessionId === undefined ? undefined : String(options.sessionId)
+    const cwd = runtimeCwd(history)
     const location = this.settings.traces
     const writeLine = (fields: Record<string, unknown>) => {
       const record = { at: new Date().toISOString(), model: config.id, purpose: options.purpose, ...fields }
@@ -265,6 +267,7 @@ export class RwkvAdapter extends LlmAdapter {
         ...systemHead ? { systemHead } : {},
         ...options.signal ? { signal: options.signal } : {},
         ...sessionId ? { sessionId } : {},
+        ...cwd !== undefined ? { cwd } : {},
         ...this.settings.relay === undefined || sessionId === undefined ? {} : {
           relay: {
             cards: this.relayCards.load(relayLocation, sessionId),
@@ -308,6 +311,7 @@ export class RwkvAdapter extends LlmAdapter {
       }
       throw llmError(error)
     }
+    setFoldedUnreadPaths(sessionId, step.foldedUnread ?? [])
     let index = 0
     if (reasoningOpen) {
       yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: reasoning } }
@@ -323,7 +327,7 @@ export class RwkvAdapter extends LlmAdapter {
     } else {
       const id = brandString<ToolCallId>(`call_${randomUUID().replace(/-/g, '').slice(0, 24)}`)
       const dshArgs = decision.tool.toDsh(decision.args)
-      const pathed = harness.outputRepairs ? repairToolPaths(decision.tool.dshName, dshArgs, runtimeCwd(history)) : dshArgs
+      const pathed = harness.outputRepairs ? repairToolPaths(decision.tool.dshName, dshArgs, cwd) : dshArgs
       if (pathed !== dshArgs) repairs.push('path_repaired')
       const argumentsText = JSON.stringify(pathed)
       handed = {

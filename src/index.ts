@@ -197,6 +197,7 @@ export function apply(ctx: Context, config: Config): void {
     enabled: () => config.editMode.get() === 'tolerant',
     outputRepairs: () => config.outputRepairs.get(),
     syntaxGuard: () => config.guards.get(),
+    foldedReadGuard: () => config.guards.get(),
   })
   // Server model list and state list / upload / delete for the settings page, behind the /api
   // bridge's authentication (client-connection runs this waterfall only for

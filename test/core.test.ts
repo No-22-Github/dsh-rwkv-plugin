@@ -310,6 +310,12 @@ test('file paths missing the last workspace component are repaired only when the
   // An existing directory (the parent) is a real path: left alone.
   const parent = { pattern: '*', path: join(root, 'task') }
   assert.equal(repairToolPaths('glob', parent, cwd), parent)
+  // Ghost workspace prefixes (/home/user/project, /workspace, /home/agent, /app) repair nested relative paths too.
+  mkdirSync(join(cwd, 'nested'), { recursive: true })
+  writeFileSync(join(cwd, 'nested', 'mod.py'), 'y = 2\n')
+  assert.deepEqual(repairToolPaths('read', { file_path: '/home/user/project/nested/mod.py' }, cwd), { file_path: join(cwd, 'nested', 'mod.py') })
+  assert.deepEqual(repairToolPaths('edit', { file_path: '/workspace/nested/mod.py', old_string: 'y' }, cwd), { file_path: join(cwd, 'nested', 'mod.py'), old_string: 'y' })
+  assert.deepEqual(repairToolPaths('grep', { pattern: 'y', path: '/home/agent' }, cwd), { pattern: 'y', path: cwd })
   // Correct, relative, new-file and non-file-tool arguments pass through unchanged.
   const ok = { file_path: join(cwd, 'a.py') }
   assert.equal(repairToolPaths('read', ok, cwd), ok)
@@ -342,6 +348,7 @@ test('Standard system prompt keeps its 11 sections for the RWKV Agent tools and 
   assert.equal(dshSystemSections('Start independent delegations with `rwkv_agent` together in one assistant message.'), '')
   const prompt = systemPrompt(dshTools, 'full', undefined, kept.join('\n\n'))
   assert.ok(prompt.startsWith('You are an AI agent powered by DeepSeek Harness.\n\nYou are a coding agent'))
+  assert.ok(prompt.includes('Prefer relative paths'))
   assert.ok(prompt.includes('Choose one action:') && prompt.includes('<tools>[\n{"name":"bash"'))
   assert.ok(!prompt.includes('read_file') && !prompt.includes('local-first'))
 })
