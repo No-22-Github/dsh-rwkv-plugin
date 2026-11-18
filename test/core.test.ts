@@ -348,7 +348,6 @@ test('Standard system prompt keeps its 11 sections for the RWKV Agent tools and 
   assert.equal(dshSystemSections('Start independent delegations with `rwkv_agent` together in one assistant message.'), '')
   const prompt = systemPrompt(dshTools, 'full', undefined, kept.join('\n\n'))
   assert.ok(prompt.startsWith('You are an AI agent powered by DeepSeek Harness.\n\nYou are a coding agent'))
-  assert.ok(prompt.includes('Prefer relative paths'))
   assert.ok(prompt.includes('Choose one action:') && prompt.includes('<tools>[\n{"name":"bash"'))
   assert.ok(!prompt.includes('read_file') && !prompt.includes('local-first'))
 })
