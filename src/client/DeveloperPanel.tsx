@@ -3,6 +3,7 @@
 // with its frames, and the export of whole tasks.
 
 import { useEffect, useState, type ReactNode } from 'react'
+import { Segment } from './Segment.tsx'
 import { TraceFrames } from './TraceFrames.tsx'
 import {
   deleteSession, downloadExport, fetchSession, fetchSessions, OUTCOME_LABEL, percent, REPAIR_LABEL,
@@ -153,6 +154,7 @@ function Traces(props: { recording: boolean }) {
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
   const [busy, setBusy] = useState(false)
   const [reload, setReload] = useState(0)
+  const [listOpen, setListOpen] = useState(false)
   useEffect(() => {
     const abort = new AbortController()
     setError('')
@@ -190,24 +192,37 @@ function Traces(props: { recording: boolean }) {
       </div>
       <div className="rwkv-block">
         <div className="rwkv-block-head">
-          <span className="rwkv-block-title" title={data.dir}>已记录的会话 · {data.sessions.length} 个</span>
+          <span
+            className="rwkv-block-title rwkv-session-toggle" title={data.dir}
+            onClick={() => { if (data.sessions.length > 0) setListOpen(value => !value) }}
+          >已记录的会话 · {data.sessions.length} 个</span>
           <span className="rwkv-actions">
-            <button type="button" className="rwkv-btn rwkv-secondary rwkv-small" disabled={busy || selected.size === 0} onClick={() => { void exportSessions([...selected]) }}>导出所选（{selected.size}）</button>
+            {listOpen || selected.size > 0 ? (
+              <button type="button" className="rwkv-btn rwkv-secondary rwkv-small" disabled={busy || selected.size === 0} onClick={() => { void exportSessions([...selected]) }}>导出所选（{selected.size}）</button>
+            ) : null}
             <button type="button" className="rwkv-btn rwkv-secondary rwkv-small" disabled={busy || data.sessions.length === 0} onClick={() => { void exportSessions([]) }}>导出全部</button>
+            {data.sessions.length > 0 ? (
+              <button
+                type="button" className="rwkv-btn rwkv-secondary rwkv-small" aria-expanded={listOpen}
+                onClick={() => setListOpen(value => !value)}
+              >{listOpen ? '收起' : '展开'}</button>
+            ) : null}
           </span>
         </div>
-        <p className="rwkv-hint">保存在 {data.dir}。删除不影响 DSH 的会话记录。</p>
         {error ? <p className="rwkv-error">{error}</p> : null}
-        {data.sessions.length === 0 ? <p className="rwkv-hint">还没有轨迹。</p> : (
-          <ul className="rwkv-sessions">
-            {data.sessions.map(item => (
-              <SessionRow
-                key={item.session} item={item} selected={selected.has(item.session)} onSelect={value => select(item.session, value)}
-                onDeleted={() => { select(item.session, false); setReload(value => value + 1) }}
-              />
-            ))}
-          </ul>
-        )}
+        {data.sessions.length === 0 ? <p className="rwkv-hint">还没有轨迹。</p> : listOpen ? (
+          <>
+            <p className="rwkv-hint">保存在 {data.dir}（删除仅删轨迹，不影响 DSH 会话）。</p>
+            <ul className="rwkv-sessions">
+              {data.sessions.map(item => (
+                <SessionRow
+                  key={item.session} item={item} selected={selected.has(item.session)} onSelect={value => select(item.session, value)}
+                  onDeleted={() => { select(item.session, false); setReload(value => value + 1) }}
+                />
+              ))}
+            </ul>
+          </>
+        ) : null}
       </div>
     </>
   )
@@ -254,12 +269,25 @@ function NumberField(props: { value: number; onSave: (value: number) => void; di
   )
 }
 
+const EDIT_MODE_HINT: Record<DeveloperSettings['editMode'], string> = {
+  tolerant: '自动对齐缩进空行并做语法检查。',
+  'line-edit': '按行号区间替换，隐藏标准 edit。',
+  literal: '原样精确匹配，不做容错与检查。',
+}
+
+const HISTORY_MODE_HINT: Record<DeveloperSettings['historyMode'], string> = {
+  'auto-fold': '超水位自动压缩早期步骤输出，不挂 todo 工具。',
+  full: '保留全部历史原文，不做压缩。',
+  worklist: '启用 todo 工具由模型记工单，超限后折叠旧步骤。',
+}
+
 export function DeveloperCard(props: {
   settings: DeveloperSettings
   disabled: boolean
   write: (field: string, value: unknown) => Promise<boolean>
 }): ReactNode {
   const { settings, disabled, write } = props
+  const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const set = async (field: keyof DeveloperSettings, value: unknown) => {
     setBusy(true)
@@ -269,113 +297,94 @@ export function DeveloperCard(props: {
   const off = disabled || busy
   const historyMode = settings.historyMode === 'worklist' ? 'worklist' : settings.historyMode === 'full' ? 'full' : 'auto-fold'
   return (
-    <details className="rwkv-card rwkv-developer">
-      <summary className="rwkv-head rwkv-developer-summary">
-        <span className="rwkv-identity"><span className="rwkv-name">开发者</span></span>
+    <div className="rwkv-card">
+      <button
+        type="button" className="rwkv-head rwkv-developer-head" aria-expanded={open}
+        onClick={() => setOpen(value => !value)}
+      >
+        <span className="rwkv-identity">
+          <span className="rwkv-chevron" aria-hidden="true" />
+          <span className="rwkv-name">开发者</span>
+        </span>
         <span className="rwkv-meta">
           {settings.recordTraces ? '轨迹随会话保存' : '轨迹只在内存'}
           {settings.outputRepairs ? '' : ' · 修正已关'}
           {settings.guards ? '' : ' · 修复已关'}
-          {settings.editMode === 'tolerant' ? ' · 召回容错编辑' : settings.editMode === 'literal' ? ' · 原生精确编辑' : ' · 行号编辑'}
+          {settings.editMode === 'tolerant' ? ' · 容错 edit' : settings.editMode === 'literal' ? ' · 精确 edit' : ' · 行号 edit_lines'}
           {historyMode === 'auto-fold'
             ? ` · 自动折叠（${settings.worklistMinFoldTokens} / ${settings.worklistBudgetTokens}）`
             : historyMode === 'worklist'
-              ? ` · 状态化工单（${settings.worklistMinFoldTokens} / ${settings.worklistBudgetTokens}）`
-              : ''}
+              ? ` · 工单模式（${settings.worklistMinFoldTokens} / ${settings.worklistBudgetTokens}）`
+              : ' · 完整对话'}
         </span>
-      </summary>
-      <div className="rwkv-developer-body">
-        <label className="rwkv-field">
-          <span className="rwkv-label">文件编辑模式</span>
-          <select
-            className="rwkv-input" value={settings.editMode} disabled={off}
-            onChange={event => { void set('editMode', event.target.value) }}
-          >
-            <option value="tolerant">召回容错编辑（tolerant：标准 edit + 自动对齐 + 首尾防滑窗 + 语法守卫）</option>
-            <option value="line-edit">行号区间编辑（line-edit：edit_lines）</option>
-            <option value="literal">原生精确编辑（literal：不做容错修复）</option>
-          </select>
-          <p className="rwkv-hint">
-            {settings.editMode === 'tolerant'
-              ? '使用标准 edit 工具契约（兼容通用训练轨迹），自动消解 RWKV 线性状态的缩进、空行与轻微字符回忆漂移，通过双端首尾锚点防止大块漏抄滑窗，并在落盘前校验 .py/.ts/.js/.sh/.json 语法。'
-              : settings.editMode === 'line-edit'
-                ? '使用按行号替换的 edit_lines（隐藏标准 edit）。适合整段重写，但连续修改同一文件时需模型自行计算行号平移。'
-                : '使用 DSH 原生精确子串匹配 edit，关闭容错与语法守卫，适合作为基线对照。'}
-          </p>
-        </label>
-        <label className="rwkv-field">
-          <span className="rwkv-label">上下文管理模式</span>
-          <select
-            className="rwkv-input" value={historyMode} disabled={off}
-            onChange={event => { void set('historyMode', event.target.value) }}
-          >
-            <option value="auto-fold">自动折叠（默认） / Auto-Fold</option>
-            <option value="full">完整对话 / Full</option>
-            <option value="worklist">状态化工单（实验性） / WorkList (Experimental)</option>
-          </select>
-          <p className="rwkv-hint">
-            {historyMode === 'auto-fold'
-              ? '推荐：低于折叠水位（默认 8k）保持完整对话零损耗；跨多轮或单轮超预算（默认 12k）时由插件自动将较早步骤的工具输出收成单行记录，只保留最近几步原文，不挂载 todo 工具。'
-              : historyMode === 'worklist'
-                ? '已开启状态化工单：模型通过 todo_plan 与 todo_update 维护子目标和阶段性 note；写入 note 后温和折叠早期输出（保留初始计划与最近几步工具结果），未建表时自动走兜底台账压缩，并同步渲染到桌面右侧 Todo 面板。'
-                : '读取完整对话，不做折叠与压缩，不挂载状态化工单工具。'}
-          </p>
-        </label>
-        {historyMode === 'auto-fold' || historyMode === 'worklist' ? (
-          <div className="rwkv-grid">
-            <label className="rwkv-field">
-              <span className="rwkv-label">折叠最低水位（RWKV token）</span>
-              <NumberField
-                value={settings.worklistMinFoldTokens} min={0} disabled={off} placeholder="8000"
-                onSave={value => { void set('worklistMinFoldTokens', value) }}
-              />
-              <p className="rwkv-hint">
-                {historyMode === 'auto-fold'
-                  ? '总上下文低于该水位时，跨多轮对话也完整保留原文不折叠；达到后从最早的旧轮次开始折叠。'
-                  : '提示词低于该水位时，todo_update 只记录 note 不触发折叠裁剪；达到后才开始温和折叠早期步骤。'}
-              </p>
-            </label>
-            <label className="rwkv-field">
-              <span className="rwkv-label">单轮折叠上限（RWKV token）</span>
-              <NumberField
-                value={settings.worklistBudgetTokens} disabled={off} placeholder="12000"
-                onSave={value => { void set('worklistBudgetTokens', value) }}
-              />
-              <p className="rwkv-hint">
-                {historyMode === 'auto-fold'
-                  ? '当前轮超过该水位时，自动将最旧步骤的原始输出折叠成单行操作记录（保留最近几步原文）。'
-                  : '提示词超过该水位时，在工具结果后追加不撤回的预算提醒；超出硬上限（+3000）自动将旧步压成行级台账。'}
-              </p>
-            </label>
-            <label className="rwkv-field">
-              <span className="rwkv-label">保留最近原文步数</span>
-              <NumberField
-                value={settings.worklistKeepRecentPairs} min={0} disabled={off} placeholder="2"
-                onSave={value => { void set('worklistKeepRecentPairs', value) }}
-              />
-              <p className="rwkv-hint">折叠早期输出时，额外原样保留最近几步工作区工具调用与结果原文（默认 2），避免折叠后重读。</p>
-            </label>
+      </button>
+      {open ? (
+        <div className="rwkv-developer-body">
+          <div className="rwkv-field">
+            <span className="rwkv-label">文件编辑模式</span>
+            <Segment
+              value={settings.editMode} disabled={off}
+              options={[['tolerant', '容错 edit（默认）'], ['line-edit', '行号 edit_lines'], ['literal', '精确 edit']] as const}
+              onChange={value => { void set('editMode', value) }}
+            />
+            <p className="rwkv-hint">{EDIT_MODE_HINT[settings.editMode]}</p>
           </div>
-        ) : null}
-        <Toggle
-          label="原始运行轨迹落盘" checked={settings.recordTraces} disabled={off} onChange={value => { void set('recordTraces', value) }}
-          hint="默认保存在 DSH 会话记录文件旁，会跟随原始会话一并删除。关闭后将不再落盘，仅保存在内存，DSH 运行时仍然可看。"
-        />
-        <label className="rwkv-field">
-          <span className="rwkv-label">自定义目录</span>
-          <DirInput value={settings.traceDir} disabled={off} onSave={value => { void set('traceDir', value) }} />
-        </label>
-        <Toggle
-          label="修正模型输出" checked={settings.outputRepairs} disabled={off} onChange={value => { void set('outputRepairs', value) }}
-          hint="自动纠正格式、工具名、参数和路径。关掉后参数原样交给 DSH。"
-        />
-        <Toggle
-          label="插件修复" checked={settings.guards} disabled={off} onChange={value => { void set('guards', value) }}
-          hint="重问、拦截重复调用、强制收尾等。关掉后模型输出什么就用什么。"
-        />
-        <p className="rwkv-hint">关闭以上两项，将忠于模型原始输出，不做任何修复。</p>
-        <Traces recording={settings.recordTraces} />
-      </div>
-    </details>
+          <div className="rwkv-field">
+            <span className="rwkv-label">上下文管理模式</span>
+            <Segment
+              value={historyMode} disabled={off}
+              options={[['auto-fold', '自动折叠（默认）'], ['full', '完整对话'], ['worklist', '工单模式（实验）']] as const}
+              onChange={value => { void set('historyMode', value) }}
+            />
+            <p className="rwkv-hint">{HISTORY_MODE_HINT[historyMode]}</p>
+          </div>
+          {historyMode === 'auto-fold' || historyMode === 'worklist' ? (
+            <div className="rwkv-grid3">
+              <label className="rwkv-field">
+                <span className="rwkv-label">开始折叠 (token)</span>
+                <NumberField
+                  value={settings.worklistMinFoldTokens} min={0} disabled={off} placeholder="8000"
+                  onSave={value => { void set('worklistMinFoldTokens', value) }}
+                />
+                <p className="rwkv-hint">{historyMode === 'auto-fold' ? '低于此值不折叠' : '超此值才允许折叠'}</p>
+              </label>
+              <label className="rwkv-field">
+                <span className="rwkv-label">单轮上限 (token)</span>
+                <NumberField
+                  value={settings.worklistBudgetTokens} disabled={off} placeholder="12000"
+                  onSave={value => { void set('worklistBudgetTokens', value) }}
+                />
+                <p className="rwkv-hint">{historyMode === 'auto-fold' ? '单轮超此值折叠旧步' : '超此值追加预算提醒'}</p>
+              </label>
+              <label className="rwkv-field">
+                <span className="rwkv-label">保留最近步数</span>
+                <NumberField
+                  value={settings.worklistKeepRecentPairs} min={0} disabled={off} placeholder="2"
+                  onSave={value => { void set('worklistKeepRecentPairs', value) }}
+                />
+                <p className="rwkv-hint">折叠时保留最近原文步数</p>
+              </label>
+            </div>
+          ) : null}
+          <Toggle
+            label="原始运行轨迹落盘" checked={settings.recordTraces} disabled={off} onChange={value => { void set('recordTraces', value) }}
+            hint="随会话保存在本地，关闭后仅留内存。"
+          />
+          <label className="rwkv-field">
+            <span className="rwkv-label">自定义目录</span>
+            <DirInput value={settings.traceDir} disabled={off} onSave={value => { void set('traceDir', value) }} />
+          </label>
+          <Toggle
+            label="修正模型输出" checked={settings.outputRepairs} disabled={off} onChange={value => { void set('outputRepairs', value) }}
+            hint="自动修格式、工具名与参数。"
+          />
+          <Toggle
+            label="插件修复" checked={settings.guards} disabled={off} onChange={value => { void set('guards', value) }}
+            hint="格式重问、防重复调用与强制收尾。"
+          />
+          <Traces recording={settings.recordTraces} />
+        </div>
+      ) : null}
+    </div>
   )
 }

@@ -7,6 +7,7 @@ import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react
 import { AdapterPicker } from './AdapterPicker.tsx'
 import { normalizeBaseURL, StatePicker, useServerModels } from './StatePicker.tsx'
 import { DEVELOPER_DEFAULTS, DeveloperCard, type DeveloperSettings } from './DeveloperPanel.tsx'
+import { Segment } from './Segment.tsx'
 
 interface ConfigFormSnapshot {
   status: 'loading' | 'ready' | 'unavailable'
@@ -159,16 +160,6 @@ function SelectInput<T extends string>(props: { value: T | ''; options: readonly
     <select className="rwkv-input rwkv-select" value={props.value} disabled={props.disabled} onChange={event => props.onChange(event.target.value as T | '')}>
       {props.options.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
     </select>
-  )
-}
-
-function Segment<T extends string>(props: { value: T; options: readonly (readonly [T, string])[]; onChange: (value: T) => void; disabled?: boolean }) {
-  return (
-    <div className="rwkv-segment" role="group">
-      {props.options.map(([value, label]) => (
-        <button key={value} type="button" aria-pressed={props.value === value} disabled={props.disabled} onClick={() => props.onChange(value)}>{label}</button>
-      ))}
-    </div>
   )
 }
 
@@ -335,13 +326,15 @@ function ModelEditor(props: {
                 onChange={value => set('thinking', value || undefined)}
               />
             </Field>
-            <Field label="历史步骤不带思考">
-              <SelectInput
-                value={draft.historyEmptyThink === undefined ? '' : draft.historyEmptyThink ? 'on' : 'off'} disabled={disabled}
-                options={[['', '跟随运行参数'], ['on', '开（默认，历史思考留空）'], ['off', '关（保留全量历史思考）']] as const}
-                onChange={value => set('historyEmptyThink', value === '' ? undefined : value === 'on')}
-              />
-            </Field>
+            {draft.thinking !== 'off' ? (
+              <Field label="历史步骤思考">
+                <SelectInput
+                  value={draft.historyEmptyThink === undefined ? '' : draft.historyEmptyThink ? 'on' : 'off'} disabled={disabled}
+                  options={[['', '跟随运行参数'], ['on', '历史空思考（推荐）'], ['off', '完整思考']] as const}
+                  onChange={value => set('historyEmptyThink', value === '' ? undefined : value === 'on')}
+                />
+              </Field>
+            ) : null}
             <Field label="额外请求头（JSON）" wide>
               <HeadersInput value={draft.headers} disabled={disabled} onChange={(value, error) => { setHeadersError(error); if (!error) set('headers', value) }} />
             </Field>
@@ -384,7 +377,7 @@ function ModelCard(props: {
           {model.model}
           {stateId ? ` · state ${stateId}` : ''}
           {adapterId ? ` · adapter ${adapterId}` : ''}
-          {model.historyEmptyThink === true ? ' · 空思考历史' : model.historyEmptyThink === false ? ' · 保留历史思考' : ''}
+          {model.thinking === 'off' ? ' · 思考关' : model.historyEmptyThink === true ? ' · 历史空思考' : model.historyEmptyThink === false ? ' · 完整思考' : ''}
         </span>
         <span className="rwkv-actions">
           {props.editing ? null : confirming ? (
@@ -409,14 +402,19 @@ function ModelCard(props: {
 
 function runSummary(run: RunSettings): string {
   const sampling = same(run.sampling, AGENT_FAST) ? '推荐采样' : `T ${run.sampling.temperature} · top_p ${run.sampling.topP}`
-  const histThink = run.historyEmptyThink ? '历史思考留空' : '保留历史思考'
-  return `思考${run.thinking === 'full' ? '开' : '关'}（${histThink}） · 每轮 ${run.maxSteps} 步 · ${sampling}`
+  const think = run.thinking === 'off' ? '思考关' : run.historyEmptyThink ? '思考开（历史空思考）' : '思考开（完整思考）'
+  return `${think} · 每轮 ${run.maxSteps} 步 · ${sampling}`
 }
+
+type ThinkChoice = 'empty' | 'full' | 'off'
 
 type NumericRunField = 'maxSteps' | 'maxConsecutiveFailures' | 'protocolRetries' | 'decisionMaxTokens' | 'answerMaxTokens'
 
+const isRunDefault = (run: RunSettings) => RUN_FIELDS.every(field => same(run[field], RUN_DEFAULTS[field]))
+
 function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: () => void; onSave: (run: RunSettings) => Promise<boolean> }) {
   const [draft, setDraft] = useState<RunSettings>(props.initial)
+  const [resetKey, setResetKey] = useState(0)
   const [samplingKey, setSamplingKey] = useState(0)
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | undefined>()
@@ -426,39 +424,41 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
     setFailure(undefined)
   }
   const num = (key: NumericRunField) =>
-    <NumberInput value={draft[key]} disabled={disabled} onChange={value => update({ [key]: value ?? RUN_DEFAULTS[key] })} />
+    <NumberInput key={`${key}-${resetKey}`} value={draft[key]} disabled={disabled} onChange={value => update({ [key]: value ?? RUN_DEFAULTS[key] })} />
   const sampling = (key: keyof Sampling) =>
-    <NumberInput key={`${key}-${samplingKey}`} value={draft.sampling[key]} disabled={disabled} onChange={value => update({ sampling: { ...draft.sampling, [key]: value ?? AGENT_FAST[key] } })} />
+    <NumberInput key={`${key}-${resetKey}-${samplingKey}`} value={draft.sampling[key]} disabled={disabled} onChange={value => update({ sampling: { ...draft.sampling, [key]: value ?? AGENT_FAST[key] } })} />
   const save = async () => {
     setBusy(true)
     const ok = await props.onSave(draft)
     setBusy(false)
     if (!ok) setFailure('Host 没有接受这份配置，草稿已保留')
   }
+  const thinkChoice: ThinkChoice = draft.thinking === 'off' ? 'off' : draft.historyEmptyThink ? 'empty' : 'full'
   return (
     <div className="rwkv-editor">
-      <div className="rwkv-grid">
-        <Field label="思考">
-          <Segment
-            value={draft.thinking} disabled={disabled}
-            options={[['full', '开启'], ['off', '关闭']] as const}
-            onChange={value => update({ thinking: value })}
-          />
-        </Field>
-        <Field label="历史步骤思考" hint="默认留空，只保留当前步思考（避免 RWKV 复读和稀释长上下文记忆）">
-          <Segment
-            value={draft.historyEmptyThink ? 'empty' : 'keep'} disabled={disabled}
-            options={[['empty', '留空（推荐）'], ['keep', '保留']] as const}
-            onChange={value => update({ historyEmptyThink: value === 'empty' })}
-          />
-        </Field>
+      <div className="rwkv-field">
+        <div className="rwkv-block-head">
+          <span className="rwkv-label">思考</span>
+          <button
+            type="button" className="rwkv-link" disabled={disabled || isRunDefault(draft)}
+            onClick={() => { update(RUN_DEFAULTS); setResetKey(key => key + 1) }}
+          >恢复默认参数</button>
+        </div>
+        <Segment
+          value={thinkChoice} disabled={disabled}
+          options={[['empty', '开 · 历史空思考'], ['full', '开 · 完整思考'], ['off', '关闭']] as const}
+          onChange={value => update(value === 'off' ? { thinking: 'off' } : { thinking: 'full', historyEmptyThink: value === 'empty' })}
+        />
+        <p className="rwkv-hint">推荐「开 · 历史空思考」：只保留当前步思考，避免长上下文复读。</p>
       </div>
       <div className="rwkv-grid3">
         <Field label="每轮最多工具步数">{num('maxSteps')}</Field>
         <Field label="同一工具连续失败上限">{num('maxConsecutiveFailures')}</Field>
         <Field label="格式错误重问次数">{num('protocolRetries')}</Field>
-        <Field label="决策步 max tokens">{num('decisionMaxTokens')}</Field>
-        <Field label="作答 max tokens">{num('answerMaxTokens')}</Field>
+      </div>
+      <div className="rwkv-grid">
+        <Field label="单步最多输出 (token)" hint="每次思考、调工具或正常回答的上限">{num('decisionMaxTokens')}</Field>
+        <Field label="强行收尾最多输出 (token)" hint="打满步数或被拦截后强制总结的上限">{num('answerMaxTokens')}</Field>
       </div>
       <div className="rwkv-checks">
         <Check label="复读时截断生成" checked={draft.loopGuard} disabled={disabled} onChange={value => update({ loopGuard: value })} />
@@ -598,6 +598,7 @@ export function RwkvSettings(props: { form: ConfigFormLike; explain?: (field: st
         {editing === 'run' ? <RunEditor initial={config} disabled={disabled} onCancel={() => setEditing(undefined)} onSave={saveRun} /> : null}
       </div>
 
+      <h3 className="rwkv-subtitle">开发者与轨迹</h3>
       <DeveloperCard settings={config} disabled={disabled} write={write} />
     </div>
   )

@@ -65,7 +65,7 @@ textarea.rwkv-input{height:auto;min-height:64px;padding:6px 10px;resize:vertical
 .rwkv-add{box-sizing:border-box;width:100%;display:flex;align-items:center;justify-content:center;gap:6px;height:56px;border:1px dashed var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-xl);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:14px;cursor:pointer}
 .rwkv-add:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .rwkv-add:disabled{opacity:.4;cursor:default}
-.rwkv-segment{display:inline-flex;padding:2px;gap:2px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l4);width:fit-content}
+.rwkv-segment{display:inline-flex;flex-wrap:wrap;padding:2px;gap:2px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l4);width:fit-content}
 .rwkv-segment button{height:26px;padding:0 10px;border:none;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer}
 .rwkv-segment button[aria-pressed=true]{background:var(--dsw-alias-settings-card-fill);color:var(--dsw-alias-label-primary);box-shadow:0 0 0 .5px var(--dsw-alias-border-l3)}
 .rwkv-list{display:flex;flex-direction:column;gap:4px}
@@ -80,9 +80,10 @@ button.rwkv-option{cursor:pointer;padding-right:10px}
 .rwkv-upload{display:flex;flex-direction:column;gap:6px;padding-top:4px}
 .rwkv-upload-row{display:flex;align-items:center;gap:8px}
 @container (max-width:560px){.rwkv-grid,.rwkv-grid3{grid-template-columns:minmax(0,1fr)}}
-.rwkv-developer>summary{list-style:none;cursor:pointer}
-.rwkv-developer>summary::-webkit-details-marker{display:none}
-.rwkv-developer-body{display:flex;flex-direction:column;gap:12px;padding-top:4px}
+.rwkv-developer-head{width:100%;padding:0;border:none;background:transparent;font:inherit;color:inherit;text-align:left;cursor:pointer}
+.rwkv-chevron{flex:none;width:5px;height:5px;margin:0 2px;border-right:1.5px solid var(--dsw-alias-label-secondary);border-bottom:1.5px solid var(--dsw-alias-label-secondary);transform:rotate(-45deg) translate(-1px,-1px);transition:transform 120ms ease}
+.rwkv-developer-head[aria-expanded=true] .rwkv-chevron{transform:rotate(45deg) translate(-1px,-1px)}
+.rwkv-developer-body{display:flex;flex-direction:column;gap:12px;padding-top:12px;border-top:.5px solid var(--dsw-alias-border-l2)}
 .rwkv-toggle{align-items:flex-start}
 .rwkv-toggle input{margin-top:4px}
 .rwkv-toggle-hint{display:block}
@@ -97,13 +98,14 @@ button.rwkv-option{cursor:pointer;padding-right:10px}
 .rwkv-stat b{font-size:16px;margin-right:4px;color:var(--dsw-alias-label-primary)}
 .rwkv-counts{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .rwkv-count{display:inline-flex;gap:4px;align-items:baseline;padding:1px 8px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm);font-size:12px;line-height:18px}
-.rwkv-sessions{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.rwkv-session-toggle{cursor:pointer}
+.rwkv-sessions{list-style:none;margin:0;padding:0 2px 0 0;display:flex;flex-direction:column;gap:6px;max-height:440px;overflow-y:auto}
 .rwkv-session{border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-lg);padding:6px 10px}
 .rwkv-session-head{display:flex;gap:8px;align-items:center}
 .rwkv-session-title{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0;border:none;background:transparent;padding:0;text-align:left;font:inherit;color:inherit;cursor:pointer}
 .rwkv-session-task{font-size:13px;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rwkv-session-body{display:flex;flex-direction:column;gap:8px;padding:8px 0 4px}
-.rwkv-session-body .rl-ledger{height:420px;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md)}
+.rwkv-session-body .rl-ledger{height:340px;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md)}
 /* RWKV trace ledger, after DSH's Trajectory view (ui-trajectory TrajectoryTable / Toolbar). */
 .rl-root{isolation:isolate;display:flex;flex-direction:column;height:100%;min-height:0;width:100%;box-sizing:border-box;overflow:hidden;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1)}
 .rl-toolbar{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;box-sizing:border-box;min-height:32px;padding:4px 6px;border-bottom:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}
