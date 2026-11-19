@@ -500,6 +500,7 @@ test('auto-fold (passive: true): hides todo tools/guidance/nudges, keeps short m
     keepRecentPairs: 2,
     historyEmptyThink: true,
     passive: true,
+    pinUneditedRead: true,
     cwd: '/app',
   })
   assert.equal(passiveFold.nudge, undefined)
@@ -521,6 +522,7 @@ test('auto-fold (passive: true): hides todo tools/guidance/nudges, keeps short m
     keepRecentPairs: 2,
     historyEmptyThink: true,
     passive: true,
+    pinUneditedRead: true,
     cwd: '/app',
   })
   assert.ok(!afterReread.foldedUnread.includes('/app/a.ts'), 'relative re-read clears foldedUnread for /app/a.ts')
@@ -547,6 +549,7 @@ test('auto-fold pins latest unedited read within budget and omits it from folded
     keepRecentPairs: 2,
     historyEmptyThink: true,
     passive: true,
+    pinUneditedRead: true,
     cwd: '/app',
   })
   const rendered = JSON.stringify(pinned.items)
@@ -576,6 +579,7 @@ test('auto-fold pins latest unedited read within budget and omits it from folded
     keepRecentPairs: 2,
     historyEmptyThink: true,
     passive: true,
+    pinUneditedRead: true,
     cwd: '/app',
   })
   assert.ok(!JSON.stringify(unpinned.items).includes('OLD_BODY'), 'read before a write is not pinned')

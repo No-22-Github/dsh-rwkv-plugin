@@ -97,6 +97,11 @@ export interface WorklistOptions {
    * ledger and prefix 100% append-only between epochs (default: 0, disabled).
    */
   readonly epochTargetTokens?: number
+  /**
+   * Pin up to one latest unedited `read` pair (<= 2400 tokens) across a fold
+   * boundary when it fits inside `budgetTokens` (default: false).
+   */
+  readonly pinUneditedRead?: boolean
 }
 
 export const DEFAULT_WORKLIST_MIN_FOLD_TOKENS = 8000
@@ -449,6 +454,8 @@ export interface FoldWorklistInput {
   readonly passive?: boolean
   /** Optional epoch-jump target in passive auto-fold mode (0 disables). */
   readonly epochTargetTokens?: number
+  /** Pin latest unedited `read` across a fold boundary (default: false). */
+  readonly pinUneditedRead?: boolean
   /** Session working directory for normalizing relative vs absolute paths in `foldedUnread`. */
   readonly cwd?: string
 }
@@ -603,6 +610,7 @@ function buildActiveWindow(
     readonly emptyThink: boolean
     readonly emitLiveNudge: boolean
     readonly passive: boolean
+    readonly pinUneditedRead: boolean
     readonly cwd?: string
     readonly fullTok: readonly number[]
     readonly bareTok: readonly number[]
@@ -648,7 +656,7 @@ function buildActiveWindow(
       keepPreIndices.add(pair.resultIndex)
     }
     let pinnedPreRead: CallPair | undefined
-    if (options.keepRecentCount >= 1 && !keptTail.some(pair => pair.ok && READ_PIN_TOOLS.has(pair.name))) {
+    if (options.pinUneditedRead && options.keepRecentCount >= 1 && !keptTail.some(pair => pair.ok && READ_PIN_TOOLS.has(pair.name))) {
       const preFolded = preWs.filter(pair => !keepPreIndices.has(pair.callIndex))
       const activeAtCheckpoint = pairsSub.filter(pair => keepPreIndices.has(pair.callIndex) || pair.callIndex >= lastCheckpoint.callIndex)
       pinnedPreRead = findLatestUneditedReadPair(
@@ -833,7 +841,7 @@ function buildActiveWindow(
         dropPairFromWindow(droppablePairs.shift()!)
         built = assemble()
       }
-      if (droppedByHardCap.length > 0 && options.keepRecentCount >= 1) {
+      if (options.pinUneditedRead && droppedByHardCap.length > 0 && options.keepRecentCount >= 1) {
         const pinned = findLatestUneditedReadPair(
           droppedByHardCap,
           history,
@@ -976,6 +984,7 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
     emptyThink,
     emitLiveNudge,
     passive,
+    pinUneditedRead: input.pinUneditedRead === true,
     cwd: input.cwd,
     fullTok,
     bareTok,
@@ -1071,7 +1080,7 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
           })
           if (win.tokens <= epochTargetTokens) break
         }
-        if (keepRecentCount >= 1 && cutPairCount > 0) {
+        if (input.pinUneditedRead === true && keepRecentCount >= 1 && cutPairCount > 0) {
           const candidatePin = findLatestUneditedReadPair(
             pairsSub.slice(0, cutPairCount),
             history,
@@ -1125,6 +1134,7 @@ export interface WorklistEntryOptions extends TranscriptOptions {
   readonly forceNudge?: boolean
   readonly passive?: boolean
   readonly epochTargetTokens?: number
+  readonly pinUneditedRead?: boolean
   readonly cwd?: string
 }
 
@@ -1148,6 +1158,7 @@ export function worklistEntries(
     ...options.forceNudge === undefined ? {} : { forceNudge: options.forceNudge },
     ...options.passive === undefined ? {} : { passive: options.passive },
     ...options.epochTargetTokens === undefined ? {} : { epochTargetTokens: options.epochTargetTokens },
+    ...options.pinUneditedRead === undefined ? {} : { pinUneditedRead: options.pinUneditedRead },
     ...options.cwd === undefined ? {} : { cwd: options.cwd },
     emitLiveNudge: options.reminders !== false,
   })
