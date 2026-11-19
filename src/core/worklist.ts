@@ -90,6 +90,13 @@ export interface WorklistOptions {
    * steps past `budgetTokens` (default 12000) while keeping `keepRecentPairs`.
    */
   readonly passive?: boolean
+  /**
+   * Optional epoch-jump target in `auto-fold` (`passive: true`). When > 0 and
+   * < `budgetTokens`, folding only triggers when the prompt exceeds
+   * `budgetTokens` and jumps down to `epochTargetTokens`, keeping the folded
+   * ledger and prefix 100% append-only between epochs (default: 0, disabled).
+   */
+  readonly epochTargetTokens?: number
 }
 
 export const DEFAULT_WORKLIST_MIN_FOLD_TOKENS = 8000
@@ -98,6 +105,7 @@ export const DEFAULT_WORKLIST_HARD_SLACK_TOKENS = 3000
 export const DEFAULT_BACKBONE_MAX_TOKENS = 5000
 export const DEFAULT_KEEP_RECENT_PAIRS = 2
 const MAX_SECOND_RECENT_PAIR_TOKENS = 2800
+const MAX_PINNED_UNEDITED_READ_TOKENS = 2400
 const MAX_PRIOR_TURN_FALLBACK_RESULT_CHARS = 1600
 const INIT_NUDGE_COOLDOWN_STEPS = 4
 const CHECKPOINT_NUDGE_COOLDOWN_STEPS = 3
@@ -439,6 +447,8 @@ export interface FoldWorklistInput {
   readonly emitLiveNudge?: boolean
   /** Passive auto-fold mode: watermark-gated cross-turn & in-turn folding with zero nudges or todo checkpoints. */
   readonly passive?: boolean
+  /** Optional epoch-jump target in passive auto-fold mode (0 disables). */
+  readonly epochTargetTokens?: number
   /** Session working directory for normalizing relative vs absolute paths in `foldedUnread`. */
   readonly cwd?: string
 }
@@ -461,6 +471,8 @@ export interface WorklistFoldResult {
 }
 
 const READ_WRITE_TOOLS: ReadonlySet<string> = new Set(['read', 'read_file', 'write', 'write_file'])
+const READ_PIN_TOOLS: ReadonlySet<string> = new Set(['read', 'read_file'])
+const WRITE_PIN_TOOLS: ReadonlySet<string> = new Set(['edit', 'edit_file', 'edit_lines', 'write', 'write_file'])
 const PRIOR_TURN_FOLDED_MARKER = '...(prior-turn output folded)...'
 
 function normalizePosixPath(raw: string): string {
@@ -525,6 +537,44 @@ export function foldedUnreadPaths(
   return [...everObserved].filter(path => !visibleInWindow.has(path))
 }
 
+function pairTargetPath(pair: CallPair, history: readonly HistoryItem[], cwd?: string): string | undefined {
+  const item = history[pair.callIndex]
+  if (item?.kind !== 'call') return undefined
+  return canonicalToolTarget(item.args.file_path ?? item.args.path, cwd)
+}
+
+/**
+ * Find the most recent successful `read` pair among `foldedPairs` that has not
+ * been followed by a write, fits within `MAX_PINNED_UNEDITED_READ_TOKENS`, and
+ * is not already superseded by a read/write on the same path in `activePairs`.
+ */
+function findLatestUneditedReadPair(
+  foldedPairs: readonly CallPair[],
+  history: readonly HistoryItem[],
+  pairTokens: (pair: CallPair) => number,
+  cwd: string | undefined,
+  activePairs: readonly CallPair[],
+): CallPair | undefined {
+  let candidate: CallPair | undefined
+  for (let i = foldedPairs.length - 1; i >= 0; i--) {
+    const pair = foldedPairs[i]!
+    if (pair.ok && WRITE_PIN_TOOLS.has(pair.name)) return undefined
+    if (pair.ok && READ_PIN_TOOLS.has(pair.name) && pairTargetPath(pair, history, cwd) !== undefined) {
+      if (pairTokens(pair) > MAX_PINNED_UNEDITED_READ_TOKENS) return undefined
+      candidate = pair
+      break
+    }
+  }
+  if (candidate === undefined) return undefined
+  const target = pairTargetPath(candidate, history, cwd)
+  const superseded = activePairs.some(pair =>
+    pair.ok
+    && (READ_PIN_TOOLS.has(pair.name) || WRITE_PIN_TOOLS.has(pair.name))
+    && pairTargetPath(pair, history, cwd) === target,
+  )
+  return superseded ? undefined : candidate
+}
+
 interface InternalNudge extends RecordedWorklistNudge {
   readonly pairIndex: number
 }
@@ -553,8 +603,11 @@ function buildActiveWindow(
     readonly emptyThink: boolean
     readonly emitLiveNudge: boolean
     readonly passive: boolean
+    readonly cwd?: string
     readonly fullTok: readonly number[]
     readonly bareTok: readonly number[]
+    readonly forcedCutPairCount?: number
+    readonly forcedPinnedRead?: CallPair
   },
 ): ActiveWindowResult {
   const lastCheckpoint = [...pairsSub].reverse().find(pair => pair.notedUpdate && activeCheckpoints.has(pair.callIndex))
@@ -594,6 +647,22 @@ function buildActiveWindow(
       keepPreIndices.add(pair.callIndex)
       keepPreIndices.add(pair.resultIndex)
     }
+    let pinnedPreRead: CallPair | undefined
+    if (options.keepRecentCount >= 1 && !keptTail.some(pair => pair.ok && READ_PIN_TOOLS.has(pair.name))) {
+      const preFolded = preWs.filter(pair => !keepPreIndices.has(pair.callIndex))
+      const activeAtCheckpoint = pairsSub.filter(pair => keepPreIndices.has(pair.callIndex) || pair.callIndex >= lastCheckpoint.callIndex)
+      pinnedPreRead = findLatestUneditedReadPair(
+        preFolded,
+        history,
+        pair => options.bareTok[pair.callIndex]! + options.bareTok[pair.resultIndex]!,
+        options.cwd,
+        activeAtCheckpoint,
+      )
+      if (pinnedPreRead !== undefined) {
+        keepPreIndices.add(pinnedPreRead.callIndex)
+        keepPreIndices.add(pinnedPreRead.resultIndex)
+      }
+    }
     for (let i = turnStart; i < lastCheckpoint.callIndex; i++) {
       const kind = history[i]!.kind
       if (kind === 'user' || kind === 'note' || keepPreIndices.has(i)) {
@@ -618,6 +687,13 @@ function buildActiveWindow(
     const planIdx = pairsSub.indexOf(firstPlanPair)
     if (planIdx >= 0 && planIdx + 1 < pairsSub.length && !keptSet.has(pairsSub[planIdx + 1]!.callIndex)) {
       clearedReasoning.add(firstPlanPair.callIndex)
+    }
+  }
+  for (const pair of pairsSub) {
+    if (pair === firstPlanPair || !keptSet.has(pair.callIndex)) continue
+    const idx = pairsSub.indexOf(pair)
+    if (idx >= 0 && idx + 1 < pairsSub.length && !keptSet.has(pairsSub[idx + 1]!.callIndex)) {
+      clearedReasoning.add(pair.callIndex)
     }
   }
 
@@ -722,25 +798,70 @@ function buildActiveWindow(
   const droppablePairs = pairsSub.filter(pair =>
     keptSet.has(pair.callIndex) && !protectedCallIndices.has(pair.callIndex),
   )
+  const dropPairFromWindow = (pair: CallPair): void => {
+    droppedByHardCap.push(pair)
+    keptSet.delete(pair.callIndex)
+    keptSet.delete(pair.resultIndex)
+    currentIndices = currentIndices.filter(i => i !== pair.callIndex && i !== pair.resultIndex)
+    duplicateFrom = Math.max(duplicateFrom, pair.resultIndex + 1)
+  }
+  const insertPairInOrder = (pair: CallPair): void => {
+    keptSet.add(pair.callIndex)
+    keptSet.add(pair.resultIndex)
+    const next = [...currentIndices, pair.callIndex, pair.resultIndex]
+    next.sort((a, b) => a - b)
+    currentIndices = next
+    clearedReasoning.add(pair.callIndex)
+  }
+
   if (options.passive) {
-    const keepFloor = Math.max(1, options.keepRecentCount)
-    while (droppablePairs.length > keepFloor && built.tokens > options.budgetTokens) {
-      const oldest = droppablePairs.shift()!
-      droppedByHardCap.push(oldest)
-      keptSet.delete(oldest.callIndex)
-      keptSet.delete(oldest.resultIndex)
-      currentIndices = currentIndices.filter(i => i !== oldest.callIndex && i !== oldest.resultIndex)
-      duplicateFrom = Math.max(duplicateFrom, oldest.resultIndex + 1)
-      built = assemble()
+    if (options.forcedCutPairCount !== undefined) {
+      const cutTarget = Math.min(options.forcedCutPairCount, droppablePairs.length)
+      for (let c = 0; c < cutTarget; c++) {
+        const pair = droppablePairs.shift()!
+        if (options.forcedPinnedRead === pair) {
+          clearedReasoning.add(pair.callIndex)
+          duplicateFrom = Math.max(duplicateFrom, pair.resultIndex + 1)
+          continue
+        }
+        dropPairFromWindow(pair)
+      }
+      if (cutTarget > 0) built = assemble()
+    } else {
+      const keepFloor = Math.max(1, options.keepRecentCount)
+      while (droppablePairs.length > keepFloor && built.tokens > options.budgetTokens) {
+        dropPairFromWindow(droppablePairs.shift()!)
+        built = assemble()
+      }
+      if (droppedByHardCap.length > 0 && options.keepRecentCount >= 1) {
+        const pinned = findLatestUneditedReadPair(
+          droppedByHardCap,
+          history,
+          pair => options.bareTok[pair.callIndex]! + options.bareTok[pair.resultIndex]!,
+          options.cwd,
+          droppablePairs,
+        )
+        if (pinned !== undefined) {
+          const pinIdx = droppedByHardCap.indexOf(pinned)
+          const prevIndices = currentIndices
+          const prevCleared = clearedReasoning.has(pinned.callIndex)
+          droppedByHardCap.splice(pinIdx, 1)
+          insertPairInOrder(pinned)
+          built = assemble()
+          if (built.tokens > options.budgetTokens) {
+            droppedByHardCap.splice(pinIdx, 0, pinned)
+            keptSet.delete(pinned.callIndex)
+            keptSet.delete(pinned.resultIndex)
+            currentIndices = prevIndices
+            if (!prevCleared) clearedReasoning.delete(pinned.callIndex)
+            built = assemble()
+          }
+        }
+      }
     }
   }
   while (droppablePairs.length > 1 && built.tokens > options.hardCap) {
-    const oldest = droppablePairs.shift()!
-    droppedByHardCap.push(oldest)
-    keptSet.delete(oldest.callIndex)
-    keptSet.delete(oldest.resultIndex)
-    currentIndices = currentIndices.filter(i => i !== oldest.callIndex && i !== oldest.resultIndex)
-    duplicateFrom = Math.max(duplicateFrom, oldest.resultIndex + 1)
+    dropPairFromWindow(droppablePairs.shift()!)
     built = assemble()
   }
 
@@ -855,6 +976,7 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
     emptyThink,
     emitLiveNudge,
     passive,
+    cwd: input.cwd,
     fullTok,
     bareTok,
   }
@@ -925,7 +1047,57 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
     }
   }
 
-  const finalWin = buildActiveWindow(history, turnStart, history.length, pairs, triggeredNudges, activeCheckpoints, windowOpts)
+  const epochTargetTokens = Math.max(0, input.epochTargetTokens ?? 0)
+  let finalWin: ActiveWindowResult
+  if (passive && epochTargetTokens > 0 && epochTargetTokens < input.budgetTokens) {
+    const keepFloor = Math.max(1, keepRecentCount)
+    let cutPairCount = 0
+    let frozenPinnedRead: CallPair | undefined
+    for (let k = 0; k < pairs.length; k++) {
+      const pairsSub = pairs.slice(0, k + 1)
+      const endAtK = pairs[k]!.resultIndex + 1
+      let win = buildActiveWindow(history, turnStart, endAtK, pairsSub, triggeredNudges, activeCheckpoints, {
+        ...windowOpts,
+        forcedCutPairCount: cutPairCount,
+        forcedPinnedRead: frozenPinnedRead,
+      })
+      if (win.tokens > input.budgetTokens && (pairsSub.length - cutPairCount) > keepFloor) {
+        frozenPinnedRead = undefined
+        while ((pairsSub.length - cutPairCount) > keepFloor) {
+          cutPairCount++
+          win = buildActiveWindow(history, turnStart, endAtK, pairsSub, triggeredNudges, activeCheckpoints, {
+            ...windowOpts,
+            forcedCutPairCount: cutPairCount,
+          })
+          if (win.tokens <= epochTargetTokens) break
+        }
+        if (keepRecentCount >= 1 && cutPairCount > 0) {
+          const candidatePin = findLatestUneditedReadPair(
+            pairsSub.slice(0, cutPairCount),
+            history,
+            pair => bareTok[pair.callIndex]! + bareTok[pair.resultIndex]!,
+            input.cwd,
+            pairsSub.slice(cutPairCount),
+          )
+          if (candidatePin !== undefined) {
+            const withPin = buildActiveWindow(history, turnStart, endAtK, pairsSub, triggeredNudges, activeCheckpoints, {
+              ...windowOpts,
+              forcedCutPairCount: cutPairCount,
+              forcedPinnedRead: candidatePin,
+            })
+            if (withPin.tokens <= input.budgetTokens) frozenPinnedRead = candidatePin
+          }
+        }
+      }
+    }
+    finalWin = buildActiveWindow(history, turnStart, history.length, pairs, triggeredNudges, activeCheckpoints, {
+      ...windowOpts,
+      forcedCutPairCount: cutPairCount,
+      forcedPinnedRead: frozenPinnedRead,
+    })
+  } else {
+    finalWin = buildActiveWindow(history, turnStart, history.length, pairs, triggeredNudges, activeCheckpoints, windowOpts)
+  }
   const recorded: RecordedWorklistNudge[] = triggeredNudges.map(({ afterResultIndex, kind }) => ({ afterResultIndex, kind }))
   const items = [...priorItems, ...finalWin.items]
 
@@ -952,6 +1124,7 @@ export interface WorklistEntryOptions extends TranscriptOptions {
   readonly recordedNudges?: readonly RecordedWorklistNudge[]
   readonly forceNudge?: boolean
   readonly passive?: boolean
+  readonly epochTargetTokens?: number
   readonly cwd?: string
 }
 
@@ -974,6 +1147,7 @@ export function worklistEntries(
     ...options.recordedNudges === undefined ? {} : { recordedNudges: options.recordedNudges },
     ...options.forceNudge === undefined ? {} : { forceNudge: options.forceNudge },
     ...options.passive === undefined ? {} : { passive: options.passive },
+    ...options.epochTargetTokens === undefined ? {} : { epochTargetTokens: options.epochTargetTokens },
     ...options.cwd === undefined ? {} : { cwd: options.cwd },
     emitLiveNudge: options.reminders !== false,
   })

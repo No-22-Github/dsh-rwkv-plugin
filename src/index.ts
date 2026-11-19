@@ -52,6 +52,7 @@ export interface Settings {
   worklistMinFoldTokens: number
   worklistBudgetTokens: number
   worklistKeepRecentPairs: number
+  worklistEpochTargetTokens: number
   recordTraces: boolean
   traceDir: string
 }
@@ -133,6 +134,8 @@ export const Config = z.object({
     .description('worklist: total RWKV prompt token budget (high watermark) before attaching a non-withdrawn budget reminder (`todo_plan` / `todo_update`).').volatile(),
   worklistKeepRecentPairs: z.natural().default(2)
     .description('worklist: recent workspace call/result pairs kept right before a noted `todo_update` checkpoint (gentle folding).').volatile(),
+  worklistEpochTargetTokens: z.natural().default(0)
+    .description('auto-fold: optional epoch-jump target tokens (> 0 and < worklistBudgetTokens). When set, folding triggers at worklistBudgetTokens and jumps down to this target, keeping the prefix append-only between epochs.').volatile(),
   recordTraces: z.boolean().default(true)
     .description('Write RWKV traces (prompt bytes + raw output, outcome, repairs) to disk: rwkv-trace.jsonl next to each DSH session log, or traceDir. They are always kept in memory for the RWKV tab.').volatile(),
   traceDir: z.string().default('').description('Custom trace directory (<session>.jsonl per session); empty = next to the DSH session logs.').volatile(),
@@ -178,6 +181,7 @@ function settingsOf(config: Config): AdapterSettings {
             minFoldTokens: config.worklistMinFoldTokens.get(),
             budgetTokens: config.worklistBudgetTokens.get(),
             keepRecentPairs: config.worklistKeepRecentPairs.get(),
+            ...(config.worklistEpochTargetTokens.get() > 0 ? { epochTargetTokens: config.worklistEpochTargetTokens.get() } : {}),
           },
         }
       : {},

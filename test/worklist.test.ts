@@ -525,3 +525,99 @@ test('auto-fold (passive: true): hides todo tools/guidance/nudges, keeps short m
   })
   assert.ok(!afterReread.foldedUnread.includes('/app/a.ts'), 'relative re-read clears foldedUnread for /app/a.ts')
 })
+
+test('auto-fold pins latest unedited read within budget and omits it from foldedUnread', () => {
+  const bigOut = 'log line with unique payload\n'.repeat(45)
+  const history: HistoryItem[] = [
+    { kind: 'user', text: 'Inspect target.ts and run checks.' },
+    { kind: 'call', id: 'r1', name: 'read', args: { file_path: '/app/target.ts' } },
+    { kind: 'result', id: 'r1', name: 'read', ok: true, text: 'PINNED_TARGET_BODY\nexport const x = 1\n' },
+    { kind: 'call', id: 'b1', name: 'bash', args: { command: 'echo 1' } },
+    { kind: 'result', id: 'b1', name: 'bash', ok: true, text: `B1\n${bigOut}` },
+    { kind: 'call', id: 'b2', name: 'bash', args: { command: 'echo 2' } },
+    { kind: 'result', id: 'b2', name: 'bash', ok: true, text: `B2\n${bigOut}` },
+    { kind: 'call', id: 'b3', name: 'bash', args: { command: 'echo 3' } },
+    { kind: 'result', id: 'b3', name: 'bash', ok: true, text: `B3\n${bigOut}` },
+  ]
+  const pinned = foldWorklist(history, {
+    systemTokens: 500,
+    minFoldTokens: 500,
+    budgetTokens: 1400,
+    hardCapTokens: 4000,
+    keepRecentPairs: 2,
+    historyEmptyThink: true,
+    passive: true,
+    cwd: '/app',
+  })
+  const rendered = JSON.stringify(pinned.items)
+  assert.ok(rendered.includes('PINNED_TARGET_BODY'), 'unedited read is pinned verbatim after folding')
+  assert.ok(!rendered.includes('B1\n'), 'older bash output is still folded into the ledger')
+  assert.deepEqual(pinned.foldedUnread, [], 'pinned read is visible and not marked foldedUnread')
+
+  // If a write occurred after the read, stop scanning and do not pin the older read.
+  const afterEditHistory: HistoryItem[] = [
+    { kind: 'user', text: 'Edit and check.' },
+    { kind: 'call', id: 'r1', name: 'read', args: { file_path: '/app/old.ts' } },
+    { kind: 'result', id: 'r1', name: 'read', ok: true, text: 'OLD_BODY\n' },
+    { kind: 'call', id: 'e1', name: 'edit', args: { file_path: '/app/other.ts', old_string: 'a', new_string: 'b' } },
+    { kind: 'result', id: 'e1', name: 'edit', ok: true, text: 'ok' },
+    { kind: 'call', id: 'b1', name: 'bash', args: { command: 'echo 1' } },
+    { kind: 'result', id: 'b1', name: 'bash', ok: true, text: `B1\n${bigOut}` },
+    { kind: 'call', id: 'b2', name: 'bash', args: { command: 'echo 2' } },
+    { kind: 'result', id: 'b2', name: 'bash', ok: true, text: `B2\n${bigOut}` },
+    { kind: 'call', id: 'b3', name: 'bash', args: { command: 'echo 3' } },
+    { kind: 'result', id: 'b3', name: 'bash', ok: true, text: `B3\n${bigOut}` },
+  ]
+  const unpinned = foldWorklist(afterEditHistory, {
+    systemTokens: 500,
+    minFoldTokens: 500,
+    budgetTokens: 1400,
+    hardCapTokens: 4000,
+    keepRecentPairs: 2,
+    historyEmptyThink: true,
+    passive: true,
+    cwd: '/app',
+  })
+  assert.ok(!JSON.stringify(unpinned.items).includes('OLD_BODY'), 'read before a write is not pinned')
+  assert.deepEqual(unpinned.foldedUnread, ['/app/old.ts'])
+})
+
+test('auto-fold with epochTargetTokens preserves append-only prefix between epochs', () => {
+  const stepText = 'step output line for epoch test\n'.repeat(25)
+  const history: HistoryItem[] = [
+    { kind: 'user', text: 'Run multi-step checks.' },
+    { kind: 'call', id: 's1', name: 'bash', args: { command: 'echo 1' } },
+    { kind: 'result', id: 's1', name: 'bash', ok: true, text: `S1\n${stepText}` },
+    { kind: 'call', id: 's2', name: 'bash', args: { command: 'echo 2' } },
+    { kind: 'result', id: 's2', name: 'bash', ok: true, text: `S2\n${stepText}` },
+    { kind: 'call', id: 's3', name: 'bash', args: { command: 'echo 3' } },
+    { kind: 'result', id: 's3', name: 'bash', ok: true, text: `S3\n${stepText}` },
+    { kind: 'call', id: 's4', name: 'bash', args: { command: 'echo 4' } },
+    { kind: 'result', id: 's4', name: 'bash', ok: true, text: `S4\n${stepText}` },
+  ]
+  const opts = {
+    systemTokens: 600,
+    minFoldTokens: 600,
+    budgetTokens: 1800,
+    epochTargetTokens: 1200,
+    hardCapTokens: 4000,
+    keepRecentPairs: 1,
+    historyEmptyThink: true,
+    passive: true,
+  }
+  // At 3 pairs: exceeds 1800, jumps back to <= 1200 (folding s1, s2).
+  const at3 = foldWorklist(history.slice(0, 7), opts)
+  // At 4 pairs (with a short s4 that stays <= 1800): prefix from at3 must be 100% append-only!
+  const withShortS4: HistoryItem[] = [
+    ...history.slice(0, 7),
+    { kind: 'call', id: 's4', name: 'bash', args: { command: 'echo 4' } },
+    { kind: 'result', id: 's4', name: 'bash', ok: true, text: 'S4_SHORT' },
+  ]
+  const at4 = foldWorklist(withShortS4, opts)
+  assert.ok(at4.promptTokens <= 1800, `expected <= 1800, got ${at4.promptTokens}`)
+  assert.deepEqual(
+    at4.items.slice(0, at3.items.length),
+    at3.items,
+    'within the same epoch, ledger and prefix stay byte-for-byte append-only',
+  )
+})
