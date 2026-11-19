@@ -61,6 +61,11 @@ const { values, positionals } = parseArgs({
     'history-mode': { type: 'string' },
     'worklist-min-fold': { type: 'string' },
     'worklist-budget': { type: 'string' },
+    'worklist-epoch-target': { type: 'string' },
+    'worklist-keep-recent': { type: 'string' },
+    'worklist-exempt-tokens': { type: 'string' },
+    'worklist-backbone-max': { type: 'string' },
+    'worklist-hard-cap': { type: 'string' },
     // Mount the stateful worklist tools (src/todo.ts); shown to the model only when historyMode is 'worklist'.
     todo: { type: 'boolean', default: true },
     // System prompt ends with the current date (off: eval prompts match the training rows).
@@ -145,11 +150,41 @@ const resolvedMinFold = values['worklist-min-fold'] !== undefined
 const resolvedBudget = values['worklist-budget'] !== undefined
   ? Number(values['worklist-budget'])
   : typeof extraPluginConfig.worklistBudgetTokens === 'number' ? extraPluginConfig.worklistBudgetTokens : undefined
+const resolvedEpochTarget = values['worklist-epoch-target'] !== undefined
+  ? Number(values['worklist-epoch-target'])
+  : typeof extraPluginConfig.worklistEpochTargetTokens === 'number' ? extraPluginConfig.worklistEpochTargetTokens : undefined
+const resolvedKeepRecent = values['worklist-keep-recent'] !== undefined
+  ? Number(values['worklist-keep-recent'])
+  : typeof extraPluginConfig.worklistKeepRecentPairs === 'number' ? extraPluginConfig.worklistKeepRecentPairs : undefined
+const resolvedExemptTokens = values['worklist-exempt-tokens'] !== undefined
+  ? Number(values['worklist-exempt-tokens'])
+  : typeof extraPluginConfig.worklistExemptResultTokens === 'number' ? extraPluginConfig.worklistExemptResultTokens : undefined
+const resolvedBackboneMax = values['worklist-backbone-max'] !== undefined
+  ? Number(values['worklist-backbone-max'])
+  : typeof extraPluginConfig.worklistBackboneMaxTokens === 'number' ? extraPluginConfig.worklistBackboneMaxTokens : undefined
+const resolvedHardCap = values['worklist-hard-cap'] !== undefined
+  ? Number(values['worklist-hard-cap'])
+  : typeof extraPluginConfig.worklistHardCapTokens === 'number' ? extraPluginConfig.worklistHardCapTokens : undefined
 if (resolvedMinFold !== undefined && (!Number.isInteger(resolvedMinFold) || resolvedMinFold < 0)) {
   throw new Error(`--worklist-min-fold must be a non-negative integer (got ${String(resolvedMinFold)})`)
 }
 if (resolvedBudget !== undefined && (!Number.isInteger(resolvedBudget) || resolvedBudget <= 0)) {
   throw new Error(`--worklist-budget must be a positive integer (got ${String(resolvedBudget)})`)
+}
+if (resolvedEpochTarget !== undefined && (!Number.isInteger(resolvedEpochTarget) || resolvedEpochTarget < 0)) {
+  throw new Error(`--worklist-epoch-target must be a non-negative integer (got ${String(resolvedEpochTarget)})`)
+}
+if (resolvedKeepRecent !== undefined && (!Number.isInteger(resolvedKeepRecent) || resolvedKeepRecent < 0)) {
+  throw new Error(`--worklist-keep-recent must be a non-negative integer (got ${String(resolvedKeepRecent)})`)
+}
+if (resolvedExemptTokens !== undefined && (!Number.isInteger(resolvedExemptTokens) || resolvedExemptTokens < 0)) {
+  throw new Error(`--worklist-exempt-tokens must be a non-negative integer (got ${String(resolvedExemptTokens)})`)
+}
+if (resolvedBackboneMax !== undefined && (!Number.isInteger(resolvedBackboneMax) || resolvedBackboneMax <= 0)) {
+  throw new Error(`--worklist-backbone-max must be a positive integer (got ${String(resolvedBackboneMax)})`)
+}
+if (resolvedHardCap !== undefined && (!Number.isInteger(resolvedHardCap) || resolvedHardCap < 0)) {
+  throw new Error(`--worklist-hard-cap must be a non-negative integer (got ${String(resolvedHardCap)})`)
 }
 
 writeFileSync(join(profileDir, 'cordis.patch.yml'), [
@@ -163,10 +198,25 @@ writeFileSync(join(profileDir, 'cordis.patch.yml'), [
   `${indent}historyMode: ${json(resolvedHistoryMode)}`,
   ...(resolvedMinFold === undefined ? [] : [`${indent}worklistMinFoldTokens: ${resolvedMinFold}`]),
   ...(resolvedBudget === undefined ? [] : [`${indent}worklistBudgetTokens: ${resolvedBudget}`]),
+  ...(resolvedEpochTarget === undefined ? [] : [`${indent}worklistEpochTargetTokens: ${resolvedEpochTarget}`]),
+  ...(resolvedKeepRecent === undefined ? [] : [`${indent}worklistKeepRecentPairs: ${resolvedKeepRecent}`]),
+  ...(resolvedExemptTokens === undefined ? [] : [`${indent}worklistExemptResultTokens: ${resolvedExemptTokens}`]),
+  ...(resolvedBackboneMax === undefined ? [] : [`${indent}worklistBackboneMaxTokens: ${resolvedBackboneMax}`]),
+  ...(resolvedHardCap === undefined ? [] : [`${indent}worklistHardCapTokens: ${resolvedHardCap}`]),
   ...(values['time-zone'] ? [`${indent}timeZone: ${json(values['time-zone'])}`] : []),
   ...(values['trace-dir'] ? [`${indent}traceDir: ${json(resolve(values['trace-dir']))}`] : []),
   ...Object.entries(extraPluginConfig)
-    .filter(([key]) => !['editMode', 'historyMode', 'worklistMinFoldTokens', 'worklistBudgetTokens'].includes(key))
+    .filter(([key]) => ![
+      'editMode',
+      'historyMode',
+      'worklistMinFoldTokens',
+      'worklistBudgetTokens',
+      'worklistEpochTargetTokens',
+      'worklistKeepRecentPairs',
+      'worklistExemptResultTokens',
+      'worklistBackboneMaxTokens',
+      'worklistHardCapTokens',
+    ].includes(key))
     .map(([key, value]) => `${indent}${key}: ${json(value)}`),
   `${indent}models:`,
   ...modelRows.map(row => `${indent}  ${row}`),

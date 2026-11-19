@@ -327,7 +327,10 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       ...(fold.checkpointAt === undefined ? {} : { checkpointAt: fold.checkpointAt }),
       nudged: fold.nudge !== undefined,
     }
-    state = analyzeTurn(input.history, { duplicateFrom: fold.duplicateFrom })
+    state = analyzeTurn(input.history, {
+      duplicateFrom: fold.duplicateFrom,
+      ...(fold.maskedCallIds !== undefined ? { maskedCallIds: fold.maskedCallIds } : {}),
+    })
     base = [{ role: 'system', text: system }, ...entries]
   } else if (config.relay === undefined) {
     base = [

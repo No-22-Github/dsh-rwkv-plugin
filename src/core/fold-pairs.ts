@@ -3,9 +3,12 @@
 // `findLatestUneditedReadPair`) shared by `auto-fold` and active `worklist`.
 
 import { countTokens } from '../tokenizer.ts'
+import { FOLDED_OUTPUT_MARKER } from './defaults.ts'
 import type { HistoryItem } from './policy.ts'
 import { collapseBlock, recordToolCall, toolResponse } from './prompt.ts'
 import { isNotedTodoUpdateCall, isWorklistTool } from './todo-state.ts'
+
+export { FOLDED_OUTPUT_MARKER }
 
 export const MAX_PINNED_UNEDITED_READ_TOKENS = 2400
 const MAX_PRIOR_TURN_FALLBACK_RESULT_CHARS = 1600
@@ -184,6 +187,124 @@ function normalizePosixPath(raw: string): string {
   return parts.length > 0 ? parts.join('/') : '.'
 }
 
+export function isRuntimeContextNote(item: HistoryItem): boolean {
+  return item.kind === 'note' && (
+    item.text.includes('Current working directory:')
+    || item.text.includes('Current DSH file policy:')
+  )
+}
+
+export function displayCleanPath(raw: unknown, cwd?: string): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const trimmed = raw.trim()
+  if (trimmed === '') return undefined
+  if (!trimmed.startsWith('/')) return normalizePosixPath(trimmed)
+  const abs = normalizePosixPath(trimmed)
+  if (cwd !== undefined && cwd.trim() !== '') {
+    const base = normalizePosixPath(cwd.trim())
+    if (base !== '/' && abs === base) return '.'
+    if (base !== '/' && abs.startsWith(`${base}/`)) return abs.slice(base.length + 1)
+  }
+  return abs
+}
+
+export function collectModifiedFiles(
+  pairs: readonly CallPair[],
+  history: readonly HistoryItem[],
+  cwd?: string,
+): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const pair of pairs) {
+    if (!pair.ok || !WRITE_PIN_TOOLS.has(pair.name)) continue
+    const callItem = history[pair.callIndex]
+    if (callItem?.kind !== 'call') continue
+    const path = displayCleanPath(callItem.args.file_path ?? callItem.args.path, cwd)
+    if (path !== undefined && !seen.has(path)) {
+      seen.add(path)
+      out.push(path)
+    }
+  }
+  return out
+}
+
+export function maskResultInPlace(
+  callItem: Extract<HistoryItem, { kind: 'call' }>,
+  resultItem: Extract<HistoryItem, { kind: 'result' }>,
+  rawResultTokens?: number,
+): Extract<HistoryItem, { kind: 'result' }> {
+  if (resultItem.text.startsWith(FOLDED_OUTPUT_MARKER)) return resultItem
+  const args = callItem.args
+  const firstQuery = Array.isArray(args.queries) && args.queries.length > 0 ? args.queries[0] : undefined
+  const rawKey = args.file_path ?? args.path ?? args.pattern ?? args.command ?? args.url ?? args.query ?? firstQuery
+  let target = ''
+  if (typeof rawKey === 'string' && rawKey.trim() !== '') {
+    const clean = rawKey.trim().replace(/\s+/g, ' ')
+    target = clean.length > 80 ? `${clean.slice(0, 77)}...` : clean
+    if (callItem.name === 'edit_lines' && args.start_line !== undefined && args.end_line !== undefined) {
+      target = `${target}:${String(args.start_line)}-${String(args.end_line)}`
+    }
+  }
+  const trimmedTrailing = resultItem.text.endsWith('\n') ? resultItem.text.slice(0, -1) : resultItem.text
+  const lineCount = resultItem.text === '' ? 0 : trimmedTrailing.split('\n').length
+  const tokCount = rawResultTokens ?? countTokens(resultItem.text)
+  let exitInfo = ''
+  if (callItem.name === 'bash') {
+    const m = /\[exit code: (\d+)\]/.exec(resultItem.text)
+    exitInfo = m ? `, exit ${m[1]}` : (resultItem.ok ? ', exit 0' : ', error')
+  } else if (!resultItem.ok) {
+    exitInfo = ', error'
+  }
+  const details = target !== ''
+    ? `${target}, ${lineCount} lines, ${tokCount} tokens`
+    : `${lineCount} lines, ${tokCount} tokens`
+  return {
+    ...resultItem,
+    text: `${FOLDED_OUTPUT_MARKER}${callItem.name} output omitted (${details})${exitInfo}; re-read if exact content is needed before edit]`,
+  }
+}
+
+export function formatStageArchiveNote(
+  pairs: readonly CallPair[],
+  history: readonly HistoryItem[],
+  cwd?: string,
+): string {
+  const files = collectModifiedFiles(pairs, history, cwd)
+  const fileSummary = files.length > 0 ? files.join(', ') : 'none'
+  return `[Stage archive — earlier steps in this turn modified: ${fileSummary}; ${pairs.length} steps archived. Re-read any file before editing.]`
+}
+
+/**
+ * Module 1 (`auto-fold v2`): immediately fold a completed prior turn `[from, to)`
+ * to `user` message(s) + Turn 1 `runtime-context` `note` + 1-line modified-files
+ * summary (if any) + final `assistant` reply (with past reasoning cleared).
+ */
+export function foldCompletedTurnCompact(
+  history: readonly HistoryItem[],
+  from: number,
+  to: number,
+  cwd?: string,
+): HistoryItem[] {
+  const pairs = collectPairs(history, from, to)
+  const modifiedFiles = collectModifiedFiles(pairs, history, cwd)
+  const headItems: HistoryItem[] = []
+  const assistantItems: HistoryItem[] = []
+  for (let index = from; index < to; index++) {
+    const item = history[index]!
+    if (item.kind === 'user' || isRuntimeContextNote(item)) {
+      headItems.push(item)
+    } else if (item.kind === 'assistant') {
+      assistantItems.push(item.reasoning ? { ...item, reasoning: undefined } : item)
+    }
+  }
+  const out: HistoryItem[] = [...headItems]
+  if (modifiedFiles.length > 0) {
+    out.push({ kind: 'note', text: `[Modified files in this turn: ${modifiedFiles.join(', ')}]` })
+  }
+  out.push(...assistantItems)
+  return out
+}
+
 function canonicalToolTarget(raw: unknown, cwd?: string): string | undefined {
   if (typeof raw !== 'string') return undefined
   const trimmed = raw.trim()
@@ -226,11 +347,16 @@ export function foldedUnreadPaths(
     if (!pair.ok || !READ_WRITE_TOOLS.has(pair.name)) continue
     const callItem = foldedItems[pair.callIndex] as Extract<HistoryItem, { kind: 'call' }>
     const resultItem = foldedItems[pair.resultIndex] as Extract<HistoryItem, { kind: 'result' }>
-    if ((pair.name === 'read' || pair.name === 'read_file') && resultItem.text.includes(PRIOR_TURN_FOLDED_MARKER)) {
+    const target = canonicalToolTarget(callItem.args.file_path ?? callItem.args.path, cwd)
+    if (target === undefined) continue
+    if (
+      (pair.name === 'read' || pair.name === 'read_file')
+      && (resultItem.text.startsWith(FOLDED_OUTPUT_MARKER) || resultItem.text.includes(PRIOR_TURN_FOLDED_MARKER))
+    ) {
+      visibleInWindow.delete(target)
       continue
     }
-    const target = canonicalToolTarget(callItem.args.file_path ?? callItem.args.path, cwd)
-    if (target !== undefined) visibleInWindow.add(target)
+    visibleInWindow.add(target)
   }
 
   return [...everObserved].filter(path => !visibleInWindow.has(path))

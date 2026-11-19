@@ -21,6 +21,7 @@ export interface DeveloperSettings {
   historyMode: 'auto-fold' | 'full' | 'worklist'
   worklistMinFoldTokens: number
   worklistBudgetTokens: number
+  worklistEpochTargetTokens: number
   worklistKeepRecentPairs: number
 }
 
@@ -32,8 +33,9 @@ export const DEVELOPER_DEFAULTS: DeveloperSettings = {
   editMode: 'tolerant',
   historyMode: 'auto-fold',
   worklistMinFoldTokens: 8000,
-  worklistBudgetTokens: 12000,
-  worklistKeepRecentPairs: 2,
+  worklistBudgetTokens: 13500,
+  worklistEpochTargetTokens: 9000,
+  worklistKeepRecentPairs: 3,
 }
 
 function Toggle(props: { label: string; hint: string; checked: boolean; disabled: boolean; onChange: (value: boolean) => void }) {
@@ -312,7 +314,7 @@ export function DeveloperCard(props: {
           {settings.guards ? '' : ' · 修复已关'}
           {settings.editMode === 'tolerant' ? ' · 容错 edit' : settings.editMode === 'literal' ? ' · 精确 edit' : ' · 行号 edit_lines'}
           {historyMode === 'auto-fold'
-            ? ` · 自动折叠（${settings.worklistMinFoldTokens} / ${settings.worklistBudgetTokens}）`
+            ? ` · 自动折叠（${settings.worklistEpochTargetTokens} ← ${settings.worklistBudgetTokens}）`
             : historyMode === 'worklist'
               ? ` · 工单模式（${settings.worklistMinFoldTokens} / ${settings.worklistBudgetTokens}）`
               : ' · 完整对话'}
@@ -340,26 +342,37 @@ export function DeveloperCard(props: {
           </div>
           {historyMode === 'auto-fold' || historyMode === 'worklist' ? (
             <div className="rwkv-grid3">
-              <label className="rwkv-field">
-                <span className="rwkv-label">开始折叠 (token)</span>
-                <NumberField
-                  value={settings.worklistMinFoldTokens} min={0} disabled={off} placeholder="8000"
-                  onSave={value => { void set('worklistMinFoldTokens', value) }}
-                />
-                <p className="rwkv-hint">{historyMode === 'auto-fold' ? '低于此值不折叠' : '超此值才允许折叠'}</p>
-              </label>
+              {historyMode === 'auto-fold' ? (
+                <label className="rwkv-field">
+                  <span className="rwkv-label">回落水位 (token)</span>
+                  <NumberField
+                    value={settings.worklistEpochTargetTokens} min={0} disabled={off} placeholder="9000"
+                    onSave={value => { void set('worklistEpochTargetTokens', value) }}
+                  />
+                  <p className="rwkv-hint">批量原地遮蔽后的目标水位</p>
+                </label>
+              ) : (
+                <label className="rwkv-field">
+                  <span className="rwkv-label">开始折叠 (token)</span>
+                  <NumberField
+                    value={settings.worklistMinFoldTokens} min={0} disabled={off} placeholder="8000"
+                    onSave={value => { void set('worklistMinFoldTokens', value) }}
+                  />
+                  <p className="rwkv-hint">超此值才允许折叠</p>
+                </label>
+              )}
               <label className="rwkv-field">
                 <span className="rwkv-label">单轮上限 (token)</span>
                 <NumberField
-                  value={settings.worklistBudgetTokens} disabled={off} placeholder="12000"
+                  value={settings.worklistBudgetTokens} disabled={off} placeholder="13500"
                   onSave={value => { void set('worklistBudgetTokens', value) }}
                 />
-                <p className="rwkv-hint">{historyMode === 'auto-fold' ? '单轮超此值折叠旧步' : '超此值追加预算提醒'}</p>
+                <p className="rwkv-hint">{historyMode === 'auto-fold' ? '超此值触发批量原地遮蔽' : '超此值追加预算提醒'}</p>
               </label>
               <label className="rwkv-field">
                 <span className="rwkv-label">保留最近步数</span>
                 <NumberField
-                  value={settings.worklistKeepRecentPairs} min={0} disabled={off} placeholder="2"
+                  value={settings.worklistKeepRecentPairs} min={0} disabled={off} placeholder="3"
                   onSave={value => { void set('worklistKeepRecentPairs', value) }}
                 />
                 <p className="rwkv-hint">折叠时保留最近原文步数</p>

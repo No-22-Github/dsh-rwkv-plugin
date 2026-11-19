@@ -4,29 +4,40 @@
 // Submodules:
 //   - `todo-state.ts`: active `todo_plan` / `todo_update` state transitions & UI projection
 //   - `fold-pairs.ts`: pair extraction, completed-turn backbone, `foldedUnreadPaths`, unedited-read pinning
-//   - `fold-window.ts`: active-turn window assembly, reminder replay, sliding/epoch cuts, hardCap safety valve
+//   - `fold-window.ts`: active-turn window assembly, reminder replay, sliding/epoch/in-place cuts, hardCap safety valve
 //
 // Shared by the student plugin (`decideStep`), the teacher overlay (`teacher.ts`)
 // and the training exporter (`export.ts`) so prompt bytes match everywhere.
 
 import { countTokens } from '../tokenizer.ts'
 import {
+  DEFAULT_ACTIVE_WORKLIST_BUDGET_TOKENS,
+  DEFAULT_AUTOFOLD_BACKBONE_MAX_TOKENS,
+  DEFAULT_AUTOFOLD_HARD_CAP_TOKENS,
+  DEFAULT_AUTOFOLD_HARD_SLACK_TOKENS,
+  DEFAULT_AUTOFOLD_KEEP_RECENT_PAIRS,
   DEFAULT_BACKBONE_MAX_TOKENS,
   DEFAULT_KEEP_RECENT_PAIRS,
   DEFAULT_WORKLIST_BUDGET_TOKENS,
+  DEFAULT_WORKLIST_EPOCH_TARGET_TOKENS,
+  DEFAULT_WORKLIST_EXEMPT_RESULT_TOKENS,
   DEFAULT_WORKLIST_HARD_SLACK_TOKENS,
   DEFAULT_WORKLIST_MIN_FOLD_TOKENS,
+  FOLDED_OUTPUT_MARKER,
 } from './defaults.ts'
 import {
   collectPairs,
   foldCompletedTurn,
+  foldCompletedTurnCompact,
   foldedUnreadPaths,
   historyItemPromptBytes,
+  isRuntimeContextNote,
   itemsTokens,
 } from './fold-pairs.ts'
 import {
   buildActiveWindow,
   buildEpochJumpWindow,
+  buildInPlaceFoldWindow,
   CHECKPOINT_NUDGE_COOLDOWN_STEPS,
   INIT_NUDGE_COOLDOWN_STEPS,
   nudgeTextOf,
@@ -37,16 +48,25 @@ import {
   type RecordedWorklistNudge,
   type WorklistNudgeKind,
 } from './fold-window.ts'
-import { transcriptEntries, type HistoryItem, type TranscriptOptions } from './policy.ts'
-import type { Entry } from './prompt.ts'
+import { toolFailureReminder, transcriptEntries, type HistoryItem, type TranscriptOptions } from './policy.ts'
+import { cleanChatText, type Entry } from './prompt.ts'
 import { isWorklistTool } from './todo-state.ts'
+import type { WireTool } from './tools.ts'
 
 export {
+  DEFAULT_ACTIVE_WORKLIST_BUDGET_TOKENS,
+  DEFAULT_AUTOFOLD_BACKBONE_MAX_TOKENS,
+  DEFAULT_AUTOFOLD_HARD_CAP_TOKENS,
+  DEFAULT_AUTOFOLD_HARD_SLACK_TOKENS,
+  DEFAULT_AUTOFOLD_KEEP_RECENT_PAIRS,
   DEFAULT_BACKBONE_MAX_TOKENS,
   DEFAULT_KEEP_RECENT_PAIRS,
   DEFAULT_WORKLIST_BUDGET_TOKENS,
+  DEFAULT_WORKLIST_EPOCH_TARGET_TOKENS,
+  DEFAULT_WORKLIST_EXEMPT_RESULT_TOKENS,
   DEFAULT_WORKLIST_HARD_SLACK_TOKENS,
   DEFAULT_WORKLIST_MIN_FOLD_TOKENS,
+  FOLDED_OUTPUT_MARKER,
 }
 
 export {
@@ -77,15 +97,15 @@ export {
 }
 
 export interface WorklistOptions {
-  /** Minimum RWKV prompt tokens required before folding kicks in (default: 8000 in plugin config). */
+  /** Minimum RWKV prompt tokens required before folding kicks in (legacy/active worklist). */
   readonly minFoldTokens?: number
-  /** Total RWKV token high watermark (default: 12000). */
+  /** Total RWKV token high watermark (default: 13500 in auto-fold, 12000 in active worklist). */
   readonly budgetTokens: number
-  /** Hard RWKV token safety ceiling (defaults to `budgetTokens + 3000`). */
+  /** Hard RWKV token safety ceiling (defaults to `budgetTokens + 1000` in auto-fold v2, `budgetTokens + 3000` in legacy). */
   readonly hardCapTokens?: number
-  /** Maximum RWKV tokens kept for completed earlier user turns (default: 5000). */
+  /** Maximum RWKV tokens kept for completed earlier user turns (default: 2000 in auto-fold v2, 5000 in worklist). */
   readonly backboneMaxTokens?: number
-  /** Recent workspace call/result pairs kept verbatim across a fold (default: 2). */
+  /** Recent workspace call/result pairs kept verbatim across a fold (default: 3 in auto-fold v2, 2 in worklist). */
   readonly keepRecentPairs?: number
   /** Whether to retain the initial `todo_plan` pair in the folded active turn (default: true). */
   readonly keepInitialPlan?: boolean
@@ -93,10 +113,16 @@ export interface WorklistOptions {
   readonly systemGuidance?: boolean
   /** Auto-fold (`passive: true`): omit active `todo_*` tools, guidance, and budget nudges. */
   readonly passive?: boolean
-  /** Optional epoch-jump target in `auto-fold` (`passive: true`, default: 0 disabled). */
+  /** Epoch-jump low watermark target in `auto-fold` (default: 9000 in auto-fold v2). */
   readonly epochTargetTokens?: number
   /** Pin up to one latest unedited `read` pair (<= 2400 tokens) across a fold boundary (default: false). */
   readonly pinUneditedRead?: boolean
+  /** Module 1 (`auto-fold v2`): fold completed prior turns immediately on turn boundary (`<= backboneMaxTokens`). */
+  readonly immediatePriorFold?: boolean
+  /** Module 2 (`auto-fold v2`): mask old tool results in-place instead of pulling pairs into a top ledger. */
+  readonly inPlaceMask?: boolean
+  /** Module 2 (`auto-fold v2`): tool results below this RWKV token count are exempt from in-place masking (default: 250). */
+  readonly exemptResultTokens?: number
 }
 
 export interface FoldWorklistInput {
@@ -107,8 +133,10 @@ export interface FoldWorklistInput {
   readonly backboneMaxTokens?: number
   readonly keepRecentPairs?: number
   readonly keepInitialPlan?: boolean
-  /** Extra per-step reminder tokens rendered on RWKV prompts (e.g. POST_TOOL_REMINDER_THINK). */
+  /** Extra per-step reminder tokens rendered after each result in active turn (`User: ${POST_TOOL_REMINDER_THINK}\n\n`). */
   readonly reminderTokens?: number
+  /** Tool catalog used to compute exact failure-reminder token overhead when a result failed. */
+  readonly tools?: readonly WireTool[]
   /** False (default): include past step reasoning in token count; true: empty `<think></think>`. */
   readonly historyEmptyThink?: boolean
   /** Exact non-withdrawn reminders recorded during teacher collection, used by export.ts for path-mapped parity. */
@@ -123,7 +151,13 @@ export interface FoldWorklistInput {
   readonly epochTargetTokens?: number
   /** Pin latest unedited `read` across a fold boundary (default: false). */
   readonly pinUneditedRead?: boolean
-  /** Session working directory for normalizing relative vs absolute paths in `foldedUnread`. */
+  /** Module 1 (`auto-fold v2`): fold completed prior turns immediately on turn boundary. */
+  readonly immediatePriorFold?: boolean
+  /** Module 2 (`auto-fold v2`): mask old tool results in-place. */
+  readonly inPlaceMask?: boolean
+  /** Module 2 (`auto-fold v2`): exempt short tool results `< exemptResultTokens` RWKV tokens. */
+  readonly exemptResultTokens?: number
+  /** Session working directory for normalizing relative vs absolute paths in `foldedUnread` & notes. */
   readonly cwd?: string
 }
 
@@ -135,6 +169,7 @@ export interface WorklistFoldResult {
   readonly nudges?: readonly RecordedWorklistNudge[]
   readonly checkpointAt?: number
   readonly foldedUnread: readonly string[]
+  readonly maskedCallIds?: ReadonlySet<string>
 }
 
 export interface WorklistEntryOptions extends TranscriptOptions {
@@ -151,7 +186,92 @@ export interface WorklistEntryOptions extends TranscriptOptions {
   readonly passive?: boolean
   readonly epochTargetTokens?: number
   readonly pinUneditedRead?: boolean
+  readonly immediatePriorFold?: boolean
+  readonly inPlaceMask?: boolean
+  readonly exemptResultTokens?: number
   readonly cwd?: string
+}
+
+function truncateTextToBudget(text: string, maxTokens: number): string {
+  if (maxTokens <= 8) return '...'
+  let lo = 0
+  let hi = text.length
+  const suffix = ' ...(truncated)'
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2)
+    const candidate = `${text.slice(0, mid).trimEnd()}${suffix}`
+    if (countTokens(`User: ${candidate}\n\n`) <= maxTokens) lo = mid
+    else hi = mid - 1
+  }
+  return lo > 0 ? `${text.slice(0, lo).trimEnd()}${suffix}` : '...'
+}
+
+function foldPriorTurnsCompact(
+  history: readonly HistoryItem[],
+  userStarts: readonly number[],
+  emptyThink: boolean,
+  backboneMax: number,
+  cwd?: string,
+): { priorItems: HistoryItem[]; priorTokens: number } {
+  if (userStarts.length <= 1) return { priorItems: [], priorTokens: 0 }
+
+  const priorTurns: HistoryItem[][] = []
+  for (let t = 0; t < userStarts.length - 1; t++) {
+    const from = t === 0 ? 0 : userStarts[t]!
+    const to = userStarts[t + 1]!
+    priorTurns.push(foldCompletedTurnCompact(history, from, to, cwd))
+  }
+
+  let priorTokens = priorTurns.reduce((sum, turn) => sum + itemsTokens(turn, emptyThink), 0)
+
+  // Pass 1: truncate older prior turns' assistant replies first.
+  for (let t = 0; t < priorTurns.length && priorTokens > backboneMax; t++) {
+    const turn = priorTurns[t]!
+    let changed = false
+    const nextTurn = turn.map(item => {
+      if (item.kind !== 'assistant' || item.text.length <= 200) return item
+      changed = true
+      return { ...item, text: `${item.text.slice(0, 180).trimEnd()} ...(truncated)` }
+    })
+    if (changed) {
+      const oldTok = itemsTokens(turn, emptyThink)
+      const newTok = itemsTokens(nextTurn, emptyThink)
+      priorTurns[t] = nextTurn
+      priorTokens += newTok - oldTok
+    }
+  }
+
+  // Pass 2: drop oldest non-Turn-1 prior turns while preserving Turn 1 (`priorTurns[0]`).
+  while (priorTurns.length > 1 && priorTokens > backboneMax) {
+    const [dropped] = priorTurns.splice(1, 1)
+    if (dropped !== undefined) priorTokens -= itemsTokens(dropped, emptyThink)
+  }
+
+  // Pass 3: if Turn 1 alone still exceeds backboneMax, strip its assistant reply and
+  // cap its user text while ALWAYS preserving Turn 1's runtime-context note(s).
+  if (priorTurns.length === 1 && priorTokens > backboneMax) {
+    const turn0 = priorTurns[0]!
+    const runtimeNotes = turn0.filter(isRuntimeContextNote)
+    const nonAssistant = turn0.filter(item => item.kind !== 'assistant')
+    let candidate: HistoryItem[] = nonAssistant
+    let candidateTok = itemsTokens(candidate, emptyThink)
+    if (candidateTok > backboneMax) {
+      const runtimeTok = itemsTokens(runtimeNotes, emptyThink)
+      const remainingForUser = Math.max(16, backboneMax - runtimeTok)
+      const users = turn0.filter((item): item is Extract<HistoryItem, { kind: 'user' }> => item.kind === 'user')
+      const perUserBudget = users.length > 0 ? Math.floor(remainingForUser / users.length) : remainingForUser
+      candidate = turn0.flatMap<HistoryItem>(item => {
+        if (isRuntimeContextNote(item)) return [item]
+        if (item.kind === 'user') return [{ kind: 'user' as const, text: truncateTextToBudget(item.text, perUserBudget) }]
+        return []
+      })
+      candidateTok = itemsTokens(candidate, emptyThink)
+    }
+    priorTurns[0] = candidate
+    priorTokens = candidateTok
+  }
+
+  return { priorItems: priorTurns.flat(), priorTokens }
 }
 
 function foldPriorTurns(
@@ -160,10 +280,15 @@ function foldPriorTurns(
   turnStart: number,
   emptyThink: boolean,
   passive: boolean,
+  immediatePriorFold: boolean,
   minFoldTokens: number,
   backboneMax: number,
   baseFixed: number,
+  cwd?: string,
 ): { priorItems: HistoryItem[]; priorTokens: number } {
+  if (immediatePriorFold) {
+    return foldPriorTurnsCompact(history, userStarts, emptyThink, backboneMax, cwd)
+  }
   const priorTurns: HistoryItem[][] = []
   if (passive && userStarts.length > 1) {
     const rawTurns: HistoryItem[][] = []
@@ -232,113 +357,180 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
   }
 
   const passive = input.passive === true
+  const legacyV1Passive = passive
+    && input.inPlaceMask === undefined
+    && input.immediatePriorFold === undefined
+    && input.minFoldTokens !== undefined
+    && input.minFoldTokens > 0
+  const immediatePriorFold = input.immediatePriorFold ?? (passive && !legacyV1Passive)
+  const inPlaceMask = input.inPlaceMask ?? (passive && !legacyV1Passive)
   const minFoldTokens = Math.max(0, input.minFoldTokens ?? 0)
   const turnStart = userStarts.length === 1 ? 0 : userStarts[userStarts.length - 1]!
-  const backboneMax = input.backboneMaxTokens ?? DEFAULT_BACKBONE_MAX_TOKENS
-  const baseFixed = input.systemTokens + (input.reminderTokens ?? 0)
+  const backboneMax = input.backboneMaxTokens
+    ?? (immediatePriorFold ? DEFAULT_AUTOFOLD_BACKBONE_MAX_TOKENS : DEFAULT_BACKBONE_MAX_TOKENS)
+
+  const baseReminderTok = input.reminderTokens ?? 0
+  const framingTok = baseReminderTok > 0 ? countTokens('System: \n\nAssistant: <think') : 0
+  const baseFixed = input.systemTokens + framingTok
 
   const { priorItems, priorTokens } = foldPriorTurns(
-    history, userStarts, turnStart, emptyThink, passive, minFoldTokens, backboneMax, baseFixed,
+    history,
+    userStarts,
+    turnStart,
+    emptyThink,
+    passive,
+    immediatePriorFold,
+    minFoldTokens,
+    backboneMax,
+    baseFixed,
+    input.cwd,
   )
 
   const pairs = collectPairs(history, turnStart, history.length)
-  const baseOverhead = input.systemTokens + priorTokens + (input.reminderTokens ?? 0)
-  const hardCap = input.hardCapTokens ?? (input.budgetTokens + DEFAULT_WORKLIST_HARD_SLACK_TOKENS)
-  const keepRecentCount = Math.max(0, input.keepRecentPairs ?? DEFAULT_KEEP_RECENT_PAIRS)
+  const baseOverhead = input.systemTokens + framingTok + priorTokens
+  const hardCap = input.hardCapTokens !== undefined && input.hardCapTokens > 0
+    ? input.hardCapTokens
+    : (inPlaceMask
+      ? input.budgetTokens + DEFAULT_AUTOFOLD_HARD_SLACK_TOKENS
+      : input.budgetTokens + DEFAULT_WORKLIST_HARD_SLACK_TOKENS)
+  const keepRecentCount = Math.max(
+    0,
+    input.keepRecentPairs ?? (inPlaceMask ? DEFAULT_AUTOFOLD_KEEP_RECENT_PAIRS : DEFAULT_KEEP_RECENT_PAIRS),
+  )
+  const exemptResultTokens = Math.max(
+    0,
+    input.exemptResultTokens ?? (inPlaceMask ? DEFAULT_WORKLIST_EXEMPT_RESULT_TOKENS : 0),
+  )
   const keepInitialPlan = input.keepInitialPlan !== false
   const emitLiveNudge = input.emitLiveNudge !== false
 
+  const reminderTokOfResult = (res: Extract<HistoryItem, { kind: 'result' }>): number => {
+    if (baseReminderTok <= 0) return 0
+    if (res.ok) return baseReminderTok
+    return countTokens(`User: ${cleanChatText(toolFailureReminder(res.name, res.text, false, input.tools ?? []))}\n\n`)
+  }
+
   const fullTok = new Array<number>(history.length).fill(0)
   const bareTok = new Array<number>(history.length).fill(0)
+  const rawResultTok = new Array<number>(history.length).fill(0)
   for (let i = turnStart; i < history.length; i++) {
     const item = history[i]!
-    fullTok[i] = countTokens(historyItemPromptBytes(item, emptyThink))
-    bareTok[i] = (item.kind === 'call' || item.kind === 'assistant') && item.reasoning && !emptyThink
-      ? countTokens(historyItemPromptBytes({ ...item, reasoning: undefined }, emptyThink))
-      : fullTok[i]!
+    if (item.kind === 'result') {
+      rawResultTok[i] = countTokens(item.text)
+      fullTok[i] = countTokens(historyItemPromptBytes(item, emptyThink)) + reminderTokOfResult(item)
+      bareTok[i] = fullTok[i]!
+    } else {
+      fullTok[i] = countTokens(historyItemPromptBytes(item, emptyThink))
+      bareTok[i] = (item.kind === 'call' || item.kind === 'assistant') && item.reasoning && !emptyThink
+        ? countTokens(historyItemPromptBytes({ ...item, reasoning: undefined }, emptyThink))
+        : fullTok[i]!
+    }
   }
 
-  const windowOpts = {
-    baseOverhead,
-    budgetTokens: input.budgetTokens,
-    hardCap,
-    keepRecentCount,
-    keepInitialPlan,
-    emptyThink,
-    emitLiveNudge,
-    passive,
-    pinUneditedRead: input.pinUneditedRead === true,
-    cwd: input.cwd,
-    fullTok,
-    bareTok,
-  }
+  const epochTargetTokens = Math.max(
+    0,
+    input.epochTargetTokens ?? (inPlaceMask ? DEFAULT_WORKLIST_EPOCH_TARGET_TOKENS : 0),
+  )
 
+  let finalWin: ActiveWindowResult
   const triggeredNudges: InternalNudge[] = []
-  const activeCheckpoints = new Set<number>()
-  const recordedByResult = input.recordedNudges !== undefined
-    ? new Map(input.recordedNudges.map(n => [n.afterResultIndex, n.kind]))
-    : undefined
 
-  for (let k = 0; !passive && k < pairs.length; k++) {
-    const pair = pairs[k]!
-    const pairsSub = pairs.slice(0, k + 1)
+  if (passive && inPlaceMask) {
+    finalWin = buildInPlaceFoldWindow(history, turnStart, pairs, {
+      baseOverhead,
+      budgetTokens: input.budgetTokens,
+      epochTargetTokens,
+      hardCap,
+      keepRecentCount,
+      exemptResultTokens,
+      emptyThink,
+      cwd: input.cwd,
+      fullTok,
+      bareTok,
+      rawResultTok,
+      reminderTokOfResult,
+    })
+  } else {
+    const windowOpts = {
+      baseOverhead,
+      budgetTokens: input.budgetTokens,
+      hardCap,
+      keepRecentCount,
+      keepInitialPlan,
+      emptyThink,
+      emitLiveNudge,
+      passive,
+      pinUneditedRead: input.pinUneditedRead === true,
+      cwd: input.cwd,
+      fullTok,
+      bareTok,
+    }
 
-    if (pair.notedUpdate) {
-      if (minFoldTokens <= 0) {
-        activeCheckpoints.add(pair.callIndex)
-      } else {
-        const winBeforeFold = buildActiveWindow(
-          history, turnStart, pair.resultIndex + 1, pairsSub, triggeredNudges, activeCheckpoints, windowOpts,
-        )
-        if (winBeforeFold.totalTokens >= minFoldTokens) {
+    const activeCheckpoints = new Set<number>()
+    const recordedByResult = input.recordedNudges !== undefined
+      ? new Map(input.recordedNudges.map(n => [n.afterResultIndex, n.kind]))
+      : undefined
+
+    for (let k = 0; !passive && k < pairs.length; k++) {
+      const pair = pairs[k]!
+      const pairsSub = pairs.slice(0, k + 1)
+
+      if (pair.notedUpdate) {
+        if (minFoldTokens <= 0) {
           activeCheckpoints.add(pair.callIndex)
+        } else {
+          const winBeforeFold = buildActiveWindow(
+            history, turnStart, pair.resultIndex + 1, pairsSub, triggeredNudges, activeCheckpoints, windowOpts,
+          )
+          if (winBeforeFold.totalTokens >= minFoldTokens) {
+            activeCheckpoints.add(pair.callIndex)
+          }
         }
       }
-    }
 
-    if (recordedByResult !== undefined) {
-      const kind = recordedByResult.get(pair.resultIndex)
-      if (kind !== undefined) {
+      if (recordedByResult !== undefined) {
+        const kind = recordedByResult.get(pair.resultIndex)
+        if (kind !== undefined) {
+          triggeredNudges.push({ pairIndex: k, afterResultIndex: pair.resultIndex, kind })
+        }
+        continue
+      }
+
+      const isFinalStepOverride = input.forceNudge !== undefined && k === pairs.length - 1 && pair.resultIndex === history.length - 1
+      if (isFinalStepOverride) {
+        if (input.forceNudge) {
+          const hasPlanAtK = pairsSub.some(p => p.ok && isWorklistTool(p.name))
+          triggeredNudges.push({
+            pairIndex: k,
+            afterResultIndex: pair.resultIndex,
+            kind: hasPlanAtK ? 'checkpoint' : 'init',
+          })
+        }
+        continue
+      }
+
+      const winAtK = buildActiveWindow(
+        history, turnStart, pair.resultIndex + 1, pairsSub, triggeredNudges, activeCheckpoints, windowOpts,
+      )
+      const lastCheckpointAtK = [...pairsSub].reverse().find(p => p.notedUpdate && activeCheckpoints.has(p.callIndex))
+      const checkpointPairIdx = lastCheckpointAtK !== undefined ? pairsSub.indexOf(lastCheckpointAtK) : -1
+      const searchAfter = lastCheckpointAtK !== undefined ? lastCheckpointAtK.resultIndex + 1 : turnStart
+      const unfoldedWs = pairsSub.filter(p => p.callIndex >= searchAfter && !isWorklistTool(p.name)).length
+      const hasPlanAtK = pairsSub.some(p => p.ok && isWorklistTool(p.name))
+      const kind: WorklistNudgeKind = hasPlanAtK ? 'checkpoint' : 'init'
+      const cooldown = kind === 'init' ? INIT_NUDGE_COOLDOWN_STEPS : CHECKPOINT_NUDGE_COOLDOWN_STEPS
+      const prevSameKind = [...triggeredNudges].reverse().find(n => n.pairIndex > checkpointPairIdx && n.kind === kind)
+      const onCooldown = prevSameKind !== undefined && (k - prevSameKind.pairIndex) < cooldown
+
+      if (!onCooldown && unfoldedWs >= 1 && winAtK.totalTokens > input.budgetTokens) {
         triggeredNudges.push({ pairIndex: k, afterResultIndex: pair.resultIndex, kind })
       }
-      continue
     }
 
-    const isFinalStepOverride = input.forceNudge !== undefined && k === pairs.length - 1 && pair.resultIndex === history.length - 1
-    if (isFinalStepOverride) {
-      if (input.forceNudge) {
-        const hasPlanAtK = pairsSub.some(p => p.ok && isWorklistTool(p.name))
-        triggeredNudges.push({
-          pairIndex: k,
-          afterResultIndex: pair.resultIndex,
-          kind: hasPlanAtK ? 'checkpoint' : 'init',
-        })
-      }
-      continue
-    }
-
-    const winAtK = buildActiveWindow(
-      history, turnStart, pair.resultIndex + 1, pairsSub, triggeredNudges, activeCheckpoints, windowOpts,
-    )
-    const lastCheckpointAtK = [...pairsSub].reverse().find(p => p.notedUpdate && activeCheckpoints.has(p.callIndex))
-    const checkpointPairIdx = lastCheckpointAtK !== undefined ? pairsSub.indexOf(lastCheckpointAtK) : -1
-    const searchAfter = lastCheckpointAtK !== undefined ? lastCheckpointAtK.resultIndex + 1 : turnStart
-    const unfoldedWs = pairsSub.filter(p => p.callIndex >= searchAfter && !isWorklistTool(p.name)).length
-    const hasPlanAtK = pairsSub.some(p => p.ok && isWorklistTool(p.name))
-    const kind: WorklistNudgeKind = hasPlanAtK ? 'checkpoint' : 'init'
-    const cooldown = kind === 'init' ? INIT_NUDGE_COOLDOWN_STEPS : CHECKPOINT_NUDGE_COOLDOWN_STEPS
-    const prevSameKind = [...triggeredNudges].reverse().find(n => n.pairIndex > checkpointPairIdx && n.kind === kind)
-    const onCooldown = prevSameKind !== undefined && (k - prevSameKind.pairIndex) < cooldown
-
-    if (!onCooldown && unfoldedWs >= 1 && winAtK.totalTokens > input.budgetTokens) {
-      triggeredNudges.push({ pairIndex: k, afterResultIndex: pair.resultIndex, kind })
-    }
+    finalWin = passive && epochTargetTokens > 0 && epochTargetTokens < input.budgetTokens
+      ? buildEpochJumpWindow(history, turnStart, pairs, triggeredNudges, activeCheckpoints, windowOpts, epochTargetTokens)
+      : buildActiveWindow(history, turnStart, history.length, pairs, triggeredNudges, activeCheckpoints, windowOpts)
   }
-
-  const epochTargetTokens = Math.max(0, input.epochTargetTokens ?? 0)
-  const finalWin: ActiveWindowResult = passive && epochTargetTokens > 0 && epochTargetTokens < input.budgetTokens
-    ? buildEpochJumpWindow(history, turnStart, pairs, triggeredNudges, activeCheckpoints, windowOpts, epochTargetTokens)
-    : buildActiveWindow(history, turnStart, history.length, pairs, triggeredNudges, activeCheckpoints, windowOpts)
 
   const recorded: RecordedWorklistNudge[] = triggeredNudges.map(({ afterResultIndex, kind }) => ({ afterResultIndex, kind }))
   const items = [...priorItems, ...finalWin.items]
@@ -350,6 +542,7 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
     ...(finalWin.liveNudge !== undefined ? { nudge: finalWin.liveNudge } : {}),
     ...(recorded.length > 0 ? { nudges: recorded } : {}),
     ...(finalWin.checkpointAt !== undefined ? { checkpointAt: finalWin.checkpointAt } : {}),
+    ...(finalWin.maskedCallIds !== undefined ? { maskedCallIds: finalWin.maskedCallIds } : {}),
     foldedUnread: foldedUnreadPaths(history, items, input.cwd),
   }
 }
@@ -359,7 +552,9 @@ export function worklistEntries(
   history: readonly HistoryItem[],
   options: WorklistEntryOptions,
 ): { entries: Entry[]; fold: WorklistFoldResult } {
-  const reminderTokens = options.reminders === false || !options.postToolReminder ? 0 : countTokens(options.postToolReminder)
+  const reminderTokens = options.reminders === false || !options.postToolReminder
+    ? 0
+    : countTokens(`User: ${cleanChatText(options.postToolReminder)}\n\n`)
   const fold = foldWorklist(history, {
     systemTokens: options.systemTokens,
     ...options.minFoldTokens === undefined ? {} : { minFoldTokens: options.minFoldTokens },
@@ -369,12 +564,16 @@ export function worklistEntries(
     ...options.keepRecentPairs === undefined ? {} : { keepRecentPairs: options.keepRecentPairs },
     ...options.keepInitialPlan === undefined ? {} : { keepInitialPlan: options.keepInitialPlan },
     reminderTokens,
+    tools: options.tools,
     ...options.historyEmptyThink === undefined ? {} : { historyEmptyThink: options.historyEmptyThink },
     ...options.recordedNudges === undefined ? {} : { recordedNudges: options.recordedNudges },
     ...options.forceNudge === undefined ? {} : { forceNudge: options.forceNudge },
     ...options.passive === undefined ? {} : { passive: options.passive },
     ...options.epochTargetTokens === undefined ? {} : { epochTargetTokens: options.epochTargetTokens },
     ...options.pinUneditedRead === undefined ? {} : { pinUneditedRead: options.pinUneditedRead },
+    ...options.immediatePriorFold === undefined ? {} : { immediatePriorFold: options.immediatePriorFold },
+    ...options.inPlaceMask === undefined ? {} : { inPlaceMask: options.inPlaceMask },
+    ...options.exemptResultTokens === undefined ? {} : { exemptResultTokens: options.exemptResultTokens },
     ...options.cwd === undefined ? {} : { cwd: options.cwd },
     emitLiveNudge: options.reminders !== false,
   })

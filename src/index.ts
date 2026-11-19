@@ -7,7 +7,18 @@ import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { RwkvAdapter, type AdapterSettings, type ModelConfig } from './adapter.ts'
 import { DEFAULT_HARNESS } from './core/agent.ts'
-import type { EditMode, HistoryMode } from './core/defaults.ts'
+import {
+  DEFAULT_AUTOFOLD_BACKBONE_MAX_TOKENS,
+  DEFAULT_AUTOFOLD_KEEP_RECENT_PAIRS,
+  DEFAULT_RELAY_BUDGET_TOKENS,
+  DEFAULT_RELAY_CARD_MAX_TOKENS,
+  DEFAULT_WORKLIST_BUDGET_TOKENS,
+  DEFAULT_WORKLIST_EPOCH_TARGET_TOKENS,
+  DEFAULT_WORKLIST_EXEMPT_RESULT_TOKENS,
+  DEFAULT_WORKLIST_MIN_FOLD_TOKENS,
+  type EditMode,
+  type HistoryMode,
+} from './core/defaults.ts'
 import type { ToolMode, ToolNames } from './core/tools.ts'
 import { applyResultBudget } from './result-budget.ts'
 import { setFoldedUnreadPaths } from './folded-read-guard.ts'
@@ -56,6 +67,11 @@ export interface Settings {
   worklistBudgetTokens: number
   worklistKeepRecentPairs: number
   worklistEpochTargetTokens: number
+  worklistExemptResultTokens: number
+  worklistBackboneMaxTokens: number
+  worklistHardCapTokens: number
+  worklistImmediatePriorFold: boolean
+  worklistInPlaceMask: boolean
   worklistPinUneditedRead: boolean
   recordTraces: boolean
   traceDir: string
@@ -127,19 +143,29 @@ export const Config = z.object({
   editMode: z.union(['tolerant', 'line-edit', 'literal']).default('tolerant')
     .description('tolerant (default): standard `edit` with recall-tolerant matching, auto-reindent, dual-anchor sliding-window guard, and pre-write syntax check. line-edit: coordinate-based `edit_lines`. literal: stock exact `edit`.').volatile(),
   historyMode: z.union(['auto-fold', 'full', 'relay', 'worklist']).default('auto-fold')
-    .description('auto-fold (default): keeps full history under minFoldTokens, then deterministically folds oldest steps to a 1-line ledger without todo tools. full: renders the whole conversation. worklist: active `todo_plan` + `todo_update`. relay: model-written handoff cards.').volatile(),
-  relayBudgetTokens: z.natural().default(8000)
+    .description('auto-fold (default): immediate <=2k prior-turn compaction + 13.5k->9k batch in-place observation masking (<250 tok exempt, recent 3 pairs kept, 14.5k stage archive). full: renders the whole conversation. worklist: active `todo_plan` + `todo_update`. relay: model-written handoff cards.').volatile(),
+  relayBudgetTokens: z.natural().default(DEFAULT_RELAY_BUDGET_TOKENS)
     .description('relay: exact RWKV token budget for the part of the leg that gets carded; the latest call/result pair is always kept.').volatile(),
-  relayCardMaxTokens: z.natural().default(768)
+  relayCardMaxTokens: z.natural().default(DEFAULT_RELAY_CARD_MAX_TOKENS)
     .description('relay: output cap of one handoff recap.').volatile(),
-  worklistMinFoldTokens: z.natural().default(8000)
+  worklistMinFoldTokens: z.natural().default(DEFAULT_WORKLIST_MIN_FOLD_TOKENS)
     .description('worklist: minimum RWKV prompt tokens (low watermark) before a noted `todo_update` folds earlier tool outputs.').volatile(),
-  worklistBudgetTokens: z.natural().default(12000)
-    .description('worklist: total RWKV prompt token budget (high watermark) before attaching a non-withdrawn budget reminder (`todo_plan` / `todo_update`).').volatile(),
-  worklistKeepRecentPairs: z.natural().default(2)
-    .description('worklist: recent workspace call/result pairs kept right before a noted `todo_update` checkpoint (gentle folding).').volatile(),
-  worklistEpochTargetTokens: z.natural().default(0)
-    .description('auto-fold: optional epoch-jump target tokens (> 0 and < worklistBudgetTokens). When set, folding triggers at worklistBudgetTokens and jumps down to this target, keeping the prefix append-only between epochs.').volatile(),
+  worklistBudgetTokens: z.natural().default(DEFAULT_WORKLIST_BUDGET_TOKENS)
+    .description('auto-fold/worklist: total RWKV prompt token high watermark (13500 default in auto-fold v2).').volatile(),
+  worklistKeepRecentPairs: z.natural().default(DEFAULT_AUTOFOLD_KEEP_RECENT_PAIRS)
+    .description('auto-fold/worklist: recent workspace call/result pairs kept unmasked across a fold (3 default in auto-fold v2).').volatile(),
+  worklistEpochTargetTokens: z.natural().default(DEFAULT_WORKLIST_EPOCH_TARGET_TOKENS)
+    .description('auto-fold: low-watermark target tokens on batch fold (9000 default in auto-fold v2; 0 disables epoch jump).').volatile(),
+  worklistExemptResultTokens: z.natural().default(DEFAULT_WORKLIST_EXEMPT_RESULT_TOKENS)
+    .description('auto-fold: tool results shorter than this RWKV token count are exempt from in-place masking (250 default).').volatile(),
+  worklistBackboneMaxTokens: z.natural().default(DEFAULT_AUTOFOLD_BACKBONE_MAX_TOKENS)
+    .description('auto-fold/worklist: maximum RWKV tokens kept for completed prior turns (2000 default in auto-fold v2).').volatile(),
+  worklistHardCapTokens: z.natural().default(0)
+    .description('auto-fold/worklist: hard RWKV token safety ceiling (0 = auto: budgetTokens + 1000 = 14500 in auto-fold v2).').volatile(),
+  worklistImmediatePriorFold: z.boolean().default(true)
+    .description('auto-fold: immediately compact completed prior turns on turn boundary instead of waiting for minFoldTokens mid-turn.').volatile(),
+  worklistInPlaceMask: z.boolean().default(true)
+    .description('auto-fold: mask old tool results in-place while keeping assistant tool-call arguments untouched.').volatile(),
   worklistPinUneditedRead: z.boolean().default(false)
     .description('auto-fold/worklist: pin up to one latest unedited read (<= 2400 tokens) across a fold boundary when it fits inside budgetTokens.').volatile(),
   recordTraces: z.boolean().default(true)
@@ -184,6 +210,11 @@ function settingsOf(config: Config): AdapterSettings {
       worklistBudgetTokens: config.worklistBudgetTokens.get(),
       worklistKeepRecentPairs: config.worklistKeepRecentPairs.get(),
       worklistEpochTargetTokens: config.worklistEpochTargetTokens.get(),
+      worklistExemptResultTokens: config.worklistExemptResultTokens.get(),
+      worklistBackboneMaxTokens: config.worklistBackboneMaxTokens.get(),
+      worklistHardCapTokens: config.worklistHardCapTokens.get(),
+      worklistImmediatePriorFold: config.worklistImmediatePriorFold.get(),
+      worklistInPlaceMask: config.worklistInPlaceMask.get(),
       worklistPinUneditedRead: config.worklistPinUneditedRead.get(),
     }),
     ...config.recordTraces.get() ? { traces: traceLocationOf(config) } : {},

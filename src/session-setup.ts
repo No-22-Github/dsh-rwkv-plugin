@@ -7,15 +7,23 @@
 // directly from `/opt/dsh-rwkv-plugin/src`.
 
 import {
+  DEFAULT_ACTIVE_WORKLIST_BUDGET_TOKENS,
+  DEFAULT_AUTOFOLD_BACKBONE_MAX_TOKENS,
+  DEFAULT_AUTOFOLD_HARD_SLACK_TOKENS,
+  DEFAULT_AUTOFOLD_KEEP_RECENT_PAIRS,
+  DEFAULT_BACKBONE_MAX_TOKENS,
+  DEFAULT_KEEP_RECENT_PAIRS,
   DEFAULT_RELAY_BUDGET_TOKENS,
   DEFAULT_RELAY_CARD_MAX_TOKENS,
   DEFAULT_WORKLIST_BUDGET_TOKENS,
+  DEFAULT_WORKLIST_EPOCH_TARGET_TOKENS,
+  DEFAULT_WORKLIST_EXEMPT_RESULT_TOKENS,
   DEFAULT_WORKLIST_MIN_FOLD_TOKENS,
   type EditMode,
   type HistoryMode,
 } from './core/defaults.ts'
 import { POST_TOOL_REMINDER_THINK } from './core/policy.ts'
-import { systemPrompt, WORKLIST_SYSTEM_GUIDANCE } from './core/prompt.ts'
+import { cleanChatText, systemPrompt, WORKLIST_SYSTEM_GUIDANCE } from './core/prompt.ts'
 import type { RelayOptions } from './core/relay.ts'
 import { TODO_PLAN_TOOL, TODO_UPDATE_TOOL } from './core/todo-state.ts'
 import type { WireTool } from './core/tools.ts'
@@ -33,6 +41,11 @@ export interface HistoryModeConfigInput {
   readonly worklistSystemGuidance?: boolean
   readonly worklistEpochTargetTokens?: number
   readonly worklistPinUneditedRead?: boolean
+  readonly worklistImmediatePriorFold?: boolean
+  readonly worklistBackboneMaxTokens?: number
+  readonly worklistExemptResultTokens?: number
+  readonly worklistInPlaceMask?: boolean
+  readonly worklistHardCapTokens?: number
 }
 
 export function resolveHistoryModeConfig(input: HistoryModeConfigInput): {
@@ -47,18 +60,42 @@ export function resolveHistoryModeConfig(input: HistoryModeConfigInput): {
       },
     }
   }
-  if (input.historyMode === 'auto-fold' || input.historyMode === 'worklist') {
-    const passive = input.historyMode === 'auto-fold'
+  if (input.historyMode === 'auto-fold') {
+    const immediatePriorFold = input.worklistImmediatePriorFold ?? true
+    const inPlaceMask = input.worklistInPlaceMask ?? true
+    const budgetTokens = input.worklistBudgetTokens ?? DEFAULT_WORKLIST_BUDGET_TOKENS
+    const epochTargetTokens = input.worklistEpochTargetTokens ?? DEFAULT_WORKLIST_EPOCH_TARGET_TOKENS
+    const hardCapTokens = input.worklistHardCapTokens !== undefined && input.worklistHardCapTokens > 0
+      ? input.worklistHardCapTokens
+      : budgetTokens + DEFAULT_AUTOFOLD_HARD_SLACK_TOKENS
     return {
       worklist: {
-        ...(passive ? { passive: true, systemGuidance: false } : {}),
-        ...(!passive && input.worklistSystemGuidance !== undefined ? { systemGuidance: input.worklistSystemGuidance } : {}),
+        passive: true,
+        systemGuidance: false,
+        immediatePriorFold,
+        inPlaceMask,
+        backboneMaxTokens: input.worklistBackboneMaxTokens ?? DEFAULT_AUTOFOLD_BACKBONE_MAX_TOKENS,
+        minFoldTokens: immediatePriorFold ? 0 : (input.worklistMinFoldTokens ?? DEFAULT_WORKLIST_MIN_FOLD_TOKENS),
+        budgetTokens,
+        epochTargetTokens,
+        keepRecentPairs: input.worklistKeepRecentPairs ?? DEFAULT_AUTOFOLD_KEEP_RECENT_PAIRS,
+        exemptResultTokens: input.worklistExemptResultTokens ?? DEFAULT_WORKLIST_EXEMPT_RESULT_TOKENS,
+        hardCapTokens,
+        ...(input.worklistPinUneditedRead ? { pinUneditedRead: true } : {}),
+      },
+    }
+  }
+  if (input.historyMode === 'worklist') {
+    return {
+      worklist: {
+        ...(input.worklistSystemGuidance !== undefined ? { systemGuidance: input.worklistSystemGuidance } : {}),
         minFoldTokens: input.worklistMinFoldTokens ?? DEFAULT_WORKLIST_MIN_FOLD_TOKENS,
-        budgetTokens: input.worklistBudgetTokens ?? DEFAULT_WORKLIST_BUDGET_TOKENS,
-        ...(input.worklistKeepRecentPairs === undefined ? {} : { keepRecentPairs: input.worklistKeepRecentPairs }),
-        ...(!passive && input.worklistKeepInitialPlan !== undefined ? { keepInitialPlan: input.worklistKeepInitialPlan } : {}),
-        ...(input.worklistEpochTargetTokens !== undefined && input.worklistEpochTargetTokens > 0
-          ? { epochTargetTokens: input.worklistEpochTargetTokens }
+        budgetTokens: input.worklistBudgetTokens ?? DEFAULT_ACTIVE_WORKLIST_BUDGET_TOKENS,
+        backboneMaxTokens: input.worklistBackboneMaxTokens ?? DEFAULT_BACKBONE_MAX_TOKENS,
+        keepRecentPairs: input.worklistKeepRecentPairs ?? DEFAULT_KEEP_RECENT_PAIRS,
+        ...(input.worklistKeepInitialPlan !== undefined ? { keepInitialPlan: input.worklistKeepInitialPlan } : {}),
+        ...(input.worklistHardCapTokens !== undefined && input.worklistHardCapTokens > 0
+          ? { hardCapTokens: input.worklistHardCapTokens }
           : {}),
         ...(input.worklistPinUneditedRead ? { pinUneditedRead: true } : {}),
       },
@@ -107,6 +144,6 @@ export function prepareTeacherWorklistPrompts(options: {
   return {
     teacherSystem,
     rwkvSystemTokens: countTokens(rwkvSystem),
-    reminderTokens: countTokens(POST_TOOL_REMINDER_THINK),
+    reminderTokens: countTokens(`User: ${cleanChatText(POST_TOOL_REMINDER_THINK)}\n\n`),
   }
 }

@@ -6,6 +6,9 @@ import { countTokens } from '../tokenizer.ts'
 import {
   findLatestUneditedReadPair,
   formatFoldedStepsNote,
+  formatStageArchiveNote,
+  historyItemPromptBytes,
+  maskResultInPlace,
   READ_PIN_TOOLS,
   type CallPair,
 } from './fold-pairs.ts'
@@ -61,6 +64,7 @@ export interface ActiveWindowResult {
   readonly totalTokens: number
   readonly checkpointAt?: number
   readonly liveNudge?: string
+  readonly maskedCallIds?: ReadonlySet<string>
 }
 
 export function buildActiveWindow(
@@ -383,4 +387,150 @@ export function buildEpochJumpWindow(
     forcedCutPairCount: cutPairCount,
     forcedPinnedRead: frozenPinnedRead,
   })
+}
+
+export interface InPlaceWindowOptions {
+  readonly baseOverhead: number
+  readonly budgetTokens: number
+  readonly epochTargetTokens: number
+  readonly hardCap: number
+  readonly keepRecentCount: number
+  readonly exemptResultTokens: number
+  readonly emptyThink: boolean
+  readonly cwd?: string
+  readonly fullTok: readonly number[]
+  readonly bareTok: readonly number[]
+  readonly rawResultTok: readonly number[]
+  readonly reminderTokOfResult: (resultItem: Extract<HistoryItem, { kind: 'result' }>) => number
+}
+
+/**
+ * Module 2 (`auto-fold v2`): causal batch in-place observation masking (`budgetTokens -> epochTargetTokens`)
+ * with `< exemptResultTokens` exemption, `keepRecentCount` floor, and git-free Stage Archive at `hardCap`.
+ */
+export function buildInPlaceFoldWindow(
+  history: readonly HistoryItem[],
+  turnStart: number,
+  pairs: readonly CallPair[],
+  opts: InPlaceWindowOptions,
+): ActiveWindowResult {
+  const targetLow = opts.epochTargetTokens > 0 && opts.epochTargetTokens < opts.budgetTokens
+    ? opts.epochTargetTokens
+    : opts.budgetTokens
+  const keepFloor = Math.max(0, opts.keepRecentCount)
+
+  const maskedByResultIdx = new Map<number, { item: Extract<HistoryItem, { kind: 'result' }>; tok: number }>()
+  const pairByResultIdx = new Map<number, CallPair>()
+  for (const pair of pairs) pairByResultIdx.set(pair.resultIndex, pair)
+
+  const getMasked = (pair: CallPair): { item: Extract<HistoryItem, { kind: 'result' }>; tok: number } => {
+    let entry = maskedByResultIdx.get(pair.resultIndex)
+    if (entry !== undefined) return entry
+    const callItem = history[pair.callIndex] as Extract<HistoryItem, { kind: 'call' }>
+    const resultItem = history[pair.resultIndex] as Extract<HistoryItem, { kind: 'result' }>
+    const maskedItem = maskResultInPlace(callItem, resultItem, opts.rawResultTok[pair.resultIndex])
+    const tok = countTokens(historyItemPromptBytes(maskedItem, opts.emptyThink)) + opts.reminderTokOfResult(maskedItem)
+    entry = { item: maskedItem, tok }
+    maskedByResultIdx.set(pair.resultIndex, entry)
+    return entry
+  }
+
+  let archivedCount = 0
+  const maskedCallIndices = new Set<number>()
+  const clearedReasoning = new Set<number>()
+
+  const assembleInPlace = (endIndex: number, pairsSub: readonly CallPair[]): { items: HistoryItem[]; tokens: number } => {
+    const archivedPairs = archivedCount > 0 ? pairsSub.slice(0, archivedCount) : []
+    const archivedIdxSet = new Set<number>()
+    for (const ap of archivedPairs) {
+      archivedIdxSet.add(ap.callIndex)
+      archivedIdxSet.add(ap.resultIndex)
+    }
+    const archiveText = archivedPairs.length > 0 ? formatStageArchiveNote(archivedPairs, history, opts.cwd) : undefined
+    const archiveTok = archiveText !== undefined ? countTokens(`User: ${archiveText}\n\n`) : 0
+    const items: HistoryItem[] = []
+    let tokens = opts.baseOverhead
+    let archiveInserted = false
+
+    for (let idx = turnStart; idx < endIndex; idx++) {
+      if (archivedIdxSet.has(idx)) continue
+      const raw = history[idx]!
+      if (!archiveInserted && archiveText !== undefined && (raw.kind === 'call' || raw.kind === 'assistant')) {
+        items.push({ kind: 'note', text: archiveText })
+        tokens += archiveTok
+        archiveInserted = true
+      }
+      const pair = raw.kind === 'result' ? pairByResultIdx.get(idx) : undefined
+      if (pair !== undefined && maskedCallIndices.has(pair.callIndex)) {
+        const m = getMasked(pair)
+        items.push(m.item)
+        tokens += m.tok
+      } else if ((raw.kind === 'call' || raw.kind === 'assistant') && raw.reasoning && clearedReasoning.has(idx)) {
+        items.push({ ...raw, reasoning: undefined })
+        tokens += opts.bareTok[idx]!
+      } else {
+        items.push(raw)
+        tokens += opts.fullTok[idx]!
+      }
+    }
+    if (!archiveInserted && archiveText !== undefined) {
+      items.push({ kind: 'note', text: archiveText })
+      tokens += archiveTok
+    }
+    return { items, tokens }
+  }
+
+  for (let k = 0; k < pairs.length; k++) {
+    const pairsSub = pairs.slice(0, k + 1)
+    const endAtK = k === pairs.length - 1 ? history.length : pairs[k]!.resultIndex + 1
+    let cur = assembleInPlace(endAtK, pairsSub)
+    if (cur.tokens > opts.budgetTokens) {
+      const maskLimit = pairsSub.length - keepFloor
+      let changed = false
+      for (let pIdx = archivedCount; pIdx < maskLimit; pIdx++) {
+        if (cur.tokens <= targetLow) break
+        const pair = pairsSub[pIdx]!
+        if (maskedCallIndices.has(pair.callIndex)) continue
+        if (opts.rawResultTok[pair.resultIndex]! < opts.exemptResultTokens) continue
+        const maskedTok = getMasked(pair).tok
+        const saved = opts.fullTok[pair.resultIndex]! - maskedTok
+        if (saved <= 0) continue
+        maskedCallIndices.add(pair.callIndex)
+        cur.tokens -= saved
+        changed = true
+      }
+      if (changed) cur = assembleInPlace(endAtK, pairsSub)
+    }
+    if (!opts.emptyThink && cur.tokens > opts.hardCap) {
+      for (let idx = turnStart; idx < endAtK; idx++) {
+        if (cur.tokens <= opts.hardCap) break
+        const item = history[idx]!
+        if ((item.kind === 'call' || item.kind === 'assistant') && item.reasoning && !clearedReasoning.has(idx)) {
+          clearedReasoning.add(idx)
+          cur = assembleInPlace(endAtK, pairsSub)
+        }
+      }
+    }
+    while (cur.tokens > opts.hardCap && (pairsSub.length - archivedCount) > 1) {
+      const droppedPair = pairsSub[archivedCount]!
+      archivedCount++
+      maskedCallIndices.delete(droppedPair.callIndex)
+      cur = assembleInPlace(endAtK, pairsSub)
+    }
+  }
+
+  const finalBuilt = assembleInPlace(history.length, pairs)
+  const duplicateFrom = archivedCount > 0 ? pairs[archivedCount - 1]!.resultIndex + 1 : turnStart
+  const maskedCallIds = new Set<string>()
+  for (const callIdx of maskedCallIndices) {
+    const callItem = history[callIdx]
+    if (callItem?.kind === 'call') maskedCallIds.add(callItem.id)
+  }
+
+  return {
+    items: finalBuilt.items,
+    duplicateFrom,
+    totalTokens: finalBuilt.tokens,
+    ...(maskedCallIds.size > 0 ? { maskedCallIds } : {}),
+  }
 }

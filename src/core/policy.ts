@@ -3,6 +3,7 @@
 // runner_turn.go, runner_answer_fallback.go). DSH executes the tools and keeps
 // the history, so the turn state is rebuilt from that history on every request.
 
+import { FOLDED_OUTPUT_MARKER } from './defaults.ts'
 import { recordToolCall, toolResponse, type Entry } from './prompt.ts'
 import type { ParseErrorKind } from './parse.ts'
 import type { Args, WireTool } from './tools.ts'
@@ -221,6 +222,12 @@ export interface TurnOptions {
    * turn's start, so maxSteps is unchanged.
    */
   readonly duplicateFrom?: number
+  /**
+   * Tool-call IDs whose corresponding result was masked in-place in the active
+   * window (`auto-fold v2`). Re-reading an in-place-masked file is allowed,
+   * while unmasked short results keep duplicate-call protection.
+   */
+  readonly maskedCallIds?: ReadonlySet<string>
 }
 
 export function analyzeTurn(history: readonly HistoryItem[], options: TurnOptions = {}): TurnState {
@@ -253,7 +260,8 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
     if (index < gateStart) continue
     if (item.ok) {
       if (mutating) successKeys.clear()
-      successKeys.add(key)
+      const maskedInPlace = item.text.startsWith(FOLDED_OUTPUT_MARKER) || (options.maskedCallIds?.has(item.id) ?? false)
+      if (!maskedInPlace) successKeys.add(key)
       failedEpochs.delete(key)
       successfulCalls++
       consecutiveFailedTool = ''
@@ -279,6 +287,8 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
     consecutiveFailures,
   }
 }
+
+export const analyseHistory = analyzeTurn
 
 export interface TranscriptOptions {
   readonly tools: readonly WireTool[]
