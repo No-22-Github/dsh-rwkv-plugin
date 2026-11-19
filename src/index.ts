@@ -7,9 +7,11 @@ import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { RwkvAdapter, type AdapterSettings, type ModelConfig } from './adapter.ts'
 import { DEFAULT_HARNESS } from './core/agent.ts'
+import type { EditMode, HistoryMode } from './core/defaults.ts'
 import type { ToolMode, ToolNames } from './core/tools.ts'
 import { applyResultBudget } from './result-budget.ts'
 import { handleServerRoute, handleTraceRoute } from './routes.ts'
+import { resolveHistoryModeConfig } from './session-setup.ts'
 import { applyTolerantEdit } from './tolerant-edit.ts'
 import { TraceLocation } from './traces.ts'
 
@@ -45,8 +47,8 @@ export interface Settings {
   loopGuard: boolean
   outputRepairs: boolean
   guards: boolean
-  editMode: 'tolerant' | 'line-edit' | 'literal'
-  historyMode: 'auto-fold' | 'full' | 'relay' | 'worklist'
+  editMode: EditMode
+  historyMode: HistoryMode
   relayBudgetTokens: number
   relayCardMaxTokens: number
   worklistMinFoldTokens: number
@@ -173,22 +175,16 @@ function settingsOf(config: Config): AdapterSettings {
     currentDate: config.currentDate.get(),
     ...config.timeZone.get() ? { timeZone: config.timeZone.get() } : {},
     loopGuard: config.loopGuard.get(),
-    ...config.historyMode.get() === 'relay'
-      ? { relay: { budgetTokens: config.relayBudgetTokens.get(), cardMaxTokens: config.relayCardMaxTokens.get() } }
-      : {},
-    ...config.historyMode.get() === 'auto-fold' || config.historyMode.get() === 'worklist'
-      ? {
-          worklist: {
-            passive: config.historyMode.get() === 'auto-fold',
-            ...(config.historyMode.get() === 'auto-fold' ? { systemGuidance: false } : {}),
-            minFoldTokens: config.worklistMinFoldTokens.get(),
-            budgetTokens: config.worklistBudgetTokens.get(),
-            keepRecentPairs: config.worklistKeepRecentPairs.get(),
-            ...(config.worklistEpochTargetTokens.get() > 0 ? { epochTargetTokens: config.worklistEpochTargetTokens.get() } : {}),
-            ...(config.worklistPinUneditedRead.get() ? { pinUneditedRead: true } : {}),
-          },
-        }
-      : {},
+    ...resolveHistoryModeConfig({
+      historyMode: config.historyMode.get(),
+      relayBudgetTokens: config.relayBudgetTokens.get(),
+      relayCardMaxTokens: config.relayCardMaxTokens.get(),
+      worklistMinFoldTokens: config.worklistMinFoldTokens.get(),
+      worklistBudgetTokens: config.worklistBudgetTokens.get(),
+      worklistKeepRecentPairs: config.worklistKeepRecentPairs.get(),
+      worklistEpochTargetTokens: config.worklistEpochTargetTokens.get(),
+      worklistPinUneditedRead: config.worklistPinUneditedRead.get(),
+    }),
     ...config.recordTraces.get() ? { traces: traceLocationOf(config) } : {},
     log: message => console.log(`[rwkv-llm] ${message}`),
   }

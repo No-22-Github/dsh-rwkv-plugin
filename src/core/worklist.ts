@@ -1,435 +1,102 @@
-// Stateful work list (`todo_plan` + `todo_update`): ordered subgoals with a
-// per-item `note` slot that carries established facts across steps.
+// Context-folding orchestrator shared by `auto-fold` (`passive: true`) and
+// active stateful worklist (`todo_plan` + `todo_update`).
 //
-// Unlike turn-relay (which pauses work at a token wall to generate an
-// out-of-band six-section prose card stored in a sidecar file), every plan and
-// item update here is an ordinary tool call in the DSH message history:
-//   - each `todo_plan` / `todo_update` result echoes the full current work list
-//     (including all earlier notes);
-//   - a `todo_update` carrying a non-empty `note` acts as a semantic checkpoint:
-//     earlier intermediate tool calls/results in the current turn are folded
-//     away, leaving that `todo_update` call/result pair as the head of the
-//     active window;
-//   - completed earlier user turns keep only the user prompt, the turn's final
-//     work list snapshot (when used), and the assistant's final reply.
+// Submodules:
+//   - `todo-state.ts`: active `todo_plan` / `todo_update` state transitions & UI projection
+//   - `fold-pairs.ts`: pair extraction, completed-turn backbone, `foldedUnreadPaths`, unedited-read pinning
+//   - `fold-window.ts`: active-turn window assembly, reminder replay, sliding/epoch cuts, hardCap safety valve
 //
 // Shared by the student plugin (`decideStep`), the teacher overlay (`teacher.ts`)
 // and the training exporter (`export.ts`) so prompt bytes match everywhere.
 
 import { countTokens } from '../tokenizer.ts'
-import { currentTurnStart, transcriptEntries, type HistoryItem, type TranscriptOptions } from './policy.ts'
-import { collapseBlock, recordToolCall, toolResponse, type Entry } from './prompt.ts'
 import {
-  isWorklistTool,
-  normalizeWorklistStatus,
-  parsePlanItems,
-  sanitizeWorklistField as sanitizeField,
-  TODO_PLAN_TOOL,
-  TODO_UPDATE_TOOL,
-  WORKLIST_TOOLS,
-  type WorklistStatus,
-} from './tools.ts'
+  DEFAULT_BACKBONE_MAX_TOKENS,
+  DEFAULT_KEEP_RECENT_PAIRS,
+  DEFAULT_WORKLIST_BUDGET_TOKENS,
+  DEFAULT_WORKLIST_HARD_SLACK_TOKENS,
+  DEFAULT_WORKLIST_MIN_FOLD_TOKENS,
+} from './defaults.ts'
+import {
+  collectPairs,
+  foldCompletedTurn,
+  foldedUnreadPaths,
+  historyItemPromptBytes,
+  itemsTokens,
+} from './fold-pairs.ts'
+import {
+  buildActiveWindow,
+  buildEpochJumpWindow,
+  CHECKPOINT_NUDGE_COOLDOWN_STEPS,
+  INIT_NUDGE_COOLDOWN_STEPS,
+  nudgeTextOf,
+  WORKLIST_CHECKPOINT_NUDGE,
+  WORKLIST_INIT_NUDGE,
+  type ActiveWindowResult,
+  type InternalNudge,
+  type RecordedWorklistNudge,
+  type WorklistNudgeKind,
+} from './fold-window.ts'
+import { transcriptEntries, type HistoryItem, type TranscriptOptions } from './policy.ts'
+import type { Entry } from './prompt.ts'
+import { isWorklistTool } from './todo-state.ts'
 
 export {
+  DEFAULT_BACKBONE_MAX_TOKENS,
+  DEFAULT_KEEP_RECENT_PAIRS,
+  DEFAULT_WORKLIST_BUDGET_TOKENS,
+  DEFAULT_WORKLIST_HARD_SLACK_TOKENS,
+  DEFAULT_WORKLIST_MIN_FOLD_TOKENS,
+}
+
+export {
+  applyTodoPlan,
+  applyTodoUpdate,
+  formatWorklist,
+  isNotedTodoUpdateCall,
   isWorklistTool,
   normalizeWorklistStatus,
   parsePlanItems,
+  projectNativeTodos,
   TODO_PLAN_TOOL,
   TODO_UPDATE_TOOL,
   WORKLIST_TOOLS,
+  type TodoUpdateInput,
+  type WorklistItem,
   type WorklistStatus,
-}
+} from './todo-state.ts'
 
-export interface WorklistItem {
-  readonly id: number
-  readonly content: string
-  readonly status: WorklistStatus
-  readonly note?: string
+export { foldedUnreadPaths }
+
+export {
+  nudgeTextOf,
+  WORKLIST_CHECKPOINT_NUDGE,
+  WORKLIST_INIT_NUDGE,
+  type RecordedWorklistNudge,
+  type WorklistNudgeKind,
 }
 
 export interface WorklistOptions {
-  /**
-   * Minimum RWKV prompt tokens required before a noted `todo_update` triggers
-   * history folding (low watermark). Below this threshold, `todo_update` still
-   * updates the list and notes without folding earlier steps. Default: 8000
-   * in plugin config (0 when omitted in low-level `foldWorklist`).
-   */
+  /** Minimum RWKV prompt tokens required before folding kicks in (default: 8000 in plugin config). */
   readonly minFoldTokens?: number
-  /**
-   * Total RWKV token budget (system prompt + folded history + step reminders)
-   * before nudging the model to checkpoint established facts into `todo_update`
-   * (high watermark). Default: 12000.
-   */
+  /** Total RWKV token high watermark (default: 12000). */
   readonly budgetTokens: number
-  /**
-   * Hard RWKV token safety ceiling. If the model ignores the checkpoint nudge
-   * and keeps reading past this limit, oldest unfolded workspace call/result
-   * pairs are dropped so the prompt never enters collapse territory.
-   * Defaults to `budgetTokens + 3000`.
-   */
+  /** Hard RWKV token safety ceiling (defaults to `budgetTokens + 3000`). */
   readonly hardCapTokens?: number
-  /**
-   * Maximum RWKV tokens kept for completed earlier user turns before dropping
-   * the oldest turns from the conversation backbone. Default: 5000.
-   */
+  /** Maximum RWKV tokens kept for completed earlier user turns (default: 5000). */
   readonly backboneMaxTokens?: number
-  /**
-   * Number of most-recent workspace call/result pairs right before a noted
-   * `todo_update` checkpoint to keep visible so the model retains concrete
-   * workspace evidence instead of waking up in an empty window. Default: 2.
-   */
+  /** Recent workspace call/result pairs kept verbatim across a fold (default: 2). */
   readonly keepRecentPairs?: number
   /** Whether to retain the initial `todo_plan` pair in the folded active turn (default: true). */
   readonly keepInitialPlan?: boolean
   /** Whether to inject `WORKLIST_SYSTEM_GUIDANCE` into the system prompt (default: true). */
   readonly systemGuidance?: boolean
-  /**
-   * Auto-fold (`passive: true`): omit active `todo_*` tools, guidance, and
-   * budget nudges; keep full prior turns until total prompt hits
-   * `minFoldTokens` (default 8000), and deterministically fold oldest in-turn
-   * steps past `budgetTokens` (default 12000) while keeping `keepRecentPairs`.
-   */
+  /** Auto-fold (`passive: true`): omit active `todo_*` tools, guidance, and budget nudges. */
   readonly passive?: boolean
-  /**
-   * Optional epoch-jump target in `auto-fold` (`passive: true`). When > 0 and
-   * < `budgetTokens`, folding only triggers when the prompt exceeds
-   * `budgetTokens` and jumps down to `epochTargetTokens`, keeping the folded
-   * ledger and prefix 100% append-only between epochs (default: 0, disabled).
-   */
+  /** Optional epoch-jump target in `auto-fold` (`passive: true`, default: 0 disabled). */
   readonly epochTargetTokens?: number
-  /**
-   * Pin up to one latest unedited `read` pair (<= 2400 tokens) across a fold
-   * boundary when it fits inside `budgetTokens` (default: false).
-   */
+  /** Pin up to one latest unedited `read` pair (<= 2400 tokens) across a fold boundary (default: false). */
   readonly pinUneditedRead?: boolean
-}
-
-export const DEFAULT_WORKLIST_MIN_FOLD_TOKENS = 8000
-export const DEFAULT_WORKLIST_BUDGET_TOKENS = 12000
-export const DEFAULT_WORKLIST_HARD_SLACK_TOKENS = 3000
-export const DEFAULT_BACKBONE_MAX_TOKENS = 5000
-export const DEFAULT_KEEP_RECENT_PAIRS = 2
-const MAX_SECOND_RECENT_PAIR_TOKENS = 2800
-const MAX_PINNED_UNEDITED_READ_TOKENS = 2400
-const MAX_PRIOR_TURN_FALLBACK_RESULT_CHARS = 1600
-const INIT_NUDGE_COOLDOWN_STEPS = 4
-const CHECKPOINT_NUDGE_COOLDOWN_STEPS = 3
-
-export const WORKLIST_CHECKPOINT_NUDGE =
-  'Context budget reached for the current step. Call `todo_update` once to checkpoint verified facts into a concise `note` (<= 120 words: exact /app/... paths, line ranges, findings, and exit codes; keep `status: "in_progress"` if unfinished, or `"completed"` only if verified), or finish directly if ready to answer.'
-
-export const WORKLIST_INIT_NUDGE =
-  'Context budget reached while exploring this task. If multi-step work remains, call `todo_plan` to list the remaining steps (then checkpoint verified /app/... paths and findings with `todo_update`); if only 1-2 quick steps or the final answer remain, finish directly without `todo_plan`.'
-
-export type WorklistNudgeKind = 'init' | 'checkpoint'
-
-export interface RecordedWorklistNudge {
-  /** Index in `history` of the `result` item immediately after which this reminder triggered. */
-  readonly afterResultIndex: number
-  readonly kind: WorklistNudgeKind
-}
-
-export function nudgeTextOf(kind: WorklistNudgeKind): string {
-  return kind === 'checkpoint' ? WORKLIST_CHECKPOINT_NUDGE : WORKLIST_INIT_NUDGE
-}
-
-/**
- * Apply `todo_plan` to the current turn's list. Completed and dropped items
- * (and their notes) are locked and kept at the top; `rawItems` replaces only
- * the remaining unfinished queue, activating the first unfinished item.
- */
-export function applyTodoPlan(current: readonly WorklistItem[], rawItems: unknown): WorklistItem[] | string {
-  const parsed = parsePlanItems(rawItems)
-  if (parsed === undefined || parsed.length === 0) {
-    return 'items must be a non-empty array of step strings'
-  }
-  const locked = current
-    .filter(item => item.status === 'completed' || item.status === 'dropped')
-    .map((item, idx) => ({ ...item, id: idx + 1 }))
-  const lockedTitles = new Set(locked.map(item => item.content))
-  // If the model re-sent already completed titles at the top of `items`, skip
-  // duplicating them because `locked` already preserves them with their notes.
-  const remaining = parsed.filter(title => !lockedTitles.has(title))
-  if (locked.length === 0 && remaining.length < 2) {
-    return 'todo_plan requires at least 2 steps; execute single-step tasks directly without todo_plan'
-  }
-  if (remaining.length === 0) {
-    return 'todo_plan requires at least 1 new unfinished step after completed items'
-  }
-  if (locked.length + remaining.length > 12) {
-    return `todo_plan accepts at most 12 total items (got ${locked.length + remaining.length}); group micro-actions into coarser subgoals`
-  }
-  const seen = new Set<string>()
-  for (const [idx, title] of remaining.entries()) {
-    if (seen.has(title)) {
-      return `items[${idx}] duplicates ${JSON.stringify(title)}`
-    }
-    seen.add(title)
-  }
-  const tail: WorklistItem[] = remaining.map((content, idx) => ({
-    id: locked.length + idx + 1,
-    content,
-    status: idx === 0 ? 'in_progress' : 'pending',
-  }))
-  return [...locked, ...tail]
-}
-
-export interface TodoUpdateInput {
-  readonly id?: unknown
-  readonly status?: unknown
-  readonly note?: unknown
-  readonly content?: unknown
-}
-
-/**
- * Apply `todo_update` to one item by 1-based `id`. Requires a non-empty `note`
- * when closing an item (`completed` or `dropped`), keeps at most one item
- * `in_progress`, and automatically advances the next `pending` item when the
- * active item finishes.
- */
-export function applyTodoUpdate(
-  current: readonly WorklistItem[],
-  input: TodoUpdateInput,
-): { items: WorklistItem[]; noted: boolean } | string {
-  if (current.length === 0) {
-    return 'no active todo list in this turn; call todo_plan first if this task has multiple subgoals'
-  }
-  const rawId = typeof input.id === 'string' ? Number(input.id.trim()) : input.id
-  if (typeof rawId !== 'number' || !Number.isInteger(rawId) || rawId < 1 || rawId > current.length) {
-    return `id must be an integer between 1 and ${current.length} (got ${JSON.stringify(input.id)})`
-  }
-  const status = normalizeWorklistStatus(input.status)
-  if (status === undefined || status === 'pending') {
-    return 'status must be one of: in_progress, completed, dropped'
-  }
-  const target = current[rawId - 1]!
-  const providedNote = typeof input.note === 'string' ? sanitizeField(input.note) : ''
-  const effectiveNote = providedNote !== '' ? providedNote : target.note
-  if ((status === 'completed' || status === 'dropped') && (!effectiveNote || effectiveNote === '')) {
-    return 'note is required when status is completed or dropped: record concrete findings, exact file paths/lines, applied edits, or test results'
-  }
-  const updatedContent = typeof input.content === 'string' && sanitizeField(input.content) !== ''
-    ? sanitizeField(input.content)
-    : target.content
-
-  const next = current.map((item, index): WorklistItem => {
-    if (index === rawId - 1) {
-      return {
-        id: item.id,
-        content: updatedContent,
-        status,
-        ...effectiveNote ? { note: effectiveNote } : {},
-      }
-    }
-    // Single-active discipline: focusing a later item auto-completes an earlier
-    // active item that already recorded a note, and demotes an unnoted/later one.
-    if (status === 'in_progress' && item.status === 'in_progress') {
-      const autoDone = index < rawId - 1 && Boolean(item.note && item.note.trim() !== '')
-      return { ...item, status: autoDone ? 'completed' : 'pending' }
-    }
-    return item
-  })
-
-  // Auto-advance: when no item is active anymore, promote the next pending item.
-  if (!next.some(item => item.status === 'in_progress')) {
-    const afterIdx = next.findIndex((item, idx) => idx > rawId - 1 && item.status === 'pending')
-    const promoteIdx = afterIdx >= 0 ? afterIdx : next.findIndex(item => item.status === 'pending')
-    if (promoteIdx >= 0) {
-      next[promoteIdx] = { ...next[promoteIdx]!, status: 'in_progress' }
-    }
-  }
-
-  return { items: next, noted: providedNote !== '' }
-}
-
-/** Model-facing rendering returned as the tool output of `todo_plan` and `todo_update`. */
-export function formatWorklist(items: readonly WorklistItem[]): string {
-  const lines = ['Todo list:']
-  for (const item of items) {
-    lines.push(`[${item.id}] (${item.status}) ${item.content}`)
-    if (item.note) lines.push(`  note: ${item.note}`)
-  }
-  return lines.join('\n')
-}
-
-/**
- * Clean single-line projection mirrored onto DSH's native `todo/write` event for
- * the Desktop `TodoPanel` dock (omits long technical notes, and settles lingering
- * `in_progress` spinners to `pending` once `turn/end` fires).
- */
-export function projectNativeTodos(
-  items: readonly WorklistItem[],
-  options?: { readonly turnEnded?: boolean },
-): { content: string; status: 'pending' | 'in_progress' | 'completed' }[] {
-  const settleActive = options?.turnEnded === true
-  return items.map(item => ({
-    content: item.status === 'dropped'
-      ? `[${item.id}] [已跳过] ${item.content}`
-      : `[${item.id}] ${item.content}`,
-    status: item.status === 'dropped'
-      ? 'completed'
-      : (settleActive && item.status === 'in_progress' ? 'pending' : item.status),
-  }))
-}
-
-/** Rendering of one HistoryItem as prompt bytes, for exact RWKV token counting. */
-function historyItemPromptBytes(item: HistoryItem, historyEmptyThink = false): string {
-  switch (item.kind) {
-    case 'call': {
-      const action = recordToolCall(item.name, item.args)
-      const think = historyEmptyThink ? '' : collapseBlock(item.reasoning ?? '')
-      return `Assistant: <think>${think}</think>${action}\n\n`
-    }
-    case 'assistant': {
-      const action = collapseBlock(item.text)
-      const think = historyEmptyThink ? '' : collapseBlock(item.reasoning ?? '')
-      return `Assistant: <think>${think}</think>${action}\n\n`
-    }
-    case 'result':
-      return `User: ${toolResponse(item.name, item.ok, item.text)}\n\n`
-    default:
-      return `User: ${item.text}\n\n`
-  }
-}
-
-function itemsTokens(items: readonly HistoryItem[], historyEmptyThink = false): number {
-  let total = 0
-  for (const item of items) total += countTokens(historyItemPromptBytes(item, historyEmptyThink))
-  return total
-}
-
-/** Whether `callItem` is a `todo_update` that wrote a non-empty `note`. */
-export function isNotedTodoUpdateCall(item: HistoryItem): boolean {
-  if (item.kind !== 'call' || item.name !== TODO_UPDATE_TOOL) return false
-  const note = item.args.note ?? item.args.notes ?? item.args.summary ?? item.args.findings ?? item.args.conclusion
-  return typeof note === 'string' && sanitizeField(note) !== ''
-}
-
-interface CallPair {
-  readonly callIndex: number
-  readonly resultIndex: number
-  readonly name: string
-  readonly ok: boolean
-  readonly notedUpdate: boolean
-}
-
-/** Completed (call, result) pairs inside `history[from..to)`. */
-function collectPairs(history: readonly HistoryItem[], from: number, to: number): CallPair[] {
-  const calls = new Map<string, { index: number; item: Extract<HistoryItem, { kind: 'call' }> }>()
-  const pairs: CallPair[] = []
-  for (let index = from; index < to; index++) {
-    const item = history[index]!
-    if (item.kind === 'call') {
-      calls.set(item.id, { index, item })
-    } else if (item.kind === 'result') {
-      const match = calls.get(item.id)
-      if (match !== undefined) {
-        pairs.push({
-          callIndex: match.index,
-          resultIndex: index,
-          name: match.item.name,
-          ok: item.ok,
-          notedUpdate: item.ok && isNotedTodoUpdateCall(match.item),
-        })
-      }
-    }
-  }
-  return pairs
-}
-
-function summarizeCallPair(
-  callItem: Extract<HistoryItem, { kind: 'call' }>,
-  resultItem: Extract<HistoryItem, { kind: 'result' }>,
-): string {
-  const args = callItem.args
-  const rawKey = args.file_path ?? args.path ?? args.pattern ?? args.command ?? args.url ?? args.query
-  let target = ''
-  if (typeof rawKey === 'string' && rawKey.trim() !== '') {
-    const clean = rawKey.trim().replace(/\s+/g, ' ')
-    target = clean.length > 80 ? `${clean.slice(0, 77)}...` : clean
-    if (callItem.name === 'edit_lines' && args.start_line !== undefined && args.end_line !== undefined) {
-      target = `${target}:${String(args.start_line)}-${String(args.end_line)}`
-    }
-  }
-  let outcome = resultItem.ok ? 'ok' : 'error'
-  if (resultItem.ok && callItem.name === 'bash') {
-    const m = /\[exit code: (\d+)\]/.exec(resultItem.text)
-    outcome = m ? `exit ${m[1]}` : 'exit 0'
-  }
-  return `- ${callItem.name}${target ? ` ${target}` : ''} -> ${outcome}`
-}
-
-function formatFoldedStepsNote(pairs: readonly CallPair[], history: readonly HistoryItem[]): string {
-  const lines = pairs.map(pair =>
-    summarizeCallPair(
-      history[pair.callIndex] as Extract<HistoryItem, { kind: 'call' }>,
-      history[pair.resultIndex] as Extract<HistoryItem, { kind: 'result' }>,
-    ),
-  )
-  return `[Earlier workspace steps in this turn (raw outputs folded; re-read a file before calling edit if its read output is no longer shown):\n${lines.join('\n')}]`
-}
-
-function compactPriorResult(item: Extract<HistoryItem, { kind: 'result' }>): HistoryItem {
-  if (item.text.length <= MAX_PRIOR_TURN_FALLBACK_RESULT_CHARS) return item
-  const trimmed = item.text.trim()
-  if (trimmed.startsWith('{') || trimmed.startsWith('[')) return item
-  const head = 1100
-  const tail = 400
-  return {
-    ...item,
-    text: `${item.text.slice(0, head)}\n...(prior-turn output folded)...\n${item.text.slice(item.text.length - tail)}`,
-  }
-}
-
-/**
- * Fold one finished earlier turn `[from, to)` down to its user/final backbone:
- * - when a worklist was used, keep its final `todo_plan`/`todo_update` snapshot;
- * - when NO worklist was used (unplanned fallback), always keep the last real
- *   workspace call/result pair (plus a 1-line-per-step ledger of earlier pairs)
- *   so subsequent turns retain concrete workspace context and tool-calling shape.
- */
-function foldCompletedTurn(history: readonly HistoryItem[], from: number, to: number): HistoryItem[] {
-  const pairs = collectPairs(history, from, to)
-  const lastWorklist = [...pairs].reverse().find(pair => pair.ok && isWorklistTool(pair.name))
-  const fallbackPair = lastWorklist === undefined
-    ? ([...pairs].reverse().find(pair => pair.ok) ?? pairs[pairs.length - 1])
-    : undefined
-  const earlierUnplannedPairs = lastWorklist === undefined && fallbackPair !== undefined
-    ? pairs.filter(pair => pair.callIndex !== fallbackPair.callIndex)
-    : []
-  const hasFinal = history.slice(from, to).some(item => item.kind === 'assistant')
-
-  const keptIndices = new Set<number>()
-  for (let index = from; index < to; index++) {
-    const kind = history[index]!.kind
-    if (kind === 'user' || kind === 'note' || kind === 'assistant') keptIndices.add(index)
-  }
-  if (lastWorklist !== undefined) {
-    keptIndices.add(lastWorklist.callIndex)
-    keptIndices.add(lastWorklist.resultIndex)
-  } else if (fallbackPair !== undefined) {
-    keptIndices.add(fallbackPair.callIndex)
-    keptIndices.add(fallbackPair.resultIndex)
-  }
-
-  const out: HistoryItem[] = []
-  let insertedLedger = false
-  for (let index = from; index < to; index++) {
-    if (!keptIndices.has(index)) continue
-    if (!insertedLedger && earlierUnplannedPairs.length > 0 && fallbackPair !== undefined && index === fallbackPair.callIndex) {
-      out.push({ kind: 'note', text: formatFoldedStepsNote(earlierUnplannedPairs, history) })
-      insertedLedger = true
-    }
-    const item = history[index]!
-    if (hasFinal && fallbackPair !== undefined && index === fallbackPair.resultIndex && item.kind === 'result') {
-      out.push(compactPriorResult(item))
-    } else if ((item.kind === 'call' || item.kind === 'assistant') && item.reasoning) {
-      out.push({ ...item, reasoning: undefined })
-    } else {
-      out.push(item)
-    }
-  }
-  return out
 }
 
 export interface FoldWorklistInput {
@@ -461,453 +128,42 @@ export interface FoldWorklistInput {
 }
 
 export interface WorklistFoldResult {
-  /** Folded history items (valid alternating sequence for both RWKV and OpenAI messages, including non-withdrawn reminder notes). */
   readonly items: HistoryItem[]
-  /** History index in the ORIGINAL `history` from which duplicate/failure gates start. */
   readonly duplicateFrom: number
-  /** Estimated total RWKV prompt tokens (system + folded items + step reminder). */
   readonly promptTokens: number
-  /** Live budget reminder attached at the tail of `items` for this step; undefined when no new reminder triggered on this step. */
   readonly nudge?: string
-  /** All budget reminders triggered in the active turn up to this step (for deterministic export replay). */
   readonly nudges?: readonly RecordedWorklistNudge[]
-  /** Original history index of the active checkpoint `todo_update` call, if one folded the current turn. */
   readonly checkpointAt?: number
-  /** Normalized file paths whose earlier read/write output was folded out without a subsequent verbatim read/write in `items`. */
   readonly foldedUnread: readonly string[]
 }
 
-const READ_WRITE_TOOLS: ReadonlySet<string> = new Set(['read', 'read_file', 'write', 'write_file'])
-const READ_PIN_TOOLS: ReadonlySet<string> = new Set(['read', 'read_file'])
-const WRITE_PIN_TOOLS: ReadonlySet<string> = new Set(['edit', 'edit_file', 'edit_lines', 'write', 'write_file'])
-const PRIOR_TURN_FOLDED_MARKER = '...(prior-turn output folded)...'
-
-function normalizePosixPath(raw: string): string {
-  const isAbs = raw.startsWith('/')
-  const parts: string[] = []
-  for (const part of raw.split('/')) {
-    if (part === '' || part === '.') continue
-    if (part === '..') {
-      if (parts.length > 0 && parts[parts.length - 1] !== '..') parts.pop()
-      else if (!isAbs) parts.push('..')
-      continue
-    }
-    parts.push(part)
-  }
-  if (isAbs) return `/${parts.join('/')}`
-  return parts.length > 0 ? parts.join('/') : '.'
+export interface WorklistEntryOptions extends TranscriptOptions {
+  readonly systemTokens: number
+  readonly minFoldTokens?: number
+  readonly budgetTokens: number
+  readonly hardCapTokens?: number
+  readonly backboneMaxTokens?: number
+  readonly keepRecentPairs?: number
+  readonly keepInitialPlan?: boolean
+  readonly historyEmptyThink?: boolean
+  readonly recordedNudges?: readonly RecordedWorklistNudge[]
+  readonly forceNudge?: boolean
+  readonly passive?: boolean
+  readonly epochTargetTokens?: number
+  readonly pinUneditedRead?: boolean
+  readonly cwd?: string
 }
 
-function canonicalToolTarget(raw: unknown, cwd?: string): string | undefined {
-  if (typeof raw !== 'string') return undefined
-  const trimmed = raw.trim()
-  if (trimmed === '') return undefined
-  if (trimmed.startsWith('/')) return normalizePosixPath(trimmed)
-  if (cwd !== undefined && cwd.trim() !== '') {
-    const base = cwd.trim().replace(/\/+$/, '') || '/'
-    return normalizePosixPath(`${base}/${trimmed}`)
-  }
-  return normalizePosixPath(trimmed)
-}
-
-/**
- * Files whose earlier successful `read` or `write` output was folded out of
- * `foldedItems` without a subsequent verbatim `read` or `write` remaining in
- * the active window.
- */
-export function foldedUnreadPaths(
+function foldPriorTurns(
   history: readonly HistoryItem[],
-  foldedItems: readonly HistoryItem[],
-  cwd?: string,
-): string[] {
-  const everObserved = new Set<string>()
-  for (const pair of collectPairs(history, 0, history.length)) {
-    if (!pair.ok || !READ_WRITE_TOOLS.has(pair.name)) continue
-    const callItem = history[pair.callIndex] as Extract<HistoryItem, { kind: 'call' }>
-    const target = canonicalToolTarget(callItem.args.file_path ?? callItem.args.path, cwd)
-    if (target !== undefined) everObserved.add(target)
-  }
-  if (everObserved.size === 0) return []
-
-  const visibleInWindow = new Set<string>()
-  for (const pair of collectPairs(foldedItems, 0, foldedItems.length)) {
-    if (!pair.ok || !READ_WRITE_TOOLS.has(pair.name)) continue
-    const callItem = foldedItems[pair.callIndex] as Extract<HistoryItem, { kind: 'call' }>
-    const resultItem = foldedItems[pair.resultIndex] as Extract<HistoryItem, { kind: 'result' }>
-    if ((pair.name === 'read' || pair.name === 'read_file') && resultItem.text.includes(PRIOR_TURN_FOLDED_MARKER)) {
-      continue
-    }
-    const target = canonicalToolTarget(callItem.args.file_path ?? callItem.args.path, cwd)
-    if (target !== undefined) visibleInWindow.add(target)
-  }
-
-  return [...everObserved].filter(path => !visibleInWindow.has(path))
-}
-
-function pairTargetPath(pair: CallPair, history: readonly HistoryItem[], cwd?: string): string | undefined {
-  const item = history[pair.callIndex]
-  if (item?.kind !== 'call') return undefined
-  return canonicalToolTarget(item.args.file_path ?? item.args.path, cwd)
-}
-
-/**
- * Find the most recent successful `read` pair among `foldedPairs` that has not
- * been followed by a write, fits within `MAX_PINNED_UNEDITED_READ_TOKENS`, and
- * is not already superseded by a read/write on the same path in `activePairs`.
- */
-function findLatestUneditedReadPair(
-  foldedPairs: readonly CallPair[],
-  history: readonly HistoryItem[],
-  pairTokens: (pair: CallPair) => number,
-  cwd: string | undefined,
-  activePairs: readonly CallPair[],
-): CallPair | undefined {
-  let candidate: CallPair | undefined
-  for (let i = foldedPairs.length - 1; i >= 0; i--) {
-    const pair = foldedPairs[i]!
-    if (pair.ok && WRITE_PIN_TOOLS.has(pair.name)) return undefined
-    if (pair.ok && READ_PIN_TOOLS.has(pair.name) && pairTargetPath(pair, history, cwd) !== undefined) {
-      if (pairTokens(pair) > MAX_PINNED_UNEDITED_READ_TOKENS) return undefined
-      candidate = pair
-      break
-    }
-  }
-  if (candidate === undefined) return undefined
-  const target = pairTargetPath(candidate, history, cwd)
-  const superseded = activePairs.some(pair =>
-    pair.ok
-    && (READ_PIN_TOOLS.has(pair.name) || WRITE_PIN_TOOLS.has(pair.name))
-    && pairTargetPath(pair, history, cwd) === target,
-  )
-  return superseded ? undefined : candidate
-}
-
-interface InternalNudge extends RecordedWorklistNudge {
-  readonly pairIndex: number
-}
-
-interface ActiveWindowResult {
-  readonly items: HistoryItem[]
-  readonly duplicateFrom: number
-  readonly totalTokens: number
-  readonly checkpointAt?: number
-  readonly liveNudge?: string
-}
-
-function buildActiveWindow(
-  history: readonly HistoryItem[],
+  userStarts: readonly number[],
   turnStart: number,
-  endIndex: number,
-  pairsSub: readonly CallPair[],
-  nudges: readonly InternalNudge[],
-  activeCheckpoints: ReadonlySet<number>,
-  options: {
-    readonly baseOverhead: number
-    readonly budgetTokens: number
-    readonly hardCap: number
-    readonly keepRecentCount: number
-    readonly keepInitialPlan: boolean
-    readonly emptyThink: boolean
-    readonly emitLiveNudge: boolean
-    readonly passive: boolean
-    readonly pinUneditedRead: boolean
-    readonly cwd?: string
-    readonly fullTok: readonly number[]
-    readonly bareTok: readonly number[]
-    readonly forcedCutPairCount?: number
-    readonly forcedPinnedRead?: CallPair
-  },
-): ActiveWindowResult {
-  const lastCheckpoint = [...pairsSub].reverse().find(pair => pair.notedUpdate && activeCheckpoints.has(pair.callIndex))
-  const firstPlanPair = pairsSub.find(pair => pair.ok && pair.name === TODO_PLAN_TOOL)
-  const unclosedPlanPair = lastCheckpoint === undefined
-    ? [...pairsSub].reverse().find(pair => pair.ok && isWorklistTool(pair.name))
-    : undefined
-
-  let currentIndices: number[] = []
-  let duplicateFrom = turnStart
-  let checkpointAt: number | undefined
-
-  if (lastCheckpoint !== undefined) {
-    checkpointAt = lastCheckpoint.callIndex
-    const preWs = pairsSub.filter(pair => pair.callIndex < lastCheckpoint.callIndex && !isWorklistTool(pair.name))
-    const keptTail: CallPair[] = []
-    if (options.keepRecentCount >= 1 && preWs.length >= 1) {
-      const lastWs = preWs[preWs.length - 1]!
-      keptTail.unshift(lastWs)
-      if (options.keepRecentCount >= 2 && preWs.length >= 2) {
-        const prevWs = preWs[preWs.length - 2]!
-        const tailTokens = options.fullTok[prevWs.callIndex]! + options.fullTok[prevWs.resultIndex]!
-          + options.fullTok[lastWs.callIndex]! + options.fullTok[lastWs.resultIndex]!
-        if (tailTokens <= MAX_SECOND_RECENT_PAIR_TOKENS) {
-          keptTail.unshift(prevWs)
-        }
-      }
-    }
-    duplicateFrom = keptTail.length > 0 ? keptTail[0]!.callIndex : lastCheckpoint.resultIndex + 1
-
-    const keepPreIndices = new Set<number>()
-    if (options.keepInitialPlan && firstPlanPair !== undefined && firstPlanPair.callIndex < lastCheckpoint.callIndex) {
-      keepPreIndices.add(firstPlanPair.callIndex)
-      keepPreIndices.add(firstPlanPair.resultIndex)
-    }
-    for (const pair of keptTail) {
-      keepPreIndices.add(pair.callIndex)
-      keepPreIndices.add(pair.resultIndex)
-    }
-    let pinnedPreRead: CallPair | undefined
-    if (options.pinUneditedRead && options.keepRecentCount >= 1 && !keptTail.some(pair => pair.ok && READ_PIN_TOOLS.has(pair.name))) {
-      const preFolded = preWs.filter(pair => !keepPreIndices.has(pair.callIndex))
-      const activeAtCheckpoint = pairsSub.filter(pair => keepPreIndices.has(pair.callIndex) || pair.callIndex >= lastCheckpoint.callIndex)
-      pinnedPreRead = findLatestUneditedReadPair(
-        preFolded,
-        history,
-        pair => options.bareTok[pair.callIndex]! + options.bareTok[pair.resultIndex]!,
-        options.cwd,
-        activeAtCheckpoint,
-      )
-      if (pinnedPreRead !== undefined) {
-        keepPreIndices.add(pinnedPreRead.callIndex)
-        keepPreIndices.add(pinnedPreRead.resultIndex)
-      }
-    }
-    for (let i = turnStart; i < lastCheckpoint.callIndex; i++) {
-      const kind = history[i]!.kind
-      if (kind === 'user' || kind === 'note' || keepPreIndices.has(i)) {
-        currentIndices.push(i)
-      }
-    }
-    for (let i = lastCheckpoint.callIndex; i < endIndex; i++) {
-      currentIndices.push(i)
-    }
-  } else {
-    for (let i = turnStart; i < endIndex; i++) currentIndices.push(i)
-  }
-
-  let keptSet = new Set<number>(currentIndices)
-  const clearedReasoning = new Set<number>()
-
-  // Discontinuous anchor hygiene: when `firstPlanPair` is pinned across a folded
-  // gap after it, clear its stale step-1 reasoning so teacher/student models do
-  // not template-copy that opening CoT prefix across dozens of later steps, nor
-  // retain orphan references to pre-plan exploration.
-  if (firstPlanPair !== undefined && keptSet.has(firstPlanPair.callIndex)) {
-    const planIdx = pairsSub.indexOf(firstPlanPair)
-    if (planIdx >= 0 && planIdx + 1 < pairsSub.length && !keptSet.has(pairsSub[planIdx + 1]!.callIndex)) {
-      clearedReasoning.add(firstPlanPair.callIndex)
-    }
-  }
-  for (const pair of pairsSub) {
-    if (pair === firstPlanPair || !keptSet.has(pair.callIndex)) continue
-    const idx = pairsSub.indexOf(pair)
-    if (idx >= 0 && idx + 1 < pairsSub.length && !keptSet.has(pairsSub[idx + 1]!.callIndex)) {
-      clearedReasoning.add(pair.callIndex)
-    }
-  }
-
-  const protectedCallIndices = new Set<number>()
-  if (lastCheckpoint !== undefined) protectedCallIndices.add(lastCheckpoint.callIndex)
-  if (unclosedPlanPair !== undefined) protectedCallIndices.add(unclosedPlanPair.callIndex)
-  if (firstPlanPair !== undefined) protectedCallIndices.add(firstPlanPair.callIndex)
-
-  const droppedByHardCap: CallPair[] = []
-  const nudgeTokCache = {
-    init: countTokens(`User: ${WORKLIST_INIT_NUDGE}\n\n`),
-    checkpoint: countTokens(`User: ${WORKLIST_CHECKPOINT_NUDGE}\n\n`),
-  }
-
-  const assemble = (): { items: HistoryItem[]; tokens: number; liveNudge?: string } => {
-    const out: HistoryItem[] = []
-    let tok = options.baseOverhead
-    let liveNudge: string | undefined
-    let ledgerInserted = false
-    const ledgerText = droppedByHardCap.length > 0 ? formatFoldedStepsNote(droppedByHardCap, history) : undefined
-
-    const byAfterResult = new Map<number, InternalNudge>()
-    const byBeforeNextCall = new Map<number, InternalNudge>()
-    for (const n of nudges) {
-      if (n.pairIndex === pairsSub.length - 1) {
-        if (keptSet.has(n.afterResultIndex)) byAfterResult.set(n.afterResultIndex, n)
-      } else if (n.pairIndex + 1 < pairsSub.length) {
-        const nextCallIdx = pairsSub[n.pairIndex + 1]!.callIndex
-        if (!keptSet.has(nextCallIdx)) continue
-        if (keptSet.has(n.afterResultIndex)) {
-          byAfterResult.set(n.afterResultIndex, n)
-        } else {
-          const nextItem = history[nextCallIdx]!
-          if (nextItem.kind === 'call' && Boolean(nextItem.reasoning) && !clearedReasoning.has(nextCallIdx)) {
-            byBeforeNextCall.set(nextCallIdx, n)
-          }
-        }
-      }
-    }
-
-    const hasAssistantAfter = (idx: number): boolean => {
-      for (let m = idx + 1; m < endIndex; m++) {
-        if (keptSet.has(m) && history[m]!.kind === 'assistant') return true
-      }
-      return false
-    }
-
-    for (const idx of currentIndices) {
-      const raw = history[idx]!
-      if (!ledgerInserted && ledgerText !== undefined && (raw.kind === 'call' || raw.kind === 'assistant')) {
-        out.push({ kind: 'note', text: ledgerText })
-        tok += countTokens(`User: ${ledgerText}\n\n`)
-        ledgerInserted = true
-      }
-      const preNudge = byBeforeNextCall.get(idx)
-      if (preNudge !== undefined) {
-        const text = nudgeTextOf(preNudge.kind)
-        out.push({ kind: 'note', text })
-        tok += nudgeTokCache[preNudge.kind]
-      }
-      if ((raw.kind === 'call' || raw.kind === 'assistant') && raw.reasoning && clearedReasoning.has(idx)) {
-        out.push({ ...raw, reasoning: undefined })
-        tok += options.bareTok[idx]!
-      } else {
-        out.push(raw)
-        tok += options.fullTok[idx]!
-      }
-      const postNudge = byAfterResult.get(idx)
-      if (postNudge !== undefined) {
-        const isLiveTail = postNudge.pairIndex === pairsSub.length - 1 && !hasAssistantAfter(idx)
-        if (!isLiveTail || options.emitLiveNudge) {
-          const text = nudgeTextOf(postNudge.kind)
-          out.push({ kind: 'note', text })
-          tok += nudgeTokCache[postNudge.kind]
-          if (isLiveTail) liveNudge = text
-        }
-      }
-    }
-    return { items: out, tokens: tok, ...(liveNudge !== undefined ? { liveNudge } : {}) }
-  }
-
-  let built = assemble()
-
-  // Hard safety valve:
-  //   Phase 1 — strip bloated reasoning on older unfolded steps (oldest first)
-  //             so a long CoT never deletes read source files!
-  if (!options.emptyThink && built.tokens > options.hardCap) {
-    for (const idx of currentIndices) {
-      if (built.tokens <= options.hardCap) break
-      const item = history[idx]!
-      if ((item.kind === 'call' || item.kind === 'assistant') && item.reasoning && !clearedReasoning.has(idx)) {
-        clearedReasoning.add(idx)
-        built = assemble()
-      }
-    }
-  }
-
-  //   Phase 2 — in passive auto-fold mode, deterministically fold oldest
-  //             in-turn pairs past `budgetTokens` while retaining at least
-  //             `keepRecentCount` pairs verbatim; then enforce `hardCap` safety
-  //             ceiling across both modes.
-  const droppablePairs = pairsSub.filter(pair =>
-    keptSet.has(pair.callIndex) && !protectedCallIndices.has(pair.callIndex),
-  )
-  const dropPairFromWindow = (pair: CallPair): void => {
-    droppedByHardCap.push(pair)
-    keptSet.delete(pair.callIndex)
-    keptSet.delete(pair.resultIndex)
-    currentIndices = currentIndices.filter(i => i !== pair.callIndex && i !== pair.resultIndex)
-    duplicateFrom = Math.max(duplicateFrom, pair.resultIndex + 1)
-  }
-  const insertPairInOrder = (pair: CallPair): void => {
-    keptSet.add(pair.callIndex)
-    keptSet.add(pair.resultIndex)
-    const next = [...currentIndices, pair.callIndex, pair.resultIndex]
-    next.sort((a, b) => a - b)
-    currentIndices = next
-    clearedReasoning.add(pair.callIndex)
-  }
-
-  if (options.passive) {
-    if (options.forcedCutPairCount !== undefined) {
-      const cutTarget = Math.min(options.forcedCutPairCount, droppablePairs.length)
-      for (let c = 0; c < cutTarget; c++) {
-        const pair = droppablePairs.shift()!
-        if (options.forcedPinnedRead === pair) {
-          clearedReasoning.add(pair.callIndex)
-          duplicateFrom = Math.max(duplicateFrom, pair.resultIndex + 1)
-          continue
-        }
-        dropPairFromWindow(pair)
-      }
-      if (cutTarget > 0) built = assemble()
-    } else {
-      const keepFloor = Math.max(1, options.keepRecentCount)
-      while (droppablePairs.length > keepFloor && built.tokens > options.budgetTokens) {
-        dropPairFromWindow(droppablePairs.shift()!)
-        built = assemble()
-      }
-      if (options.pinUneditedRead && droppedByHardCap.length > 0 && options.keepRecentCount >= 1) {
-        const pinned = findLatestUneditedReadPair(
-          droppedByHardCap,
-          history,
-          pair => options.bareTok[pair.callIndex]! + options.bareTok[pair.resultIndex]!,
-          options.cwd,
-          droppablePairs,
-        )
-        if (pinned !== undefined) {
-          const pinIdx = droppedByHardCap.indexOf(pinned)
-          const prevIndices = currentIndices
-          const prevCleared = clearedReasoning.has(pinned.callIndex)
-          droppedByHardCap.splice(pinIdx, 1)
-          insertPairInOrder(pinned)
-          built = assemble()
-          if (built.tokens > options.budgetTokens) {
-            droppedByHardCap.splice(pinIdx, 0, pinned)
-            keptSet.delete(pinned.callIndex)
-            keptSet.delete(pinned.resultIndex)
-            currentIndices = prevIndices
-            if (!prevCleared) clearedReasoning.delete(pinned.callIndex)
-            built = assemble()
-          }
-        }
-      }
-    }
-  }
-  while (droppablePairs.length > 1 && built.tokens > options.hardCap) {
-    dropPairFromWindow(droppablePairs.shift()!)
-    built = assemble()
-  }
-
-  return {
-    items: built.items,
-    duplicateFrom,
-    totalTokens: built.tokens,
-    ...(checkpointAt !== undefined ? { checkpointAt } : {}),
-    ...(built.liveNudge !== undefined ? { liveNudge: built.liveNudge } : {}),
-  }
-}
-
-/**
- * Pure context-folding plan over `history`. Produces the exact `HistoryItem[]`
- * sequence kept in the prompt (including non-withdrawn budget reminders and
- * unplanned fallback ledgers), the `duplicateFrom` gate boundary, and whether
- * a new budget reminder triggered at the tail of this step.
- */
-export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklistInput): WorklistFoldResult {
-  const emptyThink = input.historyEmptyThink ?? false
-  if (history.length === 0) {
-    return { items: [], duplicateFrom: 0, promptTokens: input.systemTokens, foldedUnread: [] }
-  }
-
-  // Partition into user turns; any leading runtime notes attach to turn 0.
-  const userStarts: number[] = []
-  for (let i = 0; i < history.length; i++) {
-    if (history[i]!.kind === 'user') userStarts.push(i)
-  }
-  if (userStarts.length === 0) {
-    const tok = input.systemTokens + itemsTokens(history, emptyThink)
-    return { items: [...history], duplicateFrom: 0, promptTokens: tok, foldedUnread: [] }
-  }
-
-  const passive = input.passive === true
-  const minFoldTokens = Math.max(0, input.minFoldTokens ?? 0)
-  const turnStart = userStarts.length === 1 ? 0 : userStarts[userStarts.length - 1]!
-  const backboneMax = input.backboneMaxTokens ?? DEFAULT_BACKBONE_MAX_TOKENS
+  emptyThink: boolean,
+  passive: boolean,
+  minFoldTokens: number,
+  backboneMax: number,
+  baseFixed: number,
+): { priorItems: HistoryItem[]; priorTokens: number } {
   const priorTurns: HistoryItem[][] = []
   if (passive && userStarts.length > 1) {
     const rawTurns: HistoryItem[][] = []
@@ -919,7 +175,6 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
       foldedTurns.push(foldCompletedTurn(history, from, to))
     }
     const activeRawTokens = itemsTokens(history.slice(turnStart), emptyThink)
-    const baseFixed = input.systemTokens + (input.reminderTokens ?? 0)
     if (minFoldTokens > 0) {
       for (const raw of rawTurns) priorTurns.push(raw)
       let totalPrior = priorTurns.reduce((sum, turn) => sum + itemsTokens(turn, emptyThink), 0)
@@ -930,7 +185,6 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
         priorTurns[t] = foldedTurns[t]!
         totalPrior += newTok - oldTok
       }
-      // Fold any remaining un-folded prior turns before dropping whole turns at `backboneMax`.
       for (let t = 0; t < priorTurns.length && totalPrior > backboneMax; t++) {
         if (priorTurns[t] === foldedTurns[t]) continue
         const oldTok = itemsTokens(priorTurns[t]!, emptyThink)
@@ -948,13 +202,44 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
       priorTurns.push(foldCompletedTurn(history, from, to))
     }
   }
-  // High-water mark on completed prior turns (only hit in 15+ turn marathon chats).
+
   let priorTokens = priorTurns.reduce((sum, turn) => sum + itemsTokens(turn, emptyThink), 0)
   while (priorTurns.length > 0 && priorTokens > backboneMax) {
     const dropped = priorTurns.shift()!
     priorTokens -= itemsTokens(dropped, emptyThink)
   }
-  const priorItems = priorTurns.flat()
+  return { priorItems: priorTurns.flat(), priorTokens }
+}
+
+/**
+ * Pure context-folding plan over `history`. Produces the exact `HistoryItem[]`
+ * sequence kept in the prompt, the `duplicateFrom` gate boundary, and whether
+ * a new budget reminder triggered at the tail of this step.
+ */
+export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklistInput): WorklistFoldResult {
+  const emptyThink = input.historyEmptyThink ?? false
+  if (history.length === 0) {
+    return { items: [], duplicateFrom: 0, promptTokens: input.systemTokens, foldedUnread: [] }
+  }
+
+  const userStarts: number[] = []
+  for (let i = 0; i < history.length; i++) {
+    if (history[i]!.kind === 'user') userStarts.push(i)
+  }
+  if (userStarts.length === 0) {
+    const tok = input.systemTokens + itemsTokens(history, emptyThink)
+    return { items: [...history], duplicateFrom: 0, promptTokens: tok, foldedUnread: [] }
+  }
+
+  const passive = input.passive === true
+  const minFoldTokens = Math.max(0, input.minFoldTokens ?? 0)
+  const turnStart = userStarts.length === 1 ? 0 : userStarts[userStarts.length - 1]!
+  const backboneMax = input.backboneMaxTokens ?? DEFAULT_BACKBONE_MAX_TOKENS
+  const baseFixed = input.systemTokens + (input.reminderTokens ?? 0)
+
+  const { priorItems, priorTokens } = foldPriorTurns(
+    history, userStarts, turnStart, emptyThink, passive, minFoldTokens, backboneMax, baseFixed,
+  )
 
   const pairs = collectPairs(history, turnStart, history.length)
   const baseOverhead = input.systemTokens + priorTokens + (input.reminderTokens ?? 0)
@@ -963,8 +248,6 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
   const keepInitialPlan = input.keepInitialPlan !== false
   const emitLiveNudge = input.emitLiveNudge !== false
 
-  // Precompute per-item RWKV token counts once for the active turn so step-by-step
-  // reminder replay is pure integer arithmetic.
   const fullTok = new Array<number>(history.length).fill(0)
   const bareTok = new Array<number>(history.length).fill(0)
   for (let i = turnStart; i < history.length; i++) {
@@ -990,10 +273,6 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
     bareTok,
   }
 
-  // Replay completed pairs in the active turn to identify exact non-withdrawn
-  // budget reminders. Because `history[0..pair.resultIndex+1]` is immutable
-  // across future steps, each triggered reminder stays permanently anchored to
-  // its step transition until that segment itself is folded out by a checkpoint.
   const triggeredNudges: InternalNudge[] = []
   const activeCheckpoints = new Set<number>()
   const recordedByResult = input.recordedNudges !== undefined
@@ -1057,56 +336,10 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
   }
 
   const epochTargetTokens = Math.max(0, input.epochTargetTokens ?? 0)
-  let finalWin: ActiveWindowResult
-  if (passive && epochTargetTokens > 0 && epochTargetTokens < input.budgetTokens) {
-    const keepFloor = Math.max(1, keepRecentCount)
-    let cutPairCount = 0
-    let frozenPinnedRead: CallPair | undefined
-    for (let k = 0; k < pairs.length; k++) {
-      const pairsSub = pairs.slice(0, k + 1)
-      const endAtK = pairs[k]!.resultIndex + 1
-      let win = buildActiveWindow(history, turnStart, endAtK, pairsSub, triggeredNudges, activeCheckpoints, {
-        ...windowOpts,
-        forcedCutPairCount: cutPairCount,
-        forcedPinnedRead: frozenPinnedRead,
-      })
-      if (win.tokens > input.budgetTokens && (pairsSub.length - cutPairCount) > keepFloor) {
-        frozenPinnedRead = undefined
-        while ((pairsSub.length - cutPairCount) > keepFloor) {
-          cutPairCount++
-          win = buildActiveWindow(history, turnStart, endAtK, pairsSub, triggeredNudges, activeCheckpoints, {
-            ...windowOpts,
-            forcedCutPairCount: cutPairCount,
-          })
-          if (win.tokens <= epochTargetTokens) break
-        }
-        if (input.pinUneditedRead === true && keepRecentCount >= 1 && cutPairCount > 0) {
-          const candidatePin = findLatestUneditedReadPair(
-            pairsSub.slice(0, cutPairCount),
-            history,
-            pair => bareTok[pair.callIndex]! + bareTok[pair.resultIndex]!,
-            input.cwd,
-            pairsSub.slice(cutPairCount),
-          )
-          if (candidatePin !== undefined) {
-            const withPin = buildActiveWindow(history, turnStart, endAtK, pairsSub, triggeredNudges, activeCheckpoints, {
-              ...windowOpts,
-              forcedCutPairCount: cutPairCount,
-              forcedPinnedRead: candidatePin,
-            })
-            if (withPin.tokens <= input.budgetTokens) frozenPinnedRead = candidatePin
-          }
-        }
-      }
-    }
-    finalWin = buildActiveWindow(history, turnStart, history.length, pairs, triggeredNudges, activeCheckpoints, {
-      ...windowOpts,
-      forcedCutPairCount: cutPairCount,
-      forcedPinnedRead: frozenPinnedRead,
-    })
-  } else {
-    finalWin = buildActiveWindow(history, turnStart, history.length, pairs, triggeredNudges, activeCheckpoints, windowOpts)
-  }
+  const finalWin: ActiveWindowResult = passive && epochTargetTokens > 0 && epochTargetTokens < input.budgetTokens
+    ? buildEpochJumpWindow(history, turnStart, pairs, triggeredNudges, activeCheckpoints, windowOpts, epochTargetTokens)
+    : buildActiveWindow(history, turnStart, history.length, pairs, triggeredNudges, activeCheckpoints, windowOpts)
+
   const recorded: RecordedWorklistNudge[] = triggeredNudges.map(({ afterResultIndex, kind }) => ({ afterResultIndex, kind }))
   const items = [...priorItems, ...finalWin.items]
 
@@ -1119,23 +352,6 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
     ...(finalWin.checkpointAt !== undefined ? { checkpointAt: finalWin.checkpointAt } : {}),
     foldedUnread: foldedUnreadPaths(history, items, input.cwd),
   }
-}
-
-export interface WorklistEntryOptions extends TranscriptOptions {
-  readonly systemTokens: number
-  readonly minFoldTokens?: number
-  readonly budgetTokens: number
-  readonly hardCapTokens?: number
-  readonly backboneMaxTokens?: number
-  readonly keepRecentPairs?: number
-  readonly keepInitialPlan?: boolean
-  readonly historyEmptyThink?: boolean
-  readonly recordedNudges?: readonly RecordedWorklistNudge[]
-  readonly forceNudge?: boolean
-  readonly passive?: boolean
-  readonly epochTargetTokens?: number
-  readonly pinUneditedRead?: boolean
-  readonly cwd?: string
 }
 
 /** Build RWKV prompt entries (after System:) + TurnState gate boundary for `worklist` / `auto-fold` mode. */

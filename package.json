@@ -15,6 +15,7 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
+    "typecheck": "../deepseek-harness/node_modules/.bin/tsc --noEmit",
     "test": "node --test test/*.test.ts",
     "smoke": "node scripts/smoke.ts",
     "state": "node scripts/state.ts",

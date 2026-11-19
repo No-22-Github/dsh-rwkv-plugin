@@ -13,4 +13,19 @@ link cordis vendor/cordis
 link schemastery vendor/schemastery
 link dsh-brand packages/util/brand
 link dsh-llm packages/llm/llm
+link dsh-session packages/core/session
 link dsh-tools packages/core/tools
+
+react_pkg="$(ls -d "$DSH_ROOT"/node_modules/.pnpm/react@*/node_modules/react 2>/dev/null | tail -1 || true)"
+react_types="$(ls -d "$DSH_ROOT"/node_modules/.pnpm/@types+react@*/node_modules/@types/react 2>/dev/null | tail -1 || true)"
+csstype_pkg="$(ls -d "$DSH_ROOT"/node_modules/.pnpm/csstype@*/node_modules/csstype 2>/dev/null | tail -1 || true)"
+if [[ -n "$react_pkg" ]]; then
+  ln -sfn "$react_pkg" node_modules/react
+fi
+if [[ -n "$react_types" ]]; then
+  mkdir -p node_modules/@types
+  ln -sfn "$react_types" node_modules/@types/react
+fi
+if [[ -n "$csstype_pkg" ]]; then
+  ln -sfn "$csstype_pkg" node_modules/csstype
+fi

@@ -587,7 +587,7 @@ test('auto-fold pins latest unedited read within budget and omits it from folded
 })
 
 test('auto-fold with epochTargetTokens preserves append-only prefix between epochs', () => {
-  const stepText = 'step output line for epoch test\n'.repeat(25)
+  const stepText = 'step output line for epoch test\n'.repeat(40)
   const history: HistoryItem[] = [
     { kind: 'user', text: 'Run multi-step checks.' },
     { kind: 'call', id: 's1', name: 'bash', args: { command: 'echo 1' } },
@@ -602,23 +602,25 @@ test('auto-fold with epochTargetTokens preserves append-only prefix between epoc
   const opts = {
     systemTokens: 600,
     minFoldTokens: 600,
-    budgetTokens: 1800,
-    epochTargetTokens: 1200,
+    budgetTokens: 1500,
+    epochTargetTokens: 1150,
     hardCapTokens: 4000,
     keepRecentPairs: 1,
     historyEmptyThink: true,
     passive: true,
   }
-  // At 3 pairs: exceeds 1800, jumps back to <= 1200 (folding s1, s2).
+  // At 3 pairs: exceeds 1500, jumps back to <= 1150 (folding s1, s2 into a ledger).
   const at3 = foldWorklist(history.slice(0, 7), opts)
-  // At 4 pairs (with a short s4 that stays <= 1800): prefix from at3 must be 100% append-only!
+  assert.ok(at3.promptTokens <= 1150, `expected epoch jump <= 1150, got ${at3.promptTokens}`)
+  assert.equal(at3.items[1]?.kind, 'note', 'epoch jump inserts a folded-steps ledger note')
+  // At 4 pairs (with a short s4 that stays <= 1500): prefix from at3 must be 100% append-only!
   const withShortS4: HistoryItem[] = [
     ...history.slice(0, 7),
     { kind: 'call', id: 's4', name: 'bash', args: { command: 'echo 4' } },
     { kind: 'result', id: 's4', name: 'bash', ok: true, text: 'S4_SHORT' },
   ]
   const at4 = foldWorklist(withShortS4, opts)
-  assert.ok(at4.promptTokens <= 1800, `expected <= 1800, got ${at4.promptTokens}`)
+  assert.ok(at4.promptTokens <= 1500, `expected <= 1500, got ${at4.promptTokens}`)
   assert.deepEqual(
     at4.items.slice(0, at3.items.length),
     at3.items,

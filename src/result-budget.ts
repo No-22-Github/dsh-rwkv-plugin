@@ -23,6 +23,7 @@
 // No DSH runtime imports: the pipeline's teacher plugin mounts the same hook.
 
 import { toolResponse } from './core/prompt.ts'
+import { providerOfExec, sessionIdOfExec, type AgentLike } from './dsh-host.ts'
 import { countTokens } from './tokenizer.ts'
 
 /** RWKV tokens a tool result may take inline (as the model sees it, JSON-escaped). */
@@ -153,10 +154,6 @@ export function capReadResult(text: string, budget: number, wrap: Wrap = body =>
 // --- DSH wiring (structural types; see @deepseek-ai/dsh-tools, dsh-spill) ---
 
 interface TextBlock { readonly type: string; readonly text?: string }
-interface AgentLike {
-  readonly session?: { readonly header?: { readonly id?: string }; requestHeader?(): { config?: { provider?: string } } | undefined }
-  readonly options?: { readonly provider?: string }
-}
 interface ExecLike { readonly name: string; readonly callId: string; readonly parent?: unknown; readonly agent?: AgentLike }
 interface Decision { readonly kind: string; readonly content?: readonly TextBlock[]; readonly [key: string]: unknown }
 interface SpillStoreLike {
@@ -175,10 +172,6 @@ export interface ResultBudgetOptions {
   readonly log?: (message: string) => void
 }
 
-function providerOf(exec: ExecLike): string | undefined {
-  return exec.agent?.session?.requestHeader?.()?.config?.provider ?? exec.agent?.options?.provider
-}
-
 /** Mounts the budget on `tools/post-execute` (inside DSH's spill-policy, which runs outermost). */
 export function applyResultBudget(ctx: unknown, options: ResultBudgetOptions): void {
   const budget = options.budget ?? RESULT_TOKEN_BUDGET
@@ -190,7 +183,7 @@ export function applyResultBudget(ctx: unknown, options: ResultBudgetOptions): v
   context.on('tools/post-execute', async (exec, result, next) => {
     const decision = await next()
     if (decision.kind !== 'accept' || Object.hasOwn(decision, 'value') || exec.parent !== undefined) return decision
-    const provider = providerOf(exec)
+    const provider = providerOfExec(exec)
     if (provider === undefined || !options.providers().includes(provider)) return decision
     const content = decision.content ?? result.content
     if (!content.every(block => block.type === 'text')) return decision
@@ -205,22 +198,19 @@ export function applyResultBudget(ctx: unknown, options: ResultBudgetOptions): v
       return bounded === undefined ? decision : { ...decision, kind: 'accept', content: [{ type: 'text', text: bounded }] }
     }
     if (countTokens(wrap(text)) <= budget) return decision
-    let bounded: string | undefined
-    {
-      const store = context.get('spillStore') as SpillStoreLike | undefined
-      const owner = exec.agent?.session?.header?.id
-      if (store === undefined || owner === undefined) {
-        options.log?.(`result budget: no spill store or session for ${exec.name}; keeping the inline content`)
-        return decision
-      }
-      const ref = await store.saveText({
-        owner: { sessionId: owner },
-        source: { kind: 'tool', toolName: exec.name, callId: exec.callId, label: 'result' },
-        suggestedName: `${exec.name}.txt`,
-        content: text,
-      })
-      bounded = spillText(text, budget, bytes => spillNotice(bytes, ref.locator, ref.retrievalHint), wrap)
+    const store = context.get('spillStore') as SpillStoreLike | undefined
+    const owner = sessionIdOfExec(exec)
+    if (store === undefined || owner === undefined) {
+      options.log?.(`result budget: no spill store or session for ${exec.name}; keeping the inline content`)
+      return decision
     }
-    return bounded === undefined ? decision : { ...decision, kind: 'accept', content: [{ type: 'text', text: bounded }] }
+    const ref = await store.saveText({
+      owner: { sessionId: owner },
+      source: { kind: 'tool', toolName: exec.name, callId: exec.callId, label: 'result' },
+      suggestedName: `${exec.name}.txt`,
+      content: text,
+    })
+    const bounded = spillText(text, budget, bytes => spillNotice(bytes, ref.locator, ref.retrievalHint), wrap)
+    return { ...decision, kind: 'accept', content: [{ type: 'text', text: bounded }] }
   })
 }

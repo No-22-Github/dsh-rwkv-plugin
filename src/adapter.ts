@@ -1,7 +1,4 @@
-import { appendFile, mkdir } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
-import { dirname } from 'node:path'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import {
   LlmAdapter,
@@ -16,21 +13,25 @@ import { BackendError, type Generator } from './backend/generator.ts'
 import { IRWKVClient } from './backend/irwkv.ts'
 import { LightningClient } from './backend/lightning.ts'
 import { decideStep, type GenerationTrace, type HarnessConfig } from './core/agent.ts'
+import type { EditMode } from './core/defaults.ts'
 import { dshSystemSections } from './core/dsh-prompt.ts'
 import { currentDateLine } from './core/prompt.ts'
 import type { RelayOptions } from './core/relay.ts'
 import { buildCatalog, type ToolMode, type ToolNames, type ToolOverride } from './core/tools.ts'
-import { TODO_PLAN_TOOL, TODO_UPDATE_TOOL, type WorklistOptions } from './core/worklist.ts'
-import { historyFromMessages, systemText } from './history.ts'
-import { RelayCardStore } from './relay-store.ts'
-import { argumentChanges, clipArguments, memoryTraces, TraceLocation, type ArgumentChange } from './traces.ts'
-import { repairToolPaths, runtimeCwd } from './paths.ts'
+import type { WorklistOptions } from './core/worklist.ts'
 import { setFoldedUnreadPaths } from './folded-read-guard.ts'
-
-/** Pending appends per trace file, so records keep their order. */
-const traceWrites = new Map<string, Promise<void>>()
-/** Trace files this process has started writing; the first write also flushes what memory held before. */
-const traceStarted = new Set<string>()
+import { historyFromMessages, systemText } from './history.ts'
+import { repairToolPaths, runtimeCwd } from './paths.ts'
+import { RelayCardStore } from './relay-store.ts'
+import { buildExcludedTools } from './session-setup.ts'
+import {
+  appendSessionTrace,
+  argumentChanges,
+  clipArguments,
+  TraceLocation,
+  type ArgumentChange,
+  type TraceRecord,
+} from './traces.ts'
 
 /** Route model id that resolves to the first configured model. */
 export const DEFAULT_MODEL_ID = 'default'
@@ -47,7 +48,7 @@ export interface ModelConfig {
   /** Extra request headers, e.g. Cloudflare Access service-token headers. */
   readonly headers?: Record<string, string>
   readonly contextWindow?: number
-  /** rwkv_lightning only: initial state uploaded through /v1/state/upload (the server drops uploads when it restarts). */
+  /** rwkv_lightning only: initial state uploaded through /v1/state/upload. */
   readonly stateId?: string
   /** rwkv_lightning only: adapter id for request-level adaptation. */
   readonly adapterId?: string
@@ -63,24 +64,16 @@ export interface AdapterSettings {
   readonly models: readonly ModelConfig[]
   readonly harness: HarnessConfig
   readonly toolMode: ToolMode
-  /** dsh: DSH tool names and DSH's system prompt (filtered); trained: the agent-tool-v3 names and the Go-aligned prompt. */
   readonly toolNames: ToolNames
-  /** tolerant / literal hide `edit_lines` so standard `edit` is offered; line-edit keeps `edit_lines`. */
-  readonly editMode?: 'tolerant' | 'line-edit' | 'literal'
+  readonly editMode?: EditMode
   readonly excludeTools: readonly string[]
-  /** Experiment-only catalog text replacements (see ToolOverride); empty in normal use. */
   readonly toolOverrides?: Readonly<Record<string, ToolOverride>>
   readonly includeDeveloper: boolean
-  /** System prompt ends with currentDateLine; time-context readings are dropped from the history. */
   readonly currentDate?: boolean
-  /** IANA zone for the date line; absent: the zone of the process (its TZ). */
   readonly timeZone?: string
   readonly loopGuard: boolean
-  /** Where to write per-session JSONL traces (absent: memory only). */
   readonly traces?: TraceLocation
-  /** Turn-relay context; absent: the full history is rendered. */
   readonly relay?: RelayOptions
-  /** Stateful worklist or passive auto-fold context; absent: full history, and `todo_*` stay hidden unless active `worklist` (`passive !== true`). */
   readonly worklist?: WorklistOptions
   readonly log?: (message: string) => void
 }
@@ -95,10 +88,8 @@ function llmError(error: unknown): LlmError {
 }
 
 export class RwkvAdapter extends LlmAdapter {
-  /** Live settings: read per call, so edits saved from the settings page apply to the next request. */
   private readonly current: () => AdapterSettings
   private readonly clients = new Map<string, Generator>()
-  /** Relay handoff cards of resumed sessions (one DSH process per user turn). */
   private readonly relayCards = new RelayCardStore()
 
   constructor(settings: () => AdapterSettings) {
@@ -131,7 +122,6 @@ export class RwkvAdapter extends LlmAdapter {
     const config = this.model(model)
     return Promise.resolve({
       provider,
-      // The requested id, so a `default` route resolves to itself.
       id: model,
       name: config.name ?? config.id,
       inputModalities: ['text'] as const,
@@ -141,8 +131,6 @@ export class RwkvAdapter extends LlmAdapter {
   }
 
   private model(id: string): ModelConfig {
-    // `default` names the first configured model, so the bundle's rwkv_agent
-    // row works before the user has picked model ids of their own.
     const models = this.settings.models
     const config = id === DEFAULT_MODEL_ID && !models.some(model => model.id === id) ? models[0] : models.find(model => model.id === id)
     if (config === undefined) {
@@ -201,16 +189,19 @@ export class RwkvAdapter extends LlmAdapter {
       ...this.settings.worklist === undefined ? {} : { worklist: this.settings.worklist },
     }
     const names = this.settings.toolNames
-    const exclude = [
-      ...this.settings.excludeTools,
-      ...(this.settings.editMode !== undefined && this.settings.editMode !== 'line-edit' ? ['edit_lines'] : []),
-      ...(this.settings.worklist === undefined || this.settings.worklist.passive === true ? [TODO_PLAN_TOOL, TODO_UPDATE_TOOL] : []),
-    ]
+    const exclude = buildExcludedTools({
+      excludeTools: this.settings.excludeTools,
+      editMode: this.settings.editMode,
+      worklist: this.settings.worklist,
+    })
     const catalog = buildCatalog(options.tools ?? [], { mode: this.settings.toolMode, names, exclude, overrides: this.settings.toolOverrides })
-    const history = historyFromMessages(options.messages, catalog, { includeDeveloper: this.settings.includeDeveloper, names, dropTimeContext: this.settings.currentDate === true })
+    const history = historyFromMessages(options.messages, catalog, {
+      includeDeveloper: this.settings.includeDeveloper,
+      names,
+      dropTimeContext: this.settings.currentDate === true,
+    })
     const systemHead = names === 'dsh' ? dshSystemSections(options.system ?? systemText(options.messages)) : undefined
 
-    // Bridge the harness callbacks to this async generator.
     const queue: StreamChunk[] = []
     let wake: (() => void) | undefined
     const push = (chunk: StreamChunk) => {
@@ -232,32 +223,13 @@ export class RwkvAdapter extends LlmAdapter {
     const cwd = runtimeCwd(history)
     const location = this.settings.traces
     const writeLine = (fields: Record<string, unknown>) => {
-      const record = { at: new Date().toISOString(), model: config.id, purpose: options.purpose, ...fields }
-      const memoryKey = sessionId ?? 'no-session'
-      // Always kept in memory for the RWKV tab; written to disk only when recording is on.
-      memoryTraces.add(memoryKey, record)
-      // Next to the DSH session log; undefined until DSH has created the session directory.
-      const traceFile = sessionId === undefined ? undefined : location?.path(sessionId)
-      if (traceFile === undefined) return
-      const traceDir = dirname(traceFile)
-      let records: readonly unknown[] = [record]
-      if (!traceStarted.has(traceFile)) {
-        traceStarted.add(traceFile)
-        // A new file gets what memory collected before the directory existed (or before recording was on).
-        if (!existsSync(traceFile)) records = memoryTraces.get(memoryKey) ?? [record]
-      }
-      const line = records.map(item => `${JSON.stringify(item)}\n`).join('')
-      // One append chain per file: a request summary must land after the generations it summarizes.
-      const previous = traceWrites.get(traceFile) ?? Promise.resolve()
-      const next = previous.then(() => mkdir(traceDir, { recursive: true })).then(() => appendFile(traceFile, line)).catch(() => {})
-      traceWrites.set(traceFile, next)
-      void next.then(() => { if (traceWrites.get(traceFile) === next) traceWrites.delete(traceFile) })
+      const record = { at: new Date().toISOString(), model: config.id, purpose: options.purpose, ...fields } as TraceRecord
+      appendSessionTrace(sessionId, location, record)
     }
     const writeTrace = (trace: GenerationTrace) => writeLine({ ...trace })
 
     let settled = false
     const work = (async () => {
-      // Relay cards live next to the trace file even when recording is off.
       const relayLocation = location ?? new TraceLocation()
       return decideStep({
         history,
@@ -277,7 +249,6 @@ export class RwkvAdapter extends LlmAdapter {
         hooks: {
           ...harness.thinking === 'full' ? { reasoning: reasoningDelta } : {},
           attempt: label => {
-            // Each retry is a fresh generation; mark it inside the reasoning.
             if (attempts++ > 0 && reasoningOpen) reasoningDelta(`\n\n[harness: ${label}]\n\n`)
           },
           trace: writeTrace,
@@ -332,7 +303,6 @@ export class RwkvAdapter extends LlmAdapter {
       const argumentsText = JSON.stringify(pathed)
       handed = {
         args: clipArguments(pathed),
-        // Model's arguments vs the repaired ones (same names), then the path repair on the DSH side.
         changes: [...argumentChanges(decision.rawArgs, decision.args), ...argumentChanges(dshArgs, pathed)].map(change => ({
           ...change,
           ...'before' in change ? { before: clipArguments({ value: change.before }, 200).value } : {},
@@ -343,14 +313,12 @@ export class RwkvAdapter extends LlmAdapter {
       yield { type: 'tool-call-delta', index, id, name: decision.tool.dshName, argumentsDelta: argumentsText }
       yield { type: 'block-end', index, block: { type: 'tool-call', id, name: decision.tool.dshName, arguments: argumentsText } }
     }
-    // One record per DSH request: what was handed to DSH and what it took to get there.
     writeLine({
       stage: 'step',
       decision: decision.type === 'tool' ? `tool ${decision.tool.dshName}` : `final ${decision.via}`,
       repairs,
       ...handed ? { args: handed.args, changes: handed.changes } : {},
       generations: step.generations,
-      /** Generation attempts (first try + re-asks); think resumes are not attempts. */
       attempts,
       outputRepairs: harness.outputRepairs,
       guards: harness.guards,

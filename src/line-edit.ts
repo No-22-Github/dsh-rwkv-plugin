@@ -35,6 +35,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
   addSeen, applyLineEdit, editSummary, sandboxPolicyFor, seenAfterEdit, syntaxRejection, unseenLines, unseenRejection, type SeenLines,
 } from './core/line-edit.ts'
+import { ensureExecWorkingDir, type SandboxPolicyLike } from './dsh-host.ts'
 import { READ_SHOWN_EVENT } from './result-budget.ts'
 import { introducedSyntaxError } from './syntax-check.ts'
 
@@ -54,8 +55,6 @@ interface EditLinesArgs {
 // dsh-tools; kept structural so the plugin does not import those packages).
 interface FsTargetLike { readonly displayPath: string; readonly targetKey: string }
 type Observation = { readonly kind: 'present'; readonly version: unknown } | { readonly kind: 'absent' }
-/** The sandbox policy service as this tool uses it (opaque policy value passed back to the write). */
-interface SandboxPolicyLike { resolve(request?: { session?: object }): unknown }
 interface FsLike {
   resolve(path: string, options: { cwd?: string; signal?: AbortSignal }): Promise<FsTargetLike>
   readText(target: FsTargetLike, signal?: AbortSignal): Promise<string>
@@ -98,6 +97,12 @@ interface PersistedObservation {
   readonly lines: 'all' | readonly number[]
 }
 
+interface DecodedObservation {
+  readonly targetKey: string
+  readonly observation: Observation
+  readonly lines: SeenLines
+}
+
 interface SessionLike {
   snapshotEvents?(): readonly unknown[]
 }
@@ -115,7 +120,7 @@ const decodeLines = (value: unknown): SeenLines | undefined => {
   return new Set(value as number[])
 }
 
-const decodeObservation = (data: unknown): PersistedObservation | undefined => {
+const decodeObservation = (data: unknown): DecodedObservation | undefined => {
   if (typeof data !== 'object' || data === null) return undefined
   const { targetKey, observation, lines } = data as Record<string, unknown>
   if (typeof targetKey !== 'string' || targetKey === '') return undefined
@@ -250,8 +255,7 @@ export function apply(ctx: Context): void {
   host.on(READ_SHOWN_EVENT, (exec, window) => observations.shown(exec, window.first, window.last))
 
   async function resolveOptions(exec: ExecLike): Promise<{ cwd?: string; signal?: AbortSignal }> {
-    const workingDirectory = host.get('workingDirectory') as { ensure(agent: unknown, signal?: AbortSignal): Promise<string> } | undefined
-    const cwd = exec.agent === undefined || workingDirectory === undefined ? undefined : await workingDirectory.ensure(exec.agent, exec.signal)
+    const cwd = await ensureExecWorkingDir(host, exec)
     return { ...cwd !== undefined ? { cwd } : {}, ...exec.signal ? { signal: exec.signal } : {} }
   }
 

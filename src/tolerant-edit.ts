@@ -2,21 +2,21 @@
 // combines `src/core/tolerant-edit.ts` (content-anchored recall tolerance +
 // auto-reindent + dual-anchor sliding-window guard) with `src/syntax-check.ts`
 // (pre-write incremental syntax validation for .py/.ts/.js/.sh/.json).
-//
-// Exact valid edits delegate straight to `next()`, so DSH's own `tool-fs`
-// execution, observation policy, sandbox escalation, and UI diff metadata run
-// untouched. Near-miss recalled edits are resolved to exact file substrings,
-// syntax-checked in memory before touching disk, and written atomically with
-// the session's `fs/edit-intent` guard and `sandboxPolicy`.
 
 import { resolve } from 'node:path'
 import { sandboxPolicyFor } from './core/line-edit.ts'
 import { resolveTolerantEdit } from './core/tolerant-edit.ts'
+import {
+  ensureExecWorkingDir,
+  providerOfExec,
+  sessionIdOfExec,
+  type AgentLike,
+  type SandboxPolicyLike,
+} from './dsh-host.ts'
 import { isFoldedUnreadPath } from './folded-read-guard.ts'
 import { introducedSyntaxError } from './syntax-check.ts'
 
 interface FsTargetLike { readonly displayPath: string }
-interface SandboxPolicyLike { resolve(request?: { session?: object }): unknown }
 interface FsLike {
   resolve(path: string, options: { cwd?: string; signal?: AbortSignal }): Promise<FsTargetLike>
   readText(target: FsTargetLike, signal?: AbortSignal): Promise<string>
@@ -28,14 +28,6 @@ interface FsLike {
     sandboxPolicy?: unknown,
   ): Promise<{ version: unknown; before: string; after: string }>
   processPath(target: FsTargetLike): string
-}
-
-interface AgentLike {
-  readonly session?: {
-    readonly header?: { readonly id?: string }
-    requestHeader?(): { config?: { provider?: string } } | undefined
-  }
-  readonly options?: { readonly provider?: string }
 }
 
 interface ExecLike {
@@ -61,10 +53,6 @@ export interface TolerantEditOptions {
   readonly foldedReadGuard?: () => boolean
 }
 
-function providerOf(exec: ExecLike): string | undefined {
-  return exec.agent?.session?.requestHeader?.()?.config?.provider ?? exec.agent?.options?.provider
-}
-
 function errorResult(message: string): ToolResultLike {
   return {
     content: [{ type: 'text', text: `Error: ${message}` }],
@@ -82,7 +70,6 @@ function previewSingleEdit(before: string, oldString: string, newString: string)
 
 export function applyTolerantEdit(ctx: unknown, options: TolerantEditOptions): void {
   const host = ctx as {
-    readonly fs?: FsLike
     on(event: 'tools/execute', listener: (exec: ExecLike, next: () => Promise<ToolResultLike>) => Promise<ToolResultLike>): unknown
     waterfall?(event: 'fs/edit-intent', target: FsTargetLike, exec: ExecLike, fallback: () => undefined): Promise<unknown>
     emit(event: 'fs/observed', target: FsTargetLike, observation: { kind: 'present'; version: unknown }, actor: ExecLike): void
@@ -91,9 +78,8 @@ export function applyTolerantEdit(ctx: unknown, options: TolerantEditOptions): v
 
   host.on('tools/execute', async (exec, next) => {
     if (exec.name !== 'edit' || exec.parent !== undefined || !options.enabled()) return next()
-    const provider = providerOf(exec)
+    const provider = providerOfExec(exec)
     if (provider === undefined || !options.providers().includes(provider)) return next()
-    // `rwkv-llm` only injects `llm`; read `fs` via Cordis `.get('fs')` like `result-budget.ts`.
     const fs = host.get('fs') as FsLike | undefined
     if (fs === undefined || typeof exec.arguments !== 'object' || exec.arguments === null) return next()
 
@@ -105,17 +91,14 @@ export function applyTolerantEdit(ctx: unknown, options: TolerantEditOptions): v
     }
     if (typeof args.file_path !== 'string' || args.file_path.trim() === '') return next()
 
-    const workingDirectory = host.get('workingDirectory') as { ensure(agent: unknown, signal?: AbortSignal): Promise<string> } | undefined
-    const cwd = exec.agent === undefined || workingDirectory === undefined
-      ? undefined
-      : await workingDirectory.ensure(exec.agent, exec.signal)
+    const cwd = await ensureExecWorkingDir(host, exec)
     const resolveOpts = { ...cwd !== undefined ? { cwd } : {}, ...exec.signal ? { signal: exec.signal } : {} }
 
     let target: FsTargetLike
     let before: string
     try {
       target = await fs.resolve(args.file_path, resolveOpts)
-      if ((options.foldedReadGuard?.() ?? true) && isFoldedUnreadPath(exec.agent?.session?.header?.id, [
+      if ((options.foldedReadGuard?.() ?? true) && isFoldedUnreadPath(sessionIdOfExec(exec), [
         fs.processPath(target),
         target.displayPath,
         ...(cwd !== undefined ? [resolve(cwd, args.file_path.trim())] : []),
@@ -135,7 +118,6 @@ export function applyTolerantEdit(ctx: unknown, options: TolerantEditOptions): v
       }
       before = await fs.readText(target, exec.signal)
     } catch {
-      // Missing file or unreadable path: let DSH's own edit handler report its canonical error.
       return next()
     }
 
@@ -161,7 +143,6 @@ export function applyTolerantEdit(ctx: unknown, options: TolerantEditOptions): v
       }
     }
 
-    // Exact valid match: run DSH's native `edit` untouched so diff metadata and policies stay identical.
     if (resolved.kind === 'exact') return next()
 
     try {
