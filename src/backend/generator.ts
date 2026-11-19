@@ -1,26 +1,13 @@
 // Shared continuation contract for the RWKV backends, ported from RWKV-Agent
 // internal/continuation (continuation.go, loopguard.go, httputil).
 
+import { AGENT_FAST_SAMPLING, type SamplingDefaults } from '../core/defaults.ts'
 import type { FinishReason } from '../core/parse.ts'
 
-export interface Sampling {
-  readonly temperature: number
-  readonly topK: number
-  readonly topP: number
-  readonly presencePenalty: number
-  readonly frequencyPenalty: number
-  readonly penaltyDecay: number
-}
+export type Sampling = SamplingDefaults
 
-/** agent-fast: the RWKV-Agent default for multi-step agents (light penalties curb repetition). */
-export const AGENT_FAST: Sampling = {
-  temperature: 0.3,
-  topK: 65536,
-  topP: 0.5,
-  presencePenalty: 0.5,
-  frequencyPenalty: 0.1,
-  penaltyDecay: 0.996,
-}
+/** agent-fast: default RWKV-7 G1 multi-step agent sampling preset. */
+export const AGENT_FAST: Sampling = AGENT_FAST_SAMPLING
 
 export interface GenerateRequest {
   readonly prompt: string
