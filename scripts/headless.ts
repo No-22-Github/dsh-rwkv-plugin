@@ -69,6 +69,8 @@ const { values, positionals } = parseArgs({
     'time-zone': { type: 'string' },
     // Experiment only: JSON object of extra rwkv-llm config keys (e.g. taskContract, toolOverrides).
     'plugin-config': { type: 'string' },
+    // Multi-session daemon plugin path/URL: disables one-shot runner and serves JSON-RPC on stdio.
+    daemon: { type: 'string' },
   },
 })
 if (!values['base-url'] || !values.model) {
@@ -189,18 +191,32 @@ writeFileSync(join(profileDir, 'cordis.patch.yml'), [
   '    provider: rwkv',
   `    model: ${json(values['model-id'])}`,
   ...(values['extra-patch'] ? [readFileSync(resolve(values['extra-patch']), 'utf8').trimEnd()] : []),
+  ...(values.daemon ? [
+    '- id: headless-startup',
+    '  disabled: true',
+    '- id: headless-runner',
+    '  disabled: true',
+    '- insert:',
+    '    - id: multi-session-daemon',
+    `      name: ${json(values.daemon.includes('://') ? values.daemon : pathToFileURL(resolve(values.daemon)).href)}`,
+  ] : []),
   '',
 ].join('\n'))
 
 // Older DSH releases (npm 0.2.1-rc.5) have no --approval-policy flag.
-const help = spawnSync(bin, [...binArgs, '--profile', 'headless', '--help'], {
-  encoding: 'utf8', env: { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' },
-})
-const approval = /--approval-policy/.test(help.stdout ?? '') ? ['--approval-policy', 'never'] : []
+let approval: string[] = []
+if (!values.daemon) {
+  const help = spawnSync(bin, [...binArgs, '--profile', 'headless', '--help'], {
+    encoding: 'utf8', env: { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' },
+  })
+  approval = /--approval-policy/.test(help.stdout ?? '') ? ['--approval-policy', 'never'] : []
+}
 
 const task = positionals.join(' ')
 const session = values['session-id'] ? ['--session-id', values['session-id']] : []
-const args = [...binArgs, '--profile', 'headless', '--json', ...approval, ...session, task === '' ? '-' : task]
+const args = values.daemon
+  ? [...binArgs, '--profile', 'headless']
+  : [...binArgs, '--profile', 'headless', '--json', ...approval, ...session, task === '' ? '-' : task]
 const child = spawn(bin, args, {
   stdio: 'inherit',
   // Eval runs never report session content upstream, even on a feedback path.
