@@ -10,10 +10,11 @@ import { DEFAULT_HARNESS } from './core/agent.ts'
 import type { EditMode, HistoryMode } from './core/defaults.ts'
 import type { ToolMode, ToolNames } from './core/tools.ts'
 import { applyResultBudget } from './result-budget.ts'
+import { setFoldedUnreadPaths } from './folded-read-guard.ts'
 import { handleServerRoute, handleTraceRoute } from './routes.ts'
 import { resolveHistoryModeConfig } from './session-setup.ts'
 import { applyTolerantEdit } from './tolerant-edit.ts'
-import { TraceLocation } from './traces.ts'
+import { flushAndEvictSessionTrace, TraceLocation } from './traces.ts'
 
 export const name = 'rwkv-llm'
 export const inject = ['llm']
@@ -193,6 +194,13 @@ function settingsOf(config: Config): AdapterSettings {
 export function apply(ctx: Context, config: Config): void {
   const adapter = new RwkvAdapter(() => settingsOf(config))
   ctx.llm.registerAdapter(config.providers, adapter)
+  ;(ctx as unknown as { provide: (service: string, value: unknown) => void }).provide(
+    'rwkvSessionCleanup',
+    async (sessionId: string): Promise<void> => {
+      setFoldedUnreadPaths(sessionId, [])
+      await flushAndEvictSessionTrace(sessionId)
+    },
+  )
   // Long tool results in RWKV sessions: cut once when the tool runs, the rest saved to a file.
   applyResultBudget(ctx, { providers: () => config.providers, log: message => console.log(`[rwkv-llm] ${message}`) })
   // Recall-tolerant matching, dual-anchor sliding guard, and pre-write syntax check on standard `edit`.

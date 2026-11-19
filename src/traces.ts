@@ -239,6 +239,24 @@ export function appendSessionTrace(
   void next.then(() => { if (traceWrites.get(traceFile) === next) traceWrites.delete(traceFile) })
 }
 
+/**
+ * Flush all pending async trace appends and drop a closed session's in-memory
+ * trace copy so multi-session daemon processes stay flat in RSS.
+ */
+export async function flushAndEvictSessionTrace(sessionId: string, memory: MemoryTraces = memoryTraces): Promise<void> {
+  if (!sessionId) return
+  if (traceWrites.size > 0) {
+    await Promise.allSettled([...traceWrites.values()])
+  }
+  for (const file of [...traceStarted]) {
+    if (basename(file) === `${sessionId}.jsonl` || basename(dirname(file)) === sessionId) {
+      traceStarted.delete(file)
+    }
+  }
+  sessionDirs.delete(sessionId)
+  memory.delete(sessionId)
+}
+
 /** One session's records: from disk or memory, whichever holds more. */
 export function sessionRecords(location: TraceLocation, session: string, memory: MemoryTraces = memoryTraces): TraceRecord[] {
   const path = location.path(session)
