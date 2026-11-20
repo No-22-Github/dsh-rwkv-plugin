@@ -6,7 +6,9 @@ import {
   callKey,
   DUPLICATE_ANSWER_REMINDER,
   DUPLICATE_FAILED_REMINDER,
+  DUPLICATE_FAILED_RETRY_REMINDER,
   duplicateRetryReminder,
+  NOOP_EDIT_REMINDER,
   toolFailureReminder,
   type TurnState,
 } from './policy.ts'
@@ -128,6 +130,16 @@ export function gateToolCall(
   const { tool } = resolved
   const { args, repairs } = config.outputRepairs ? repairArguments(tool, action.args, resolved.aliased) : { args: action.args, repairs: [] }
   if (!config.guards) return { type: 'run', tool, args, repairs }
+  if (tool.dshName === 'edit') {
+    const oldText = typeof args.old_string === 'string' ? args.old_string : args.old_text
+    const newText = typeof args.new_string === 'string' ? args.new_string : args.new_text
+    if (typeof oldText === 'string' && typeof newText === 'string' && oldText === newText) {
+      if (!duplicateRetryUsed) {
+        return { type: 'duplicate-retry', receipt: [{ role: 'user', text: NOOP_EDIT_REMINDER }] }
+      }
+      return { type: 'closeout', reminder: NOOP_EDIT_REMINDER }
+    }
+  }
   const key = callKey(tool.name, args)
   if (state.successKeys.has(key)) {
     // harness v26: the first repeat of a successful call gets one more decision.
@@ -137,6 +149,9 @@ export function gateToolCall(
     return { type: 'closeout', reminder: DUPLICATE_ANSWER_REMINDER }
   }
   if (state.failedEpochs.get(key) === state.successfulCalls) {
+    if (!duplicateRetryUsed) {
+      return { type: 'duplicate-retry', receipt: [{ role: 'user', text: DUPLICATE_FAILED_RETRY_REMINDER }] }
+    }
     return { type: 'closeout', reminder: state.successfulCalls > 0 ? DUPLICATE_ANSWER_REMINDER : DUPLICATE_FAILED_REMINDER }
   }
   if (tool.name === state.consecutiveFailedTool && state.consecutiveFailures >= config.maxConsecutiveFailures) {

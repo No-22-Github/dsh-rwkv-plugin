@@ -142,12 +142,57 @@ test('first repeat of a successful call gets one retry with a hint (harness v26)
 
 test('second repeat forces the closeout; a tool call there falls back to the summary', async () => {
   const call = '>x</think><tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}'
-  const generator = new ScriptedGenerator([call, call, call, call])
+  const generator = new ScriptedGenerator([call, call, call, call, '<tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}'])
   const step = await decideStep({ history: afterRead, tools, config: harness, generator })
   assert.equal(step.decision.type, 'final')
   assert.equal(step.decision.type === 'final' && step.decision.via, 'summary')
   assert.match(generator.prompts[2]!, /Tool execution is complete and tools are now unavailable/)
   assert.match(generator.prompts[3]!, /This is your final answer; tool calls are forbidden/)
+  assert.match(generator.prompts[4]!, /Assistant: <think><\/think>Based on the tool results above,$/)
+})
+
+test('answerStage attempt 2 prefills closed think + prose opener in thinking=full mode', async () => {
+  const call = '>x</think><tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}'
+  const generator = new ScriptedGenerator([call, call, call, call, ' the file contains BUDGET-READY.'])
+  const step = await decideStep({ history: afterRead, tools, config: harness, generator })
+  assert.deepEqual(step.decision, {
+    type: 'final',
+    text: 'Based on the tool results above, the file contains BUDGET-READY.',
+    via: 'answer-stage',
+  })
+  assert.match(generator.prompts[4]!, /Assistant: <think><\/think>Based on the tool results above,$/)
+})
+
+test('no-op edit (old_string === new_string) and failed call repeat each get one non-echoed retry before closeout', async () => {
+  const editTools = buildCatalog([
+    { name: 'read', description: '', parameters: { properties: { file_path: { type: 'string' } } } },
+    { name: 'edit', description: '', parameters: { properties: { file_path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } } } },
+    { name: 'write', description: '', parameters: { properties: { file_path: { type: 'string' }, content: { type: 'string' } } } },
+  ], { names: 'dsh' })
+  const history: HistoryItem[] = [
+    { kind: 'user', text: 'Update a.py' },
+    { kind: 'call', id: 'c1', name: 'edit', args: { file_path: 'a.py', old_string: 'x = 1', new_string: 'x = 2' } },
+    { kind: 'result', id: 'c1', name: 'edit', ok: false, text: 'Could not find old_string in a.py' },
+  ]
+  // 1) No-op edit is intercepted without echoing into history.
+  const noopGen = new ScriptedGenerator([
+    '>try</think><tool_call>{"name":"edit","arguments":{"file_path":"a.py","old_string":"x = 1","new_string":"x = 1"}}',
+    '>fixed</think>Done.',
+  ])
+  const noopStep = await decideStep({ history, tools: editTools, config: harness, generator: noopGen })
+  assert.deepEqual(noopStep.decision, { type: 'final', text: 'Done.', via: 'model' })
+  assert.match(noopGen.prompts[1]!, /old_string and new_string are identical/)
+  assert.equal(noopGen.prompts[1]!.split('"new_string":"x = 1"').length, 1)
+
+  // 2) Repeating a failed call gets one non-echoed retry, and a second repeat closes out.
+  const failCall = '>again</think><tool_call>{"name":"edit","arguments":{"file_path":"a.py","old_string":"x = 1","new_string":"x = 2"}}'
+  const failGen = new ScriptedGenerator([failCall, failCall, '>ok</think>Could not update a.py.'])
+  const failStep = await decideStep({ history, tools: editTools, config: harness, generator: failGen })
+  assert.deepEqual(failStep.decision, { type: 'final', text: 'Could not update a.py.', via: 'answer-stage' })
+  assert.match(failGen.prompts[1]!, /repeats an earlier failed call with the exact same arguments/)
+  assert.match(failGen.prompts[2]!, /Tool execution is complete and tools are now unavailable/)
+  // toolFailureReminder for edit mentions write fallback.
+  assert.match(failGen.prompts[0]!, /use write instead of repeating edit/)
 })
 
 test('step limit goes straight to the answer stage', async () => {

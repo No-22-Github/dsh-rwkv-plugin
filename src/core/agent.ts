@@ -198,7 +198,8 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       ...prefill === undefined ? {} : { prefill },
     })
     hooks?.attempt?.(label)
-    const splitter = config.thinking === 'full' && hooks?.reasoning ? new ThinkSplitter(hooks.reasoning) : undefined
+    const hasOpenThink = config.thinking === 'full' && prefill === undefined
+    const splitter = hasOpenThink && hooks?.reasoning ? new ThinkSplitter(hooks.reasoning) : undefined
     const request: GenerateRequest = {
       prompt,
       maxTokens: stage === 'answer' ? config.answerMaxTokens
@@ -216,7 +217,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
     let spent = result.completionTokens ?? countTokens(text)
     promptTokens += result.promptTokens ?? countTokens(prompt)
 
-    const opening = config.thinking === 'full' ? '<think' : ''
+    const opening = hasOpenThink ? '<think' : ''
     for (let resume = 0; resume < MAX_THINK_STOP_RESUMES; resume++) {
       if (result.finish !== 'stop' || result.stop !== '</tool_call>' || !thinkOpen(opening + text) || endsWithCompleteCall(text)) break
       text += '</tool_call>'
@@ -251,7 +252,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       result = { ...next, text }
     }
     completionTokens += spent
-    return { output: reconstructOutput(text, config.thinking), result: { ...result, text }, prompt }
+    return { output: hasOpenThink ? reconstructOutput(text, config.thinking) : text, result: { ...result, text }, prompt }
   }
 
   let worklistTrace: WorklistTrace | undefined
@@ -365,7 +366,6 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
     let opener: string | undefined
     for (let attempt = 0; attempt < (config.guards ? 3 : 1); attempt++) {
       if (attempt === 2) {
-        if (config.thinking === 'full') break
         opener = answerOpener(state.task)
       }
       const { output, result, prompt } = await generate(staged, 'answer', attempt === 0 ? 'answer' : 'answer re-ask', opener)

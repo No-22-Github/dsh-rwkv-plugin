@@ -31,6 +31,12 @@ Answer the current task from the evidence already collected.`
 export const DUPLICATE_FAILED_REMINDER = `That tool call was rejected because it repeats an earlier failed call.
 Tools are now unavailable. Answer from the Tool results, and clearly state anything that could not be verified.`
 
+export const NOOP_EDIT_REMINDER = 'That edit call was rejected because old_string and new_string are identical, so the file would not change. '
+  + 'Provide the actual target text to change, or if the edits are already complete, answer the user directly.'
+
+export const DUPLICATE_FAILED_RETRY_REMINDER = 'That tool call was rejected because it repeats an earlier failed call with the exact same arguments. '
+  + 'Do not repeat the same call. Inspect the previous error and change the arguments, try a different tool, or answer directly.'
+
 /** harness v26: the first repeat of a successful call gets one more decision with an edit hint. */
 export function duplicateRetryReminder(tools: readonly WireTool[]): string {
   let prompt = 'That tool call was rejected because it repeats a successful call; its result is already above. Do not call it again.\n'
@@ -54,12 +60,22 @@ const FAILURE_HINTS: Record<string, { companions: string[]; hint: (names: Record
 }
 
 export function toolFailureReminder(name: string, error: string, recoveryBlocked: boolean, tools: readonly WireTool[]): string {
-  let prompt = `The tool call failed: ${oneLine(error)}. `
+  const summary = oneLine(error)
+  if (/already applied|no edit needed/i.test(summary)) {
+    return `${summary} Do not repeat this edit. Continue with any remaining changes, or answer the user directly if all work is done.`
+  }
+  let prompt = `The tool call failed: ${summary}. `
   prompt += recoveryBlocked ? 'Do not call the same tool again in this turn. ' : 'Do not repeat the same call. '
   const failed = tools.find(tool => tool.name === name)
   const entry = failed === undefined ? undefined : FAILURE_HINTS[failed.dshName]
   const names: Record<string, string> = Object.fromEntries(tools.map(tool => [tool.dshName, tool.name]))
   if (entry && entry.companions.every(companion => names[companion] !== undefined)) prompt += entry.hint(names)
+  if (failed?.dshName === 'edit') {
+    const alts = ['write', 'edit_lines'].map(dsh => names[dsh]).filter((n): n is string => n !== undefined)
+    if (alts.length > 0) {
+      prompt += `If old_string matching keeps failing on a short file you already read, use ${alts.join(' or ')} instead of repeating ${name}. `
+    }
+  }
   return `${prompt}Choose a different useful tool or answer with the limitation. Do not guess.`
 }
 

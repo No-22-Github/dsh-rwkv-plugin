@@ -74,7 +74,18 @@ test('tolerant-edit: ambiguous regions stop at the ambiguous level and already-a
   const repeat = resolveTolerantEdit(updated, '    result = 0\n    return result', '    result = 10\n    return result', 'calc.py')
   assert.equal(repeat.kind, 'refused')
   if (repeat.kind === 'refused') {
-    assert.match(repeat.message, /appears to be applied already/)
+    assert.match(repeat.message, /already applied/)
+    assert.doesNotMatch(repeat.message, /Read .* again before editing/i)
+  }
+
+  // Closest-text refusal shows numbered surrounding context without the blind "Copy old_string" imperative.
+  const nearby = 'line1\nline2\n<h3>Alic</h3>\n<p class="title">Engineer</p>\nline5\nline6\n'
+  const miss = resolveTolerantEdit(nearby, '<p class="title">Designer</p>', '<p class="title">Alic</p>', 'index.html')
+  assert.equal(miss.kind, 'refused')
+  if (miss.kind === 'refused') {
+    assert.match(miss.message, /Current file around lines 2-6/)
+    assert.match(miss.message, /3: <h3>Alic<\/h3>/)
+    assert.doesNotMatch(miss.message, /Copy old_string from these exact lines/)
   }
 })
 

@@ -179,8 +179,11 @@ export function renderPrompt(entries: readonly Entry[], options: RenderOptions):
     prompt += `${LABELS[entry.role]}: ${content}\n\n`
   }
   prompt += 'Assistant:'
-  if (options.thinking === 'full') prompt += ` ${THINK_OPENING_FULL}`
-  else if (options.prefill) prompt += ` ${options.prefill}`
+  if (options.prefill) {
+    prompt += options.thinking === 'full' ? ` ${THINK_CLOSED}${options.prefill}` : ` ${options.prefill}`
+  } else if (options.thinking === 'full') {
+    prompt += ` ${THINK_OPENING_FULL}`
+  }
   return prompt
 }
 

@@ -374,6 +374,9 @@ const lineAt = (content: string, offset: number): number => content.slice(0, off
 const excerpt = (content: string, first: number, last: number): string =>
   content.split('\n').slice(first - 1, last).join('\n')
 
+const numberedExcerpt = (content: string, first: number, last: number): string =>
+  content.split('\n').slice(first - 1, last).map((line, i) => `${first + i}: ${line}`).join('\n')
+
 function isSingleIndentedLine(oldText: string, newText: string): boolean {
   const old = toLF(oldText)
   const body = old.endsWith('\n') ? old.slice(0, -1) : old
@@ -506,8 +509,8 @@ export function resolveTolerantEdit(
     if (present.kind === 'match' && present.match.level !== 'similar' && present.match.firstLine <= lastLine && present.match.lastLine >= firstLine) {
       return {
         kind: 'refused',
-        message: `Could not apply edit in ${displayPath}: old_string is not in the file, but new_string already is (line ${present.match.firstLine}). `
-          + `The change appears to be applied already. Read ${displayPath} again before editing it further.`,
+        message: `No edit needed in ${displayPath}: old_string is not in the file, and new_string is already present (line ${present.match.firstLine}). `
+          + `This change is already applied; do not repeat this edit. Continue with any remaining changes, or answer the user directly if all work is done.`,
       }
     }
   }
@@ -523,8 +526,12 @@ export function resolveTolerantEdit(
   let message = `Could not find old_string in ${displayPath}.`
   if (result.closest) {
     const { firstLine, lastLine, similarity: score } = result.closest
-    message += ` The closest text is lines ${firstLine}-${lastLine} (${Math.round(score * 100)}% similar). Copy old_string from these exact lines:\n`
-      + excerpt(content, firstLine, lastLine)
+    const totalLines = content.split('\n').length
+    const ctxFirst = Math.max(1, firstLine - 2)
+    const ctxLast = Math.min(totalLines, lastLine + 2)
+    message += ` The closest text is lines ${firstLine}-${lastLine} (${Math.round(score * 100)}% similar). `
+      + `Current file around lines ${ctxFirst}-${ctxLast} (verify these are the intended lines before editing):\n`
+      + numberedExcerpt(content, ctxFirst, ctxLast)
   } else {
     message += ` Nothing similar was found; read ${displayPath} first to inspect its current content.`
   }
