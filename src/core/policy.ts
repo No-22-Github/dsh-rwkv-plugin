@@ -70,12 +70,6 @@ export function toolFailureReminder(name: string, error: string, recoveryBlocked
   const entry = failed === undefined ? undefined : FAILURE_HINTS[failed.dshName]
   const names: Record<string, string> = Object.fromEntries(tools.map(tool => [tool.dshName, tool.name]))
   if (entry && entry.companions.every(companion => names[companion] !== undefined)) prompt += entry.hint(names)
-  if (failed?.dshName === 'edit') {
-    const alts = ['write', 'edit_lines'].map(dsh => names[dsh]).filter((n): n is string => n !== undefined)
-    if (alts.length > 0) {
-      prompt += `If old_string matching keeps failing on a short file you already read, use ${alts.join(' or ')} instead of repeating ${name}. `
-    }
-  }
   return `${prompt}Choose a different useful tool or answer with the limitation. Do not guess.`
 }
 

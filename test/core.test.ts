@@ -191,8 +191,6 @@ test('no-op edit (old_string === new_string) and failed call repeat each get one
   assert.deepEqual(failStep.decision, { type: 'final', text: 'Could not update a.py.', via: 'answer-stage' })
   assert.match(failGen.prompts[1]!, /repeats an earlier failed call with the exact same arguments/)
   assert.match(failGen.prompts[2]!, /Tool execution is complete and tools are now unavailable/)
-  // toolFailureReminder for edit mentions write fallback.
-  assert.match(failGen.prompts[0]!, /use write instead of repeating edit/)
 })
 
 test('step limit goes straight to the answer stage', async () => {
