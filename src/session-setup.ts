@@ -111,7 +111,7 @@ export function buildExcludedTools(options: {
 }): string[] {
   return [
     ...(options.excludeTools ?? []),
-    ...(options.editMode !== undefined && options.editMode !== 'line-edit' ? ['edit_lines'] : []),
+    ...(options.editMode !== undefined && options.editMode !== 'line-edit' && options.editMode !== 'hashline' ? ['edit_lines'] : []),
     ...(options.worklist === undefined || options.worklist.passive === true ? [TODO_PLAN_TOOL, TODO_UPDATE_TOOL] : []),
   ]
 }

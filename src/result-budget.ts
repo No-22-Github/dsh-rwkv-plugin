@@ -22,6 +22,7 @@
 //
 // No DSH runtime imports: the pipeline's teacher plugin mounts the same hook.
 
+import { formatHashReadResult } from './core/hashline.ts'
 import { toolResponse } from './core/prompt.ts'
 import { providerOfExec, sessionIdOfExec, type AgentLike } from './dsh-host.ts'
 import { countTokens } from './tokenizer.ts'
@@ -89,7 +90,7 @@ export function spillText(text: string, budget: number, notice: (omittedBytes: n
   return bounded
 }
 
-const READ_LINE = /^(\d+): /
+const READ_LINE = /^(\d+):(?:[0-9a-f]{2}\|)? /i
 const READ_TOTAL = /^\n\n\((?:End of file - total (\d+) lines|Showing lines \d+-\d+ of (\d+)\.)/
 
 /** The file and the line numbers a DSH read result shows (as the model gets it), if it is one. */
@@ -169,6 +170,7 @@ export interface ResultBudgetOptions {
   /** Provider ids whose sessions get the budget (the RWKV plugin's routes, or the teacher's). */
   readonly providers: () => readonly string[]
   readonly budget?: number
+  readonly hashline?: () => boolean
   readonly log?: (message: string) => void
 }
 
@@ -192,10 +194,12 @@ export function applyResultBudget(ctx: unknown, options: ResultBudgetOptions): v
     // of "result", a token or two either way.
     const wrap: Wrap = body => toolResponse(exec.name, true, body)
     if (exec.name === 'read') {
-      const bounded = countTokens(wrap(text)) <= budget ? undefined : capReadResult(text, budget, wrap)
-      const window = readWindow(bounded ?? text)
+      const formatted = options.hashline?.() ? formatHashReadResult(text) : text
+      const bounded = countTokens(wrap(formatted)) <= budget ? undefined : capReadResult(formatted, budget, wrap)
+      const finalText = bounded ?? formatted
+      const window = readWindow(finalText)
       if (window !== undefined) context.emit(READ_SHOWN_EVENT, exec, window)
-      return bounded === undefined ? decision : { ...decision, kind: 'accept', content: [{ type: 'text', text: bounded }] }
+      return finalText === text ? decision : { ...decision, kind: 'accept', content: [{ type: 'text', text: finalText }] }
     }
     if (countTokens(wrap(text)) <= budget) return decision
     const store = context.get('spillStore') as SpillStoreLike | undefined

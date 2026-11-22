@@ -88,6 +88,8 @@ function summarizeCallPair(
     target = clean.length > 80 ? `${clean.slice(0, 77)}...` : clean
     if (callItem.name === 'edit_lines' && args.start_line !== undefined && args.end_line !== undefined) {
       target = `${target}:${String(args.start_line)}-${String(args.end_line)}`
+    } else if (callItem.name === 'edit_lines' && args.start !== undefined) {
+      target = `${target}:${String(args.start)}${args.end !== undefined ? `-${String(args.end)}` : ''}`
     }
   }
   let outcome = resultItem.ok ? 'ok' : 'error'
@@ -243,6 +245,8 @@ export function maskResultInPlace(
     target = clean.length > 80 ? `${clean.slice(0, 77)}...` : clean
     if (callItem.name === 'edit_lines' && args.start_line !== undefined && args.end_line !== undefined) {
       target = `${target}:${String(args.start_line)}-${String(args.end_line)}`
+    } else if (callItem.name === 'edit_lines' && args.start !== undefined) {
+      target = `${target}:${String(args.start)}${args.end !== undefined ? `-${String(args.end)}` : ''}`
     }
   }
   const trimmedTrailing = resultItem.text.endsWith('\n') ? resultItem.text.slice(0, -1) : resultItem.text

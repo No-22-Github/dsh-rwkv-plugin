@@ -16,7 +16,7 @@ export interface DeveloperSettings {
   outputRepairs: boolean
   guards: boolean
   /** File editing mode; edits `editMode` in the Host schema. */
-  editMode: 'tolerant' | 'line-edit' | 'literal'
+  editMode: 'tolerant' | 'line-edit' | 'hashline' | 'literal'
   /** Context management mode; edits `historyMode` in the Host schema. */
   historyMode: 'auto-fold' | 'full' | 'worklist'
   worklistMinFoldTokens: number
@@ -273,6 +273,7 @@ function NumberField(props: { value: number; onSave: (value: number) => void; di
 
 const EDIT_MODE_HINT: Record<DeveloperSettings['editMode'], string> = {
   tolerant: '自动对齐缩进空行并做语法检查。',
+  hashline: '行号:短哈希锚点替换，免复述原文并防偏移。',
   'line-edit': '按行号区间替换，隐藏标准 edit。',
   literal: '原样精确匹配，不做容错与检查。',
 }
@@ -312,7 +313,7 @@ export function DeveloperCard(props: {
           {settings.recordTraces ? '轨迹随会话保存' : '轨迹只在内存'}
           {settings.outputRepairs ? '' : ' · 修正已关'}
           {settings.guards ? '' : ' · 修复已关'}
-          {settings.editMode === 'tolerant' ? ' · 容错 edit' : settings.editMode === 'literal' ? ' · 精确 edit' : ' · 行号 edit_lines'}
+          {settings.editMode === 'tolerant' ? ' · 容错 edit' : settings.editMode === 'literal' ? ' · 精确 edit' : settings.editMode === 'hashline' ? ' · 哈希 hashline' : ' · 行号 edit_lines'}
           {historyMode === 'auto-fold'
             ? ` · 自动折叠（${settings.worklistEpochTargetTokens} ← ${settings.worklistBudgetTokens}）`
             : historyMode === 'worklist'
@@ -326,7 +327,7 @@ export function DeveloperCard(props: {
             <span className="rwkv-label">文件编辑模式</span>
             <Segment
               value={settings.editMode} disabled={off}
-              options={[['tolerant', '容错 edit（默认）'], ['line-edit', '行号 edit_lines'], ['literal', '精确 edit']] as const}
+              options={[['tolerant', '容错 edit（默认）'], ['hashline', '哈希 hashline'], ['line-edit', '行号 edit_lines'], ['literal', '精确 edit']] as const}
               onChange={value => { void set('editMode', value) }}
             />
             <p className="rwkv-hint">{EDIT_MODE_HINT[settings.editMode]}</p>
