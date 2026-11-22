@@ -47,6 +47,7 @@
   "exports": {
     ".": "./lib/index.js",
     "./line-edit": "./lib/line-edit.js",
+    "./hashline": "./lib/hashline.js",
     "./todo": "./lib/todo.js",
     "./client": "./lib/client.js",
     "./package.json": "./package.json"

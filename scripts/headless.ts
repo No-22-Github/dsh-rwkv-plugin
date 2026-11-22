@@ -51,7 +51,7 @@ const { values, positionals } = parseArgs({
     // YAML rows appended to the generated cordis.patch.yml (eval overlays: extra
     // plugins, web provider selection). Top-level list items, same indentation.
     'extra-patch': { type: 'string' },
-    // File edit mode: 'tolerant' (default), 'line-edit', or 'literal'.
+    // File edit mode: 'tolerant' (default), 'line-edit', 'hashline', or 'literal'.
     'edit-mode': { type: 'string' },
     // Mount the edit_lines tool (src/line-edit.ts); kept for --edit-mode line-edit or explicit --line-edit.
     'line-edit': { type: 'boolean' },
@@ -135,8 +135,13 @@ const extraPluginConfig = values['plugin-config'] ? JSON.parse(values['plugin-co
 const resolvedEditMode = values['edit-mode']
   ?? (typeof extraPluginConfig.editMode === 'string' ? extraPluginConfig.editMode : undefined)
   ?? (values['native-edit'] ? 'literal' : values['line-edit'] === true ? 'line-edit' : 'tolerant')
-if (resolvedEditMode !== 'tolerant' && resolvedEditMode !== 'line-edit' && resolvedEditMode !== 'literal') {
-  throw new Error(`--edit-mode must be tolerant, line-edit, or literal (got ${String(resolvedEditMode)})`)
+if (
+  resolvedEditMode !== 'tolerant' &&
+  resolvedEditMode !== 'line-edit' &&
+  resolvedEditMode !== 'hashline' &&
+  resolvedEditMode !== 'literal'
+) {
+  throw new Error(`--edit-mode must be tolerant, line-edit, hashline, or literal (got ${String(resolvedEditMode)})`)
 }
 const resolvedHistoryMode = values['history-mode']
   ?? (typeof extraPluginConfig.historyMode === 'string' ? extraPluginConfig.historyMode : undefined)
@@ -224,6 +229,11 @@ writeFileSync(join(profileDir, 'cordis.patch.yml'), [
     ? ['- insert:', '    - id: rwkv-edit-lines', `      name: ${json(values.installed
       ? 'dsh-rwkv-plugin/line-edit'
       : pathToFileURL(join(pluginRoot, fromSource ? 'src/line-edit.ts' : 'lib/line-edit.js')).href)}`]
+    : []),
+  ...(resolvedEditMode === 'hashline'
+    ? ['- insert:', '    - id: rwkv-hashline', `      name: ${json(values.installed
+      ? 'dsh-rwkv-plugin/hashline'
+      : pathToFileURL(join(pluginRoot, fromSource ? 'src/hashline.ts' : 'lib/hashline.js')).href)}`]
     : []),
   ...(values.todo && resolvedHistoryMode === 'worklist'
     ? ['- insert:', '    - id: rwkv-todo', `      name: ${json(values.installed

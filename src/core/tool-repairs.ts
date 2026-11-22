@@ -1,6 +1,7 @@
 // Lenient tool-name resolution, argument key aliases, scalar coercion, and
 // DSH native value shape repairs for 7B outputs.
 
+import { editLinesAliasesFor } from './edit-modes/index.ts'
 import {
   normalizeWorklistStatus,
   parsePlanItems,
@@ -18,6 +19,7 @@ const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   read: 'read_file', view: 'read_file', cat: 'read_file', open_file: 'read_file',
   write: 'write_file', create_file: 'write_file', save_file: 'write_file',
   edit: 'edit_file', str_replace: 'edit_file', replace: 'edit_file', replace_in_file: 'edit_file',
+  hashline: 'edit_lines', hash_edit: 'edit_lines', edit_hash: 'edit_lines',
   glob: 'list_files', ls: 'list_files', list_dir: 'list_files', list_directory: 'list_files',
   grep: 'search_text', search: 'search_text', search_files: 'search_text',
   shell: 'bash', run: 'bash', terminal: 'bash', execute_command: 'bash', run_command: 'bash',
@@ -111,7 +113,9 @@ const looseInt = (value: unknown) => finiteInt(typeof value === 'string' ? Numbe
 
 /** DSH-named tools: alias keys, end_line -> limit, a lone query string -> queries, a bash description. */
 function normalizeNativeArguments(tool: WireTool, args: Args): Args {
-  const aliases = NATIVE_ARGUMENT_ALIASES[tool.dshName]
+  const aliases = tool.dshName === 'edit_lines'
+    ? editLinesAliasesFor({ native: true, schema: tool.schema })
+    : NATIVE_ARGUMENT_ALIASES[tool.dshName]
   if (aliases === undefined) return args
   let out = renameAliases(args, aliases)
   const current = out ?? args
@@ -142,7 +146,9 @@ function normalizeNativeArguments(tool: WireTool, args: Args): Args {
  */
 export function normalizeArguments(tool: WireTool, args: Args): Args {
   if (tool.native === true) return normalizeNativeArguments(tool, args)
-  const aliases = ARGUMENT_ALIASES[tool.name]
+  const aliases = tool.name === 'edit_lines'
+    ? editLinesAliasesFor({ native: false, schema: tool.schema })
+    : ARGUMENT_ALIASES[tool.name]
   if (aliases === undefined) return args
   let out = renameAliases(args, aliases)
   if (tool.name === 'read_file' && args.start_line === undefined && args.offset !== undefined) {

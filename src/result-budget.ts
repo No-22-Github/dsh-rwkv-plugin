@@ -22,7 +22,7 @@
 //
 // No DSH runtime imports: the pipeline's teacher plugin mounts the same hook.
 
-import { formatHashReadResult } from './core/hashline.ts'
+import { formatHashReadResult } from './core/edit-modes/hashline.ts'
 import { toolResponse } from './core/prompt.ts'
 import { providerOfExec, sessionIdOfExec, type AgentLike } from './dsh-host.ts'
 import { countTokens } from './tokenizer.ts'

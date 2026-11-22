@@ -19,12 +19,14 @@ import {
   type EditMode,
   type HistoryMode,
 } from './core/defaults.ts'
+import { usesHashReadFormat } from './core/edit-modes/index.ts'
 import type { ToolMode, ToolNames } from './core/tools.ts'
+import { setFoldedUnreadPaths } from './edit-modes/folded-read-guard.ts'
+import { installEditModeHooks } from './edit-modes/index.ts'
+import { setActiveEditMode } from './edit-modes/mode-state.ts'
 import { applyResultBudget } from './result-budget.ts'
-import { setFoldedUnreadPaths } from './folded-read-guard.ts'
 import { handleServerRoute, handleTraceRoute } from './routes.ts'
 import { resolveHistoryModeConfig } from './session-setup.ts'
-import { applyTolerantEdit } from './tolerant-edit.ts'
 import { flushAndEvictSessionTrace, TraceLocation } from './traces.ts'
 
 export const name = 'rwkv-llm'
@@ -178,6 +180,8 @@ function traceLocationOf(config: Config): TraceLocation {
 }
 
 function settingsOf(config: Config): AdapterSettings {
+  const editMode = config.editMode.get()
+  setActiveEditMode(editMode)
   return {
     models: config.models.get(),
     harness: {
@@ -195,7 +199,7 @@ function settingsOf(config: Config): AdapterSettings {
     },
     toolMode: config.toolMode.get(),
     toolNames: config.toolNames.get(),
-    editMode: config.editMode.get(),
+    editMode,
     excludeTools: config.excludeTools.get(),
     ...Object.keys(config.toolOverrides.get()).length ? { toolOverrides: config.toolOverrides.get() } : {},
     includeDeveloper: config.includeDeveloper.get(),
@@ -235,16 +239,15 @@ export function apply(ctx: Context, config: Config): void {
   // Long tool results in RWKV sessions: cut once when the tool runs, the rest saved to a file.
   applyResultBudget(ctx, {
     providers: () => config.providers,
-    hashline: () => config.editMode.get() === 'hashline',
+    hashline: () => usesHashReadFormat(config.editMode.get()),
     log: message => console.log(`[rwkv-llm] ${message}`),
   })
-  // Recall-tolerant matching, dual-anchor sliding guard, and pre-write syntax check on standard `edit`.
-  applyTolerantEdit(ctx, {
+  // Edit-mode host hooks (`tolerant` / `literal` + live `editMode` sync for `line-edit` / `hashline`).
+  installEditModeHooks(ctx, {
     providers: () => config.providers,
-    enabled: () => config.editMode.get() === 'tolerant',
+    editMode: () => config.editMode.get(),
     outputRepairs: () => config.outputRepairs.get(),
-    syntaxGuard: () => config.guards.get(),
-    foldedReadGuard: () => config.guards.get(),
+    guards: () => config.guards.get(),
   })
   // Server model list and state list / upload / delete for the settings page, behind the /api
   // bridge's authentication (client-connection runs this waterfall only for

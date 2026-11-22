@@ -168,7 +168,7 @@ test('no-op edit (old_string === new_string) and failed call repeat each get one
     { name: 'read', description: '', parameters: { properties: { file_path: { type: 'string' } } } },
     { name: 'edit', description: '', parameters: { properties: { file_path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } } } },
     { name: 'write', description: '', parameters: { properties: { file_path: { type: 'string' }, content: { type: 'string' } } } },
-  ], { names: 'dsh' })
+  ], { mode: 'mapped', names: 'dsh' })
   const history: HistoryItem[] = [
     { kind: 'user', text: 'Update a.py' },
     { kind: 'call', id: 'c1', name: 'edit', args: { file_path: 'a.py', old_string: 'x = 1', new_string: 'x = 2' } },

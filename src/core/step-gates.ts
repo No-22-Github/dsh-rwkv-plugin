@@ -1,6 +1,7 @@
 // Streaming think splitter, tool-call gate, and argument repair pipeline
 // invoked by `decideStep` (`agent.ts`).
 
+import { isNoopEditCall } from './edit-modes/index.ts'
 import { cleanFinalText, type Action } from './parse.ts'
 import {
   callKey,
@@ -130,15 +131,11 @@ export function gateToolCall(
   const { tool } = resolved
   const { args, repairs } = config.outputRepairs ? repairArguments(tool, action.args, resolved.aliased) : { args: action.args, repairs: [] }
   if (!config.guards) return { type: 'run', tool, args, repairs }
-  if (tool.dshName === 'edit') {
-    const oldText = typeof args.old_string === 'string' ? args.old_string : args.old_text
-    const newText = typeof args.new_string === 'string' ? args.new_string : args.new_text
-    if (typeof oldText === 'string' && typeof newText === 'string' && oldText === newText) {
-      if (!duplicateRetryUsed) {
-        return { type: 'duplicate-retry', receipt: [{ role: 'user', text: NOOP_EDIT_REMINDER }] }
-      }
-      return { type: 'closeout', reminder: NOOP_EDIT_REMINDER }
+  if (isNoopEditCall(tool.dshName, args)) {
+    if (!duplicateRetryUsed) {
+      return { type: 'duplicate-retry', receipt: [{ role: 'user', text: NOOP_EDIT_REMINDER }] }
     }
+    return { type: 'closeout', reminder: NOOP_EDIT_REMINDER }
   }
   const key = callKey(tool.name, args)
   if (state.successKeys.has(key)) {

@@ -22,6 +22,7 @@ import {
   type EditMode,
   type HistoryMode,
 } from './core/defaults.ts'
+import { excludedToolsForEditMode } from './core/edit-modes/index.ts'
 import { POST_TOOL_REMINDER_THINK } from './core/policy.ts'
 import { cleanChatText, systemPrompt, WORKLIST_SYSTEM_GUIDANCE } from './core/prompt.ts'
 import type { RelayOptions } from './core/relay.ts'
@@ -111,7 +112,7 @@ export function buildExcludedTools(options: {
 }): string[] {
   return [
     ...(options.excludeTools ?? []),
-    ...(options.editMode !== undefined && options.editMode !== 'line-edit' && options.editMode !== 'hashline' ? ['edit_lines'] : []),
+    ...excludedToolsForEditMode(options.editMode),
     ...(options.worklist === undefined || options.worklist.passive === true ? [TODO_PLAN_TOOL, TODO_UPDATE_TOOL] : []),
   ]
 }

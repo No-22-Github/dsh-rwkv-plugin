@@ -2,8 +2,9 @@
 // `tool-mappings.ts`; name/argument repairs live in `tool-repairs.ts`;
 // stateful worklist schemas/helpers live in `todo-state.ts`).
 
+import { editLinesTrainedWireSpec } from './edit-modes/index.ts'
 import { TODO_PLAN_TOOL } from './todo-state.ts'
-import { BUILTIN_MAPPINGS, type DshToolSchema, type WireTool } from './tool-mappings.ts'
+import { BUILTIN_MAPPINGS, workspacePath, type DshToolSchema, type WireTool } from './tool-mappings.ts'
 
 export {
   isWorklistTool,
@@ -124,15 +125,18 @@ export function buildCatalog(offered: readonly DshToolSchema[], options: Catalog
         fromDsh: args => args,
       })
     } else if (mapping !== undefined) {
-      if (exclude.has(tool.name) || exclude.has(mapping.wireName)) continue
+      const effective = tool.name === 'edit_lines'
+        ? editLinesTrainedWireSpec(tool.parameters, workspacePath)
+        : mapping
+      if (exclude.has(tool.name) || exclude.has(effective.wireName)) continue
       tools.push({
-        name: mapping.wireName,
-        description: mapping.description,
-        arguments: mapping.arguments,
+        name: effective.wireName,
+        description: effective.description,
+        arguments: effective.arguments,
         dshName: tool.name,
-        schema: mapping.schema,
-        toDsh: mapping.toDsh,
-        fromDsh: mapping.fromDsh,
+        schema: effective.schema,
+        toDsh: effective.toDsh,
+        fromDsh: effective.fromDsh,
       })
     } else if (options.mode === 'passthrough' && !exclude.has(tool.name) && tool.name !== EXIT_TOOL_NAME) {
       tools.push({
