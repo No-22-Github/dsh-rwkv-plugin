@@ -12,7 +12,7 @@
 | 一步调几个工具 | 可以并行多个 | 一个 |
 | 输出格式 | 接口保证 | 插件解析、修复、重问（第 3 节） |
 | 重复调用、步数上限 | 插件不插手 | 插件拦截、强制收尾（第 3 节） |
-| 上下文压缩 | 有 | 没有，长会话会撑满窗口 |
+| 上下文压缩 | 有 | 不走 DSH 内置压缩；插件默认开启 `auto-fold v2`，另可选 `worklist` / `relay` / `full` |
 | 图片、文件附件 | 支持 | 换成 `[image]` / `[file]` 占位 |
 | 采样参数 | DSH 设置 | DSH 只能改温度，其余用插件设置（默认 agent-fast） |
 | 停止符 | 可自定义 | 插件管，DSH 传 `stop` 会报错 |
@@ -81,7 +81,7 @@ Never invent file content.
 | 工具 | 说明 |
 |---|---|
 | bash | 跑命令（Windows 上没有，预设里禁用了） |
-| read / write / edit_lines | 读、写、按行号改文本文件（原生 `edit` 在挂行号编辑时自动隐藏） |
+| read / write / edit（或 edit_lines） | 读、写、改文本文件（默认 `tolerant` 挂原生 `edit`；切 `hashline` / `line-edit` 时自动隐藏 `edit` 并暴露 `edit_lines`） |
 | glob / grep | 按路径找文件、按内容搜索 |
 | web_search / web_fetch | 网页搜索、抓取网页 |
 
@@ -95,7 +95,7 @@ Standard 预设里有、RWKV Agent 没挂的东西：
 - **plan 模式**、**todo**、**向用户提问**（ask_user_question）
 - **subagent / subagent_fork / workflow**（RWKV 自己不能再往下委派）
 - **present**、插件管理
-- **上下文压缩**（compaction 和超长工具结果裁剪）：没有压缩，长会话迟早撑满上下文窗口（默认按 32768 token 报给 DSH），iRWKV 超出后会直接返回 400。
+- **DSH 内置上下文压缩**（compaction）：不走 DSH 内置压缩；插件默认启用 **`auto-fold v2`**（历史用户轮结束立即压缩至 `≤2k`，当前轮 `13.5k → 9k` 原地遮蔽工具结果、`<250` tok 免遮、保底留最近 3 对、`14.5k` 阶段归档，并联动 `folded-read-guard` 防盲改），也可切 `worklist` / `relay` / `full`。
 
 ## 3. 兜底手段
 
@@ -153,7 +153,7 @@ Standard 预设里有、RWKV Agent 没挂的东西：
 
 触发条件：
 
-- 本轮工具调用到了 12 次（`maxSteps`）
+- 本轮工具调用到了 15 次（`maxSteps`）
 - 重复调用第二次被拦
 - 用了 `no_tool` 但没写回答
 - 重问次数用完、或者被拦次数超限
@@ -171,7 +171,12 @@ Standard 预设里有、RWKV Agent 没挂的东西：
 ### 3.6 其他
 
 1. **工具结果截断**（[src/result-budget.ts](../src/result-budget.ts)）：在工具执行完的那一刻截一次，DSH 记下来的就是模型看到的。上限 3000 个 RWKV World token，用 vendored 的真 tokenizer 精确计数（[src/tokenizer.ts](../src/tokenizer.ts)，`vendor/rwkv-tokenizer/`，npm 包 rwkv-tokenizer 0.3.3 的 WASM，词表 65,530 与 `rwkv-tokenizer-go` 同一套；对 442 条真实工具结果逐条相同，复测用 `scripts/tokenizer-parity.ts`）。计数对象是模型实际读到的 `<tool_response>` JSON 转义文本，所以 3000 就是 3000，不再留 25% 余量。和 DSH 自带的溢出机制（spill-policy，所有模型 12500 token）做法一样，只是上限更低、只对 RWKV 会话生效：保留头尾各一半，中间换成 `[...]`，完整内容存成文件，结果末尾写明文件路径，模型可以 grep 或 read 去看。read 例外（文件本来就在磁盘上）：在整行处截断，末尾是 read 自己的 `Use offset=N to continue` 提示。以前插件在拼提示词时另截一次（12000 字符，前 80% 后 20%，没有文件路径），和 DSH 的 12500 token 之间的页面既被截掉又拿不到路径，已去掉。老师插件挂同一个函数，训练数据和评测看到的一样。
-   **行号编辑**（默认，[src/line-edit.ts](../src/line-edit.ts)）：`edit_lines` 工具按 read 显示的行号替换一段行，不用抄原文。文件读过之后被别的方式改过（bash 等）就拒绝、要求重读；自己的 edit_lines 改完可以接着改，结果里给出新行号。参照 SWE-agent 的窗口式 `edit <起>:<止>`：改完显示 `[File: 路径 (N lines total)]` 加改动处前后几行、上下还剩多少行，并提醒检查缩进和重复行；改完会让原本能解析的文件出语法错误时（.py 用 python3 compile、.js 用 node --check、.sh 用 bash -n、.json 直接解析，见 [src/syntax-check.ts](../src/syntax-check.ts)）不落盘，把“改了会怎样”和原文并排给模型。headless、评测、老师采集、桌面/`dsh web` 的插件 bundle 都默认挂上（bundle 里挂在 RWKV Agent 预设的插件列表，主 Agent 和 `rwkv_agent` 子 Agent 都带），挂上后目录里的 `edit` 自动隐藏；`--native-edit`（headless 与管线，或 headless 的 `--no-line-edit`）和评测的 `--ak native_edit=true` 回退到 DSH 原生 `edit`，只用于 A/B。已读版本和看过的行号作为 `plugin:rwkv-edit-lines/observed` 记录写进 session 日志（DSH 的 `appendPluginRecord`，ignorable、不进模型可见上下文），续跑/恢复会话时重建，所以多轮评测每轮一个进程也不会丢已读状态；写入会带上当前 session 的 sandbox policy（和 DSH 原生 `write`/`edit` 一样，`ctx.sandboxPolicy.resolve({ session })`），`workspace-write` 下按 session 的工作目录判定；不带 policy 时 DSH 会退到部署默认根（DSH 进程的 cwd），会话工作区里的文件也会被拒。DSH 需 0.2.2-alpha.3 及以上（0.2.2-rc.3 已验证；桌面客户端 0.2.2-rc.2 也满足）。
+   **四种编辑模式与模块结构**（纯核心层 `src/core/edit-modes/` 与宿主层 `src/edit-modes/`，共用 `shared.ts` / `observations.ts` / `syntax-check.ts` / `folded-read-guard.ts` / `mode-state.ts`）：
+   - **`tolerant`（默认，`src/edit-modes/tolerant.ts`）**：保留原生 `edit` 工具名，提供逐级容错匹配（缩进漂移重排、省略空行/上下文、双锚点防滑窗误命中）、增量语法闸门与 `folded-read-guard`（拦截 Auto-Fold 折叠后未重读的盲改）。
+   - **`hashline`（独立导出 `./hashline`，`src/edit-modes/hashline.ts`）**：在 `read` 输出自动附加 `N:hh|`（2-hex FNV-1a 行哈希），隐藏 `edit` 并暴露 `edit_lines`（`replace` / `insert_after` / `delete`）；校验双端哈希与语法闸门，不匹配或语法拦截时返回 `target_line ± 5` 最新带锚点窗口实现局部热刷新。
+   - **`line-edit`（独立导出 `./line-edit`，`src/edit-modes/line-edit.ts`）**：按 `read` 显示的行号通过 `edit_lines` 替换/插入/删除；校验读过状态、文件版本、见过行号与增量语法闸门，并已接通 `folded-read-guard`。
+   - **`literal`（`src/edit-modes/literal.ts`）**：回退原生精确 `edit`（A/B 对照用）。
+   - 四种模式均支持 `mode-state.ts` 跨 bundle 热切换（设置页切换时同步刷新底层 schema），写入统一携带当前 session 的 `sandboxPolicy`；`syntax-check.ts` 覆盖 `.py` / `.js` / `.ts` / `.mts` / `.cts` / `.sh` / `.json`。
 2. **调用后的提醒**：每条工具结果后面附一句提醒，让它"证据够了就回答，只为缺的那个事实再调工具，不要重复成功的调用"。这句只在当前这一轮出现，历史轮次里没有。
 3. **路径修复**（[src/paths.ts](../src/paths.ts)）：G1 抄工作目录时常常漏掉最后一级目录（把 `…/task/ws/a.py` 写成 `…/task/a.py`）。只在原路径不存在、修复后的路径存在时才改，正确的路径、新建的文件和故意指向工作区外的路径都原样放行。
 4. **当前日期**（`currentDate`，默认开，设置页运行参数里的“系统提示词末尾写当前日期和时区”）：系统提示词最后一行写 `Current date: 2026-11-06 (Asia/Shanghai, UTC+08:00).`，用运行 DSH 的机器的时区。只到日期，一天才变一次，推理服务的前缀缓存基本不受影响。开着时，DSH time-context 插件（Standard 预设会挂）追加的时间读数不进历史；关掉时没有日期行，时间读数以 `Current time: <时间戳>.` 备注出现。headless 入口默认关（`--current-date` 打开），评测提示词和训练数据保持一致。

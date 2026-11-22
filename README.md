@@ -19,7 +19,7 @@
 2. **加模型**：**设置 → RWKV Agent → 添加模型**，选后端（`rwkv_lightning CUDA` 或 iRWKV）、填服务地址和上游模型 ID 就行；lightning 还可以挂一个 adapter（可选，服务器上已有或自己上传）。保存后立即生效。
 3. **开始用**：当主 Agent 就新开会话、模型选它、预设选「RWKV Agent」；当子 Agent 就保持 DeepSeek 主 Agent，会多一个 `rwkv_agent` 工具，默认用你加的第一个模型。
 
-编辑默认走行号版 `edit_lines`（按 read 显示的行号改，不用抄原文），原生 `edit` 自动隐藏；要做 A/B 用 `--native-edit`。更新插件就是重新填一次同样的地址再装一遍。
+编辑模式支持四种配置（模块化目录 `src/core/edit-modes/` 与 `src/edit-modes/`）：默认 **`tolerant`**（原生 `edit` 挂容错匹配、增量语法闸门与折叠读防盲改），可选 **`hashline`**（`read` 输出附 `N:hh|` 行哈希、`edit_lines` 双端哈希校验与局部热刷新，独立导出 `./hashline`）、**`line-edit`**（纯行号 `edit_lines`，独立导出 `./line-edit`）与 **`literal`**（原生精确匹配）。上下文管理默认启用 **`auto-fold v2`**。更新插件就是重新填一次同样的地址再装一遍。
 
 ## 一张图
 
@@ -99,8 +99,8 @@ Assistant: <think                                           ← 模型从这里�
 | 功能 | 说明 |
 |---|---|
 | 后端 | rwkv_lightning CUDA（请求级 adapter 可选、支持上传初始 state）、iRWKV 续写接口 |
-| 工具 | bash、read、write、edit_lines、glob、grep、web_search、web_fetch（开启状态化工单时再加 todo_plan / todo_update）；训练时的旧名字自动认回 |
-| 上下文管理 | 完整对话（full）、状态化工单（worklist：按 note 温和折叠早期输出 + 不撤回预算提醒）、轮级接力卡（relay） |
+| 工具 | bash、read、write、edit（或按模式切换为 edit_lines）、glob、grep、web_search、web_fetch（开启状态化工单时再加 todo_plan / todo_update）；训练时的旧名字自动认回 |
+| 上下文管理 | 自动折叠（`auto-fold v2`，默认：历史轮立即压缩 + 当前轮 `13.5k→9k` 原地遮蔽）、完整对话（`full`）、状态化工单（`worklist`）、轮级接力卡（`relay`） |
 | 解析容错 | 先说话再调用、OpenAI 外壳、多余括号、字符串化参数等十来种写法 |
 | 检查与收尾 | 重复调用拦截、连续失败封禁、强制收尾、复读截断 |
 | 设置页 | 模型、state / adapter、运行参数、上下文模式与兜底开关，保存即生效 |
@@ -110,7 +110,7 @@ Assistant: <think                                           ← 模型从这里�
 ## 已知限制
 
 - 一步只调一个工具，不能并行。
-- 不使用 DSH 内置的上下文压缩；长任务可在「开发者 → 上下文管理模式」中选状态化工单（worklist）或轮级接力卡（relay）管理窗口。
+- 不使用 DSH 内置的上下文压缩；插件默认开启 `auto-fold v2` 控制窗口在 `≤14.5k` 内，也可在「开发者 → 上下文管理模式」中切换 `full` / `worklist` / `relay`。
 - 只认文字，图片和附件换成占位符。
 - DSH 界面显示的内容比 RWKV 实际收到的多；要看实际收到什么，用「RWKV」标签页。
 
