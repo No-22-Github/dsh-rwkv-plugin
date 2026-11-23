@@ -23,7 +23,6 @@ import { maxReadLinesForEditMode } from './core/edit-modes/index.ts'
 import type { ToolMode, ToolNames } from './core/tools.ts'
 import { setFoldedUnreadPaths } from './edit-modes/folded-read-guard.ts'
 import { installEditModeHooks } from './edit-modes/index.ts'
-import { setActiveEditMode } from './edit-modes/mode-state.ts'
 import { applyResultBudget } from './result-budget.ts'
 import { handleServerRoute, handleTraceRoute } from './routes.ts'
 import { resolveHistoryModeConfig } from './session-setup.ts'
@@ -181,7 +180,6 @@ function traceLocationOf(config: Config): TraceLocation {
 
 function settingsOf(config: Config): AdapterSettings {
   const editMode = config.editMode.get()
-  setActiveEditMode(editMode)
   return {
     models: config.models.get(),
     harness: {

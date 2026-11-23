@@ -89,7 +89,7 @@ export function spillText(text: string, budget: number, notice: (omittedBytes: n
   return bounded
 }
 
-const READ_LINE = /^(\d+):(?:[0-9a-f]{2}\|)? /i
+const READ_LINE = /^(\d+): /
 const READ_TOTAL = /^\n\n\((?:End of file - total (\d+) lines|Showing lines \d+-\d+ of (\d+)\.)/
 
 /** The file and the line numbers a DSH read result shows (as the model gets it), if it is one. */

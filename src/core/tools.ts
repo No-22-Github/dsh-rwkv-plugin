@@ -2,7 +2,7 @@
 // `tool-mappings.ts`; name/argument repairs live in `tool-repairs.ts`;
 // stateful worklist schemas/helpers live in `todo-state.ts`).
 
-import { editLinesTrainedWireSpec } from './edit-modes/index.ts'
+import { editLinesTrainedWireSpec, LINE_EDIT_DSH_WIRE_ARGUMENTS } from './edit-modes/index.ts'
 import { TODO_PLAN_TOOL } from './todo-state.ts'
 import { BUILTIN_MAPPINGS, workspacePath, type DshToolSchema, type WireTool } from './tool-mappings.ts'
 
@@ -117,7 +117,7 @@ export function buildCatalog(offered: readonly DshToolSchema[], options: Catalog
       tools.push({
         name: tool.name,
         description: tool.description,
-        arguments: flatPlaceholder(tool.parameters),
+        arguments: tool.name === 'edit_lines' ? LINE_EDIT_DSH_WIRE_ARGUMENTS : flatPlaceholder(tool.parameters),
         dshName: tool.name,
         schema: tool.parameters,
         native: true,

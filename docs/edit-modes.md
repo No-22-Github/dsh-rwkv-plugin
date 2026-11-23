@@ -31,7 +31,6 @@
   - `shared.ts`：共用的行拆分、中性窗口渲染（`=== path (lines X-Y of Z) ===`）、已见行号追踪（含批量 `seenAfterBatchEdit`）与沙箱策略辅助函数。
 - **宿主层 `src/edit-modes/`**（接通 DSH 工具注册、文件系统与会话态）：
   - `tolerant.ts` / `line-edit.ts` / `literal.ts`（汇总于 `index.ts`）：包装 `edit`/`edit_lines` 的宿主工具处理器。
-  - `mode-state.ts`：管理当前激活模式，支持跨 bundle 同步。
   - `observations.ts`：记录每个会话对文件的读过状态、文件版本与已见行号范围。
   - `syntax-check.ts`：增量语法闸门，在写入落盘前拦截明显语法错误。
   - `folded-read-guard.ts`：联动上下文折叠状态，拦截未重读的盲改。

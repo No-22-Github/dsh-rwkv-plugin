@@ -114,9 +114,12 @@ export function createLineEditToolDefinition(
           throw new Error(foldedUnreadErrorMessage(target.displayPath, EDIT_LINES_TOOL))
         }
 
-        if (guard.lines !== 'all') {
+        if (guard.lines !== 'all' && !folded) {
           for (const h of edited.hunks) {
-            if (h.anchorVerified && isNonTrivialAnchor(hunks[h.index]?.startText, 8)) continue
+            const rawHunk = hunks[h.index]
+            const startAnchored = h.anchorVerified && isNonTrivialAnchor(rawHunk?.startText, 8)
+            const endAnchored = h.endAnchorVerified && isNonTrivialAnchor(rawHunk?.endText, 4)
+            if (startAnchored && (h.endLine <= h.startLine || endAnchored)) continue
             const missing = unseenLines(guard.lines, h, edited.before.length)
             if (missing.length > 0) {
               throw new Error(unseenRejection(target.displayPath, missing, guard.lines, edited.before.length, LINE_EDIT_CONTEXT_LINES))

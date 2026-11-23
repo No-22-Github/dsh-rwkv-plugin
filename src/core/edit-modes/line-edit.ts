@@ -74,6 +74,14 @@ export const LINE_EDIT_WIRE_SCHEMA: Record<string, unknown> = {
   },
 }
 
+/**
+ * Canonical flat placeholder rendered for `edit_lines` under `toolNames: 'dsh'`.
+ * Keeps the nested `edits[]` hunk structure explicit instead of flattening it
+ * into `"optional array of object"` via generic JSON-schema summarization.
+ */
+export const LINE_EDIT_DSH_WIRE_ARGUMENTS =
+  '{"file_path":"path to edit (read the file first)","edits":[{"start_line":"1-based first line","end_line":"1-based last line (start_line - 1 inserts)","start_text":"original text at start_line without line number","end_text":"optional original text at end_line","new_text":"replacement lines without line numbers (empty deletes)"}]}'
+
 export const LINE_EDIT_TRAINED_ALIASES: Readonly<Record<string, readonly string[]>> = {
   path: PATH_ALIASES,
   start_line: ['startLine', 'line_start', 'from_line', 'start', 'line'],
@@ -113,6 +121,7 @@ export interface ResolvedLineEdit {
   readonly reindented: boolean
   readonly alignedNote?: string
   readonly anchorVerified: boolean
+  readonly endAnchorVerified: boolean
 }
 
 export interface BatchLineEditResult {
@@ -307,6 +316,7 @@ function resolveSingleHunk(
   let resolvedEnd = end
   let alignedNote: string | undefined
   let anchorVerified = false
+  let endAnchorVerified = false
   let matchedAnchorLine: string | undefined
 
   if (hasAnchor && total > 0) {
@@ -409,6 +419,7 @@ function resolveSingleHunk(
       return `Your ${label} in ${displayPath} was NOT applied: end_text (${JSON.stringify(edit.endText.trim())}) did not match line ${resolvedEnd} (${JSON.stringify(before[resolvedEnd - 1]?.trim() ?? '')}).\n\nCurrent lines around line ${resolvedEnd}:\n${win}`
     }
     resolvedEnd = endCheck.endLine
+    endAnchorVerified = true
     if (endCheck.note) {
       alignedNote = alignedNote ? `${alignedNote} ${endCheck.note}` : endCheck.note
     }
@@ -419,7 +430,9 @@ function resolveSingleHunk(
   let newLines = strippedLines
   let reindented = false
 
-  // Auto-align base indentation when `start_text` drifted in leading whitespace relative to the matched file line.
+  // Auto-align base indentation only when `start_text` itself carried non-empty
+  // leading whitespace (so trimmed anchors never push column-0 additions into an
+  // indented block).
   if (allowSelfHeal && matchedAnchorLine !== undefined && newLines.length > 0 && hasAnchor) {
     const anchorWithoutPrefix = stripOptionalLinePrefix(rawAnchor)
     const oldIndent = indentOf(anchorWithoutPrefix)
@@ -428,7 +441,8 @@ function resolveSingleHunk(
     if (
       oldIndent !== fileIndent
       && firstNonBlank !== undefined
-      && ((oldIndent.length > 0 && firstNonBlank.startsWith(oldIndent)) || (oldIndent.length === 0 && indentOf(firstNonBlank) === ''))
+      && oldIndent.length > 0
+      && firstNonBlank.startsWith(oldIndent)
     ) {
       const moved = reindent(newLines.join('\n'), [[oldIndent, fileIndent]]).split('\n')
       if (moved.join('\n') !== newLines.join('\n')) {
@@ -480,6 +494,7 @@ function resolveSingleHunk(
     reindented,
     ...(alignedNote ? { alignedNote } : {}),
     anchorVerified,
+    endAnchorVerified,
   }
 }
 

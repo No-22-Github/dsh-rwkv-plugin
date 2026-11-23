@@ -186,6 +186,18 @@ describe('anchored batch line-edit engine', () => {
     }])
     assert.equal(typeof dupAbove, 'string')
     assert.match(String(dupAbove), /duplicates line 9/)
+    // 5. Trimmed start_text (`oldIndent === ""`) must not auto-indent a column-0 EOF addition
+    const eofAppend = applyAnchoredLineEdits(BUCKET_PY, 'bucket.py', [{
+      startLine: 17,
+      endLine: 16,
+      startText: 'self.tokens = 0',
+      newText: 'def helper():\n    return 1',
+    }])
+    assert.equal(typeof eofAppend, 'object', String(eofAppend))
+    if (typeof eofAppend !== 'string') {
+      assert.equal(eofAppend.hunks[0]!.reindented, false)
+      assert.ok(eofAppend.content.endsWith('\ndef helper():\n    return 1\n'))
+    }
   })
 
   it('parses batch, JSON-stringified edits, camelCase aliases, and single-hunk shorthand', () => {
@@ -236,6 +248,10 @@ describe('edit-modes registry, tool routing, and <=200-line read cap', () => {
     assert.equal(resolveTool(catalog, 'edit')?.tool.dshName, 'edit_lines')
     assert.equal(resolveTool(catalog, 'edit_file')?.tool.dshName, 'edit_lines')
     const editTool = catalog.find(t => t.dshName === 'edit_lines')!
+    const parsedArgs = JSON.parse(editTool.arguments) as { file_path: string; edits: Record<string, string>[] }
+    assert.ok(Array.isArray(parsedArgs.edits), 'dsh catalog exposes explicit edits[] hunk placeholder')
+    assert.equal(typeof parsedArgs.edits[0]?.start_text, 'string')
+    assert.equal(typeof parsedArgs.edits[0]?.new_text, 'string')
     const norm = normalizeArguments(editTool, {
       path: 'bucket.py',
       edits: JSON.stringify([{ startLine: 10, endLine: 10, startText: 'if x:', newText: 'if y:' }]),
@@ -315,5 +331,79 @@ describe('host edit_lines tool: verified-anchor folded-read bypass & batch seen 
     assert.ok(nextSeen.has(21), 'line 20 shifted +2 -1 = 21')
 
     setFoldedUnreadPaths('sess-anchored-1', [])
+  })
+
+  it('requires verified end_text or seen end_line for multi-line edits on partial reads', async () => {
+    const lines = Array.from({ length: 320 }, (_, i) => `val_${i + 1} = ${i + 1}`)
+    let content = `${lines.join('\n')}\n`
+    let version = 1
+    const listeners = new Map<string, ((...args: unknown[]) => void)[]>()
+    const registered: { execute: (args: unknown, exec: unknown) => Promise<unknown> }[] = []
+    const emitEvent = (event: string, ...args: unknown[]) => {
+      for (const l of listeners.get(event) ?? []) l(...args)
+    }
+    const host = {
+      fs: {
+        resolve: async (p: string) => ({ displayPath: p, targetKey: `k:${p}` }),
+        readText: async () => content,
+        writeText: async (_t: unknown, next: string) => { content = next; version++; return { version } },
+        processPath: (t: { displayPath: string }) => `/ws/${t.displayPath}`,
+      },
+      tools: {
+        register: (def: unknown) => { registered.push(def as never); return () => {} },
+      },
+      on(event: string, listener: (...args: unknown[]) => void) {
+        const list = listeners.get(event) ?? []
+        list.push(listener)
+        listeners.set(event, list)
+        return () => {}
+      },
+      emit: emitEvent,
+      get: () => undefined,
+    } as unknown as LineEditHostContext
+    const observations = attachObservations(host)
+    host.tools.register(createLineEditToolDefinition(host, observations))
+    const tool = registered[0]!
+
+    const session = { header: { id: 'sess-partial-1' } }
+    const readExec = { name: 'read', agent: { session, options: { provider: 'rwkv' } } }
+    const editExec = { name: 'edit_lines', agent: { session, options: { provider: 'rwkv' } } }
+
+    emitEvent('fs/observed', { displayPath: 'big.py', targetKey: 'k:big.py' }, { kind: 'present', version }, readExec)
+    emitEvent(READ_SHOWN_EVENT, readExec, { first: 1, last: 200 })
+
+    // Multi-line edit extending past the 200-line read window without end_text must be rejected.
+    await assert.rejects(
+      () => tool.execute({
+        file_path: 'big.py',
+        start_line: 195,
+        end_line: 240,
+        start_text: 'val_195 = 195',
+        new_text: 'val_195 = 0',
+      }, editExec),
+      /not been shown to you/,
+    )
+
+    // Single-line edit within seen lines 1..200 succeeds.
+    const single = await tool.execute({
+      file_path: 'big.py',
+      start_line: 195,
+      end_line: 195,
+      start_text: 'val_195 = 195',
+      new_text: 'val_195 = 995',
+    }, editExec) as { summary: string }
+    assert.match(single.summary, /Replaced lines 195-195/)
+
+    // Multi-line edit extending past line 200 WITH verified end_text succeeds.
+    const bounded = await tool.execute({
+      file_path: 'big.py',
+      start_line: 199,
+      end_line: 240,
+      start_text: 'val_199 = 199',
+      end_text: 'val_240 = 240',
+      new_text: 'val_199 = 999\nval_240 = 2400',
+    }, editExec) as { summary: string }
+    assert.match(bounded.summary, /Replaced lines 199-240/)
+    assert.ok(content.includes('val_240 = 2400'))
   })
 })

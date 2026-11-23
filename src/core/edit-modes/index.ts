@@ -4,6 +4,7 @@
 
 import { DEFAULT_EDIT_MODE, type EditMode } from '../defaults.ts'
 import {
+  LINE_EDIT_DSH_WIRE_ARGUMENTS,
   LINE_EDIT_MODE,
   LINE_EDIT_NATIVE_ALIASES,
   LINE_EDIT_TRAINED_ALIASES,
@@ -13,6 +14,7 @@ import {
 import { LITERAL_EDIT_MODE, type EditModeSpec } from './literal.ts'
 import { TOLERANT_EDIT_MODE } from './tolerant.ts'
 
+export { LINE_EDIT_DSH_WIRE_ARGUMENTS }
 export type { EditModeSpec } from './literal.ts'
 
 export const EDIT_MODES: readonly EditMode[] = ['tolerant', 'line-edit', 'literal']
@@ -28,11 +30,12 @@ export function isEditMode(value: unknown): value is EditMode {
 }
 
 export function editModeSpec(mode: EditMode | undefined): EditModeSpec {
-  return EDIT_MODE_SPECS[mode ?? DEFAULT_EDIT_MODE]
+  const specs = EDIT_MODE_SPECS as Record<string, EditModeSpec | undefined>
+  return specs[mode ?? DEFAULT_EDIT_MODE] ?? EDIT_MODE_SPECS[DEFAULT_EDIT_MODE]
 }
 
 export function excludedToolsForEditMode(mode: EditMode | undefined): readonly string[] {
-  return mode === undefined ? [] : EDIT_MODE_SPECS[mode].excludedTools
+  return mode === undefined ? [] : editModeSpec(mode).excludedTools
 }
 
 export function mountsEditLinesPlugin(mode: EditMode): boolean {
