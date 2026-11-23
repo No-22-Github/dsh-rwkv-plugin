@@ -60,6 +60,9 @@ export interface Settings {
   loopGuard: boolean
   outputRepairs: boolean
   guards: boolean
+  duplicateGateMode: 'epoch' | 'adjacent' | 'off'
+  answerOpenerMode: 'default' | 'zh-only' | 'none'
+  fallbackSummary: boolean
   editMode: EditMode
   historyMode: HistoryMode
   relayBudgetTokens: number
@@ -141,6 +144,12 @@ export const Config = z.object({
     .description('Fix near-miss output: parser repairs, tool name / argument aliases, scalar coercion, DSH value repairs, path repair. Off: exact protocol form only, arguments reach DSH as written.').volatile(),
   guards: z.boolean().default(DEFAULT_HARNESS.guards)
     .description('Harness interventions: format re-asks, duplicate / failure gates, over-budget think close, answer-stage re-asks and fallbacks. Off: the model\'s output stands.').volatile(),
+  duplicateGateMode: z.union(['epoch', 'adjacent', 'off']).default('epoch')
+    .description('Duplicate gate mode when guards is true: epoch (default), adjacent (only consecutive identical calls), or off.').volatile(),
+  answerOpenerMode: z.union(['default', 'zh-only', 'none']).default('default')
+    .description('Attempt-2 answer prefill mode: default, zh-only (avoids English opener collision), or none.').volatile(),
+  fallbackSummary: z.boolean().default(true)
+    .description('When answerStage fails, replace empty prose with "I looked up..." summary instead of salvaging reasoning/prose.').volatile(),
   editMode: z.union(['tolerant', 'line-edit', 'literal']).default('tolerant')
     .description('tolerant (default): recall-tolerant `edit` + syntax guard. line-edit: anchored batch `edit_lines` (`start_text` self-healing + atomic `edits[]` + <=200-line read cap). literal: exact `edit`.').volatile(),
   historyMode: z.union(['auto-fold', 'full', 'relay', 'worklist']).default('auto-fold')
@@ -193,6 +202,9 @@ function settingsOf(config: Config): AdapterSettings {
       sampling: config.sampling.get(),
       outputRepairs: config.outputRepairs.get(),
       guards: config.guards.get(),
+      duplicateGateMode: config.duplicateGateMode.get(),
+      answerOpenerMode: config.answerOpenerMode.get(),
+      fallbackSummary: config.fallbackSummary.get(),
       ...config.taskContract.get() ? { taskContract: config.taskContract.get() } : {},
     },
     toolMode: config.toolMode.get(),

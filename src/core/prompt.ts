@@ -155,6 +155,8 @@ export interface RenderOptions {
   readonly historyEmptyThink?: boolean
   /** Text placed after "Assistant:" (thinking off) to steer the generation. */
   readonly prefill?: string
+  /** Raw text placed verbatim right after "Assistant:" (caller supplies any <think>...</think> framing). */
+  readonly rawAssistantPrefix?: string
 }
 
 const LABELS = { system: 'System', user: 'User', assistant: 'Assistant' } as const
@@ -179,7 +181,9 @@ export function renderPrompt(entries: readonly Entry[], options: RenderOptions):
     prompt += `${LABELS[entry.role]}: ${content}\n\n`
   }
   prompt += 'Assistant:'
-  if (options.prefill) {
+  if (options.rawAssistantPrefix !== undefined) {
+    prompt += options.rawAssistantPrefix
+  } else if (options.prefill) {
     prompt += options.thinking === 'full' ? ` ${THINK_CLOSED}${options.prefill}` : ` ${options.prefill}`
   } else if (options.thinking === 'full') {
     prompt += ` ${THINK_OPENING_FULL}`

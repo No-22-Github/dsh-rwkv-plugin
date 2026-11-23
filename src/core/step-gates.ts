@@ -95,10 +95,13 @@ export class ThinkSplitter {
   }
 }
 
+export type DuplicateGateMode = 'epoch' | 'adjacent' | 'off'
+
 export interface GateOptions {
   readonly outputRepairs: boolean
   readonly guards: boolean
   readonly maxConsecutiveFailures: number
+  readonly duplicateGateMode?: DuplicateGateMode
 }
 
 export type Gate =
@@ -131,25 +134,55 @@ export function gateToolCall(
   const { tool } = resolved
   const { args, repairs } = config.outputRepairs ? repairArguments(tool, action.args, resolved.aliased) : { args: action.args, repairs: [] }
   if (!config.guards) return { type: 'run', tool, args, repairs }
-  if (isNoopEditCall(tool.dshName, args)) {
-    if (!duplicateRetryUsed) {
-      return { type: 'duplicate-retry', receipt: [{ role: 'user', text: NOOP_EDIT_REMINDER }] }
+  const mode: DuplicateGateMode = config.duplicateGateMode ?? 'epoch'
+  if (mode === 'off') {
+    // Allow repeated calls without epoch/adjacent blocking; failure and worklist caps below still apply.
+  } else if (mode === 'adjacent') {
+    if (isNoopEditCall(tool.dshName, args)) {
+      return {
+        type: 'rejected',
+        reason: 'blocked',
+        receipt: [
+          { role: 'assistant', text: recordToolCall(tool.name, args) },
+          { role: 'user', text: toolResponse(tool.name, false, NOOP_EDIT_REMINDER) },
+          { role: 'user', text: NOOP_EDIT_REMINDER },
+        ],
+      }
     }
-    return { type: 'closeout', reminder: NOOP_EDIT_REMINDER }
-  }
-  const key = callKey(tool.name, args)
-  if (state.successKeys.has(key)) {
-    // harness v26: the first repeat of a successful call gets one more decision.
-    if (!duplicateRetryUsed) {
-      return { type: 'duplicate-retry', receipt: [{ role: 'user', text: duplicateRetryReminder(tools) }] }
+    const key = callKey(tool.name, args)
+    if (key !== '' && key === state.lastCallKey) {
+      const msg = state.lastCallOk ? duplicateRetryReminder(tools) : DUPLICATE_FAILED_RETRY_REMINDER
+      return {
+        type: 'rejected',
+        reason: 'blocked',
+        receipt: [
+          { role: 'assistant', text: recordToolCall(tool.name, args) },
+          { role: 'user', text: toolResponse(tool.name, false, msg) },
+          { role: 'user', text: msg },
+        ],
+      }
     }
-    return { type: 'closeout', reminder: DUPLICATE_ANSWER_REMINDER }
-  }
-  if (state.failedEpochs.get(key) === state.successfulCalls) {
-    if (!duplicateRetryUsed) {
-      return { type: 'duplicate-retry', receipt: [{ role: 'user', text: DUPLICATE_FAILED_RETRY_REMINDER }] }
+  } else {
+    if (isNoopEditCall(tool.dshName, args)) {
+      if (!duplicateRetryUsed) {
+        return { type: 'duplicate-retry', receipt: [{ role: 'user', text: NOOP_EDIT_REMINDER }] }
+      }
+      return { type: 'closeout', reminder: NOOP_EDIT_REMINDER }
     }
-    return { type: 'closeout', reminder: state.successfulCalls > 0 ? DUPLICATE_ANSWER_REMINDER : DUPLICATE_FAILED_REMINDER }
+    const key = callKey(tool.name, args)
+    if (state.successKeys.has(key)) {
+      // harness v26: the first repeat of a successful call gets one more decision.
+      if (!duplicateRetryUsed) {
+        return { type: 'duplicate-retry', receipt: [{ role: 'user', text: duplicateRetryReminder(tools) }] }
+      }
+      return { type: 'closeout', reminder: DUPLICATE_ANSWER_REMINDER }
+    }
+    if (state.failedEpochs.get(key) === state.successfulCalls) {
+      if (!duplicateRetryUsed) {
+        return { type: 'duplicate-retry', receipt: [{ role: 'user', text: DUPLICATE_FAILED_RETRY_REMINDER }] }
+      }
+      return { type: 'closeout', reminder: state.successfulCalls > 0 ? DUPLICATE_ANSWER_REMINDER : DUPLICATE_FAILED_REMINDER }
+    }
   }
   if (tool.name === state.consecutiveFailedTool && state.consecutiveFailures >= config.maxConsecutiveFailures) {
     const error = `tool "${tool.name}" blocked after ${state.consecutiveFailures} consecutive failures; choose a different tool or answer`

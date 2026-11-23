@@ -29,10 +29,13 @@ import {
   answerOpener,
   correction,
   EMPTY_EXIT_REASK,
+  extractThinkInner,
+  isChinese,
   oneStageAnswerInstruction,
   POST_TOOL_REMINDER,
   POST_TOOL_REMINDER_THINK,
   salvageAnswerProse,
+  salvageLastResortAnswer,
   transcriptEntries,
   type HistoryItem,
 } from './policy.ts'
@@ -54,6 +57,7 @@ import {
   rawFinal,
   ThinkSplitter,
   type Decision,
+  type DuplicateGateMode,
   type FinalVia,
 } from './step-gates.ts'
 import type { WireTool } from './tools.ts'
@@ -89,6 +93,12 @@ export interface HarnessConfig {
    * summary fallbacks.
    */
   readonly guards: boolean
+  /** Duplicate gate mode when `guards` is true: 'epoch' (default), 'adjacent', or 'off'. */
+  readonly duplicateGateMode?: DuplicateGateMode
+  /** Attempt-2 answer prefill mode: 'default', 'zh-only' (avoids English opener collision), or 'none'. */
+  readonly answerOpenerMode?: 'default' | 'zh-only' | 'none'
+  /** Whether answer-stage failure replaces empty outputs with "I looked up..." summary (default true). */
+  readonly fallbackSummary?: boolean
   /** Turn-relay context: finished legs are replaced by model-written handoff cards. */
   readonly relay?: RelayOptions
   /** Stateful work list or passive auto-fold context. */
@@ -191,21 +201,25 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
     stage: 'decision' | 'answer' | 'card',
     label: string,
     prefill?: string,
+    options?: { readonly rawAssistantPrefix?: string; readonly extraStops?: readonly string[] },
   ): Promise<{ output: string; result: GenerateResult; prompt: string }> => {
+    const rawPrefix = options?.rawAssistantPrefix
     const prompt = renderPrompt(entries, {
       thinking: config.thinking,
       historyEmptyThink: config.historyEmptyThink,
       ...prefill === undefined ? {} : { prefill },
+      ...rawPrefix === undefined ? {} : { rawAssistantPrefix: rawPrefix },
     })
     hooks?.attempt?.(label)
-    const hasOpenThink = config.thinking === 'full' && prefill === undefined
+    const hasOpenThink = config.thinking === 'full' && prefill === undefined && rawPrefix === undefined
     const splitter = hasOpenThink && hooks?.reasoning ? new ThinkSplitter(hooks.reasoning) : undefined
+    const stops = options?.extraStops ? [...DECISION_STOPS, ...options.extraStops] : [...DECISION_STOPS]
     const request: GenerateRequest = {
       prompt,
       maxTokens: stage === 'answer' ? config.answerMaxTokens
         : stage === 'card' ? config.relay?.cardMaxTokens ?? DEFAULT_RELAY_CARD_MAX_TOKENS
         : config.decisionMaxTokens,
-      stops: [...DECISION_STOPS],
+      stops,
       sampling: config.sampling,
       ...input.signal ? { signal: input.signal } : {},
       ...input.sessionId ? { sessionId: input.sessionId } : {},
@@ -252,7 +266,10 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       result = { ...next, text }
     }
     completionTokens += spent
-    return { output: hasOpenThink ? reconstructOutput(text, config.thinking) : text, result: { ...result, text }, prompt }
+    const output = rawPrefix !== undefined
+      ? `${rawPrefix.trimStart()}${text}`
+      : hasOpenThink ? reconstructOutput(text, config.thinking) : text
+    return { output, result: { ...result, text }, prompt }
   }
 
   let worklistTrace: WorklistTrace | undefined
@@ -364,13 +381,54 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
     ]
     let lastOutput = ''
     let opener: string | undefined
+    let priorThink = ''
+    const outputs: string[] = []
+    const openerMode = config.answerOpenerMode ?? 'default'
     for (let attempt = 0; attempt < (config.guards ? 3 : 1); attempt++) {
+      let rawAssistantPrefix: string | undefined
+      let extraStops: readonly string[] | undefined
       if (attempt === 2) {
-        opener = answerOpener(state.task)
+        if (openerMode === 'default') {
+          opener = answerOpener(state.task)
+        } else if (openerMode === 'zh-only' && isChinese(state.task)) {
+          opener = '根据上面的工具结果，'
+        } else {
+          extraStops = ['<tool_call>', '<tool_call']
+          rawAssistantPrefix = config.thinking === 'full' ? ` <think>${priorThink}</think>\n` : undefined
+        }
       }
-      const { output, result, prompt } = await generate(staged, 'answer', attempt === 0 ? 'answer' : 'answer re-ask', opener)
-      const action = parseAction(opener ? `${opener}${output}` : output, result.finish, parseOptions)
+      const genOpts = rawAssistantPrefix !== undefined || extraStops !== undefined
+        ? {
+          ...rawAssistantPrefix === undefined ? {} : { rawAssistantPrefix },
+          ...extraStops === undefined ? {} : { extraStops },
+        }
+        : undefined
+      let { output, result, prompt } = await generate(staged, 'answer', attempt === 0 ? 'answer' : 'answer re-ask', opener, genOpts)
+      const closedThink = extractThinkInner(output)
+      if (closedThink !== '') priorThink = closedThink
       lastOutput = opener ? `${opener}${output}` : output
+      outputs.push(lastOutput)
+      let action = parseAction(lastOutput, result.finish, parseOptions)
+      if (
+        attempt === 2
+        && openerMode === 'zh-only'
+        && !isChinese(state.task)
+        && action.type === 'error'
+        && action.kind === 'empty'
+        && (result.stop === '<tool_call>' || result.stop === '<tool_call')
+      ) {
+        const retryPrefix = config.thinking === 'full' ? ` <think>${priorThink}</think>Summary:\n` : 'Summary:\n'
+        const retry = await generate(staged, 'answer', 'answer re-ask', undefined, {
+          rawAssistantPrefix: retryPrefix,
+          extraStops: ['<tool_call>', '<tool_call'],
+        })
+        output = retry.output
+        result = retry.result
+        prompt = retry.prompt
+        lastOutput = output
+        outputs.push(lastOutput)
+        action = parseAction(lastOutput, result.finish, parseOptions)
+      }
       if (allowTools && action.type === 'tool' && state.steps < config.maxSteps) {
         const gated = gateToolCall(action, state, tools, config, true)
         if (gated.type === 'run') {
@@ -393,7 +451,9 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       if (attempt === 0) staged.push({ role: 'user', text: ANSWER_STAGE_REASK })
     }
     if (!config.guards) return done(rawFinal(lastOutput))
-    const salvaged = salvageAnswerProse(lastOutput, opener)
+    const salvaged = config.fallbackSummary === false
+      ? salvageLastResortAnswer(outputs, opener)
+      : salvageAnswerProse(lastOutput, opener)
     if (salvaged !== '') return done({ type: 'final', text: cleanFinalText(salvaged), via: 'salvage' })
     return done({ type: 'final', text: answerFallbackSummary(state.task, state.results), via: 'summary' })
   }
@@ -401,12 +461,14 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
   if (state.steps >= config.maxSteps) return answerStage(base, [])
 
   const extra: Entry[] = []
+  const decisionOutputs: string[] = []
   let protocolRetries = 0
   let duplicateRetryUsed = false
   let blockedRetries = 0
   for (let attempt = 0; attempt < config.protocolRetries + 4; attempt++) {
     const label = attempt === 0 ? 'decide' : 're-ask'
     const { output, result, prompt } = await generate([...base, ...extra], 'decision', label)
+    decisionOutputs.push(output)
     if (result.finish === 'cancelled') throw new DOMException('aborted', 'AbortError')
     const action = parseAction(output, result.finish, parseOptions)
     const note = (outcome: string, gateRepairs?: readonly string[]) => traced('decision', prompt, output, result, action, outcome, gateRepairs)
@@ -446,7 +508,12 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
     note(config.guards ? 're-ask' : 'raw')
     if (!config.guards) return done(rawFinal(output))
     if (++protocolRetries > config.protocolRetries) {
-      return state.steps > 0 ? answerStage([...base, ...extra], [], true) : done({
+      if (state.steps > 0) return answerStage([...base, ...extra], [], true)
+      if (config.fallbackSummary === false) {
+        const salvaged = salvageLastResortAnswer(decisionOutputs)
+        if (salvaged !== '') return done({ type: 'final', text: cleanFinalText(salvaged), via: 'salvage' })
+      }
+      return done({
         type: 'final',
         text: answerFallbackSummary(state.task, state.results),
         via: 'summary',

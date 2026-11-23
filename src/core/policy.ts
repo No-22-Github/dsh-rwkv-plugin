@@ -4,8 +4,8 @@
 // the history, so the turn state is rebuilt from that history on every request.
 
 import { FOLDED_OUTPUT_MARKER } from './defaults.ts'
+import { cleanFinalText, type ParseErrorKind } from './parse.ts'
 import { recordToolCall, toolResponse, type Entry } from './prompt.ts'
-import type { ParseErrorKind } from './parse.ts'
 import type { Args, WireTool } from './tools.ts'
 
 export type HistoryItem =
@@ -125,6 +125,44 @@ export function salvageAnswerProse(output: string, opener = ''): string {
   return PLANNING_MARKERS.some(marker => lower.includes(marker)) ? '' : text
 }
 
+/** Extracts text inside the last closed <think>...</think> block, stripping any stray tool frames. */
+export function extractThinkInner(output: string): string {
+  const close = output.lastIndexOf('</think>')
+  if (close < 0) return ''
+  const open = output.lastIndexOf('<think>', close)
+  if (open < 0) return ''
+  let inner = output.slice(open + '<think>'.length, close)
+  const frame = inner.toLowerCase().indexOf('<tool_call')
+  if (frame >= 0) inner = inner.slice(0, frame)
+  return inner.trim()
+}
+
+/**
+ * Stronger last-resort extraction for `fallbackSummary: false`: tries `salvageAnswerProse`
+ * first, then any post-think non-frame prose across attempts, and finally the clearest
+ * inner reasoning so deduced facts survive instead of "I looked up...".
+ */
+export function salvageLastResortAnswer(outputs: readonly string[], opener = ''): string {
+  for (let index = outputs.length - 1; index >= 0; index--) {
+    const salvaged = salvageAnswerProse(outputs[index]!, opener)
+    if (salvaged !== '') return salvaged
+  }
+  for (let index = outputs.length - 1; index >= 0; index--) {
+    let text = outputs[index]!
+    const think = text.lastIndexOf('</think>')
+    if (think >= 0) text = text.slice(think + '</think>'.length)
+    const frame = text.toLowerCase().indexOf('<tool_call')
+    if (frame >= 0) text = text.slice(0, frame)
+    text = cleanFinalText(text.replace(/<\/?think>/g, ''))
+    if ([...text].length >= 4) return text
+  }
+  for (let index = outputs.length - 1; index >= 0; index--) {
+    const inner = cleanFinalText(extractThinkInner(outputs[index]!))
+    if ([...inner].length >= 4) return inner
+  }
+  return ''
+}
+
 /** Harness-written last resort: what was looked up and how it went; it never claims a fact. */
 export function answerFallbackSummary(task: string, results: readonly TurnResult[]): string {
   const zh = isChinese(task)
@@ -210,6 +248,10 @@ export interface TurnState {
   readonly successKeys: ReadonlySet<string>
   /** Failed call key → successful-call count when it failed (no success since = same epoch). */
   readonly failedEpochs: ReadonlyMap<string, number>
+  /** Canonical key of the immediately preceding non-bookkeeping workspace call in this gate window. */
+  readonly lastCallKey: string
+  /** Whether that immediately preceding workspace call succeeded. */
+  readonly lastCallOk: boolean
   readonly consecutiveFailedTool: string
   readonly consecutiveFailures: number
 }
@@ -251,6 +293,8 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
   let workspaceSteps = 0
   let consecutiveWorklistCalls = 0
   let successfulCalls = 0
+  let lastCallKey = ''
+  let lastCallOk = false
   let consecutiveFailedTool = ''
   let consecutiveFailures = 0
   for (let index = start; index < history.length; index++) {
@@ -272,12 +316,20 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
       if (mutating) successKeys.clear()
       const maskedInPlace = item.text.startsWith(FOLDED_OUTPUT_MARKER) || (options.maskedCallIds?.has(item.id) ?? false)
       if (!maskedInPlace) successKeys.add(key)
+      if (!BOOKKEEPING_TOOLS.has(calledName) && !BOOKKEEPING_TOOLS.has(item.name)) {
+        lastCallKey = maskedInPlace ? '' : key
+        lastCallOk = true
+      }
       failedEpochs.delete(key)
       successfulCalls++
       consecutiveFailedTool = ''
       consecutiveFailures = 0
     } else {
       failedEpochs.set(key, successfulCalls)
+      if (!BOOKKEEPING_TOOLS.has(calledName) && !BOOKKEEPING_TOOLS.has(item.name)) {
+        lastCallKey = key
+        lastCallOk = false
+      }
       if (item.name === consecutiveFailedTool) consecutiveFailures++
       else {
         consecutiveFailedTool = item.name
@@ -293,6 +345,8 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
     successfulCalls,
     successKeys,
     failedEpochs,
+    lastCallKey,
+    lastCallOk,
     consecutiveFailedTool,
     consecutiveFailures,
   }

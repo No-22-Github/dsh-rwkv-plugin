@@ -591,3 +591,84 @@ test('toolOverrides replace description and named argument placeholders only', (
   assert.equal(edited!.description, 'D')
   assert.equal(edited!.arguments, '{"file_path":"Path to edit","old_string":"O","new_string":"Literal replacement text"}')
 })
+
+test('duplicateGateMode adjacent allows read -> failed edit -> read while rejecting consecutive identical calls', async () => {
+  const adjacentCfg: HarnessConfig = { ...harness, duplicateGateMode: 'adjacent' }
+  const readThenFailedEdit: HistoryItem[] = [
+    { kind: 'user', text: 'Fix a.txt and verify' },
+    { kind: 'call', id: 'c1', name: 'read_file', args: { path: 'a.txt' } },
+    { kind: 'result', id: 'c1', name: 'read_file', ok: true, text: '1: old' },
+    { kind: 'call', id: 'c2', name: 'edit_file', args: { path: 'a.txt', old_string: 'nope', new_string: 'new' } },
+    { kind: 'result', id: 'c2', name: 'edit_file', ok: false, text: 'Error: not found' },
+  ]
+  const reread = new ScriptedGenerator(['>Let me re-read a.txt.</think><tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}'])
+  const step = await decideStep({ history: readThenFailedEdit, tools, config: adjacentCfg, generator: reread })
+  assert.equal(step.decision.type, 'tool')
+  assert.equal(step.decision.type === 'tool' && step.decision.tool.name, 'read_file')
+
+  // Strictly consecutive identical calls are rejected with a receipt rather than instant closeout.
+  const backToBack: HistoryItem[] = [
+    { kind: 'user', text: 'Check a.txt' },
+    { kind: 'call', id: 'c1', name: 'read_file', args: { path: 'a.txt' } },
+    { kind: 'result', id: 'c1', name: 'read_file', ok: true, text: '1: hello' },
+  ]
+  const dupThenFix = new ScriptedGenerator([
+    '>read again</think><tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}',
+    '>read another</think><tool_call>{"name":"read_file","arguments":{"path":"b.txt"}}',
+  ])
+  const recovered = await decideStep({ history: backToBack, tools, config: adjacentCfg, generator: dupThenFix })
+  assert.equal(recovered.decision.type, 'tool')
+  assert.equal(recovered.decision.type === 'tool' && recovered.decision.tool.name, 'read_file')
+  assert.deepEqual(recovered.decision.type === 'tool' && recovered.decision.args, { path: 'b.txt' })
+  assert.match(dupThenFix.prompts[1]!, /rejected because it repeats a successful call/)
+})
+
+test('answerOpenerMode zh-only preserves priorThink on English tasks and stops cleanly at <tool_call>', async () => {
+  const cfg: HarnessConfig = { ...harness, maxSteps: 1, answerOpenerMode: 'zh-only', fallbackSummary: false }
+  const atLimit: HistoryItem[] = [
+    { kind: 'user', text: 'What value is in a.txt?' },
+    { kind: 'call', id: 'c1', name: 'read_file', args: { path: 'a.txt' } },
+    { kind: 'result', id: 'c1', name: 'read_file', ok: true, text: 'VALUE=42' },
+  ]
+  class StopAwareGenerator implements Generator {
+    readonly prompts: string[] = []
+    readonly stops: (readonly string[])[] = []
+    private readonly responses: GenerateResult[]
+    constructor(responses: GenerateResult[]) {
+      this.responses = [...responses]
+    }
+    generate(request: GenerateRequest): Promise<GenerateResult> {
+      this.prompts.push(request.prompt)
+      this.stops.push(request.stops)
+      const next = this.responses.shift()
+      if (!next) throw new Error('no scripted response left')
+      return Promise.resolve(next)
+    }
+  }
+  const gen = new StopAwareGenerator([
+    { text: '>The value is 42.</think><tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}</tool_call>', finish: 'stop', stop: '</tool_call>' },
+    { text: '>Still want a tool.</think><tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}</tool_call>', finish: 'stop', stop: '</tool_call>' },
+    { text: 'The value in a.txt is 42.', finish: 'stop', stop: '<tool_call>' },
+  ])
+  const res = await decideStep({ history: atLimit, tools, config: cfg, generator: gen })
+  assert.deepEqual(res.decision, { type: 'final', text: 'The value in a.txt is 42.', via: 'answer-stage' })
+  assert.equal(gen.prompts[2]!.includes('Based on the tool results above,'), false)
+  assert.match(gen.prompts[2]!, /Assistant: <think>Still want a tool\.<\/think>\n$/)
+  assert.ok(gen.stops[2]!.includes('<tool_call>'))
+})
+
+test('fallbackSummary false salvages inner reasoning instead of "I looked up..." summary', async () => {
+  const cfg: HarnessConfig = { ...harness, maxSteps: 1, answerOpenerMode: 'none', fallbackSummary: false }
+  const atLimit: HistoryItem[] = [
+    { kind: 'user', text: 'Count lines in a.txt' },
+    { kind: 'call', id: 'c1', name: 'read_file', args: { path: 'a.txt' } },
+    { kind: 'result', id: 'c1', name: 'read_file', ok: true, text: 'line1\nline2\nline3' },
+  ]
+  const gen = new ScriptedGenerator([
+    '>There are exactly 3 lines in a.txt.</think><tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}',
+    '>Confirming 3 lines.</think><tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}',
+    '<tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}',
+  ])
+  const res = await decideStep({ history: atLimit, tools, config: cfg, generator: gen })
+  assert.deepEqual(res.decision, { type: 'final', text: 'Confirming 3 lines.', via: 'salvage' })
+})
