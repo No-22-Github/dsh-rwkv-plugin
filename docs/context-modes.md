@@ -53,4 +53,4 @@
 长程任务中，早期 `read` 或 `write` 的输出被折叠成 `[Old ...]` 占位后，模型若凭模糊记忆继续修改该文件，极易出现行号错位或上下文幻觉。插件通过两处配合拦截盲改：
 
 1. **折叠态路径追踪（`src/core/fold-pairs.ts`）**：`foldedUnreadPaths` 扫描当前活动窗口，收集所有「曾读过或写过，但其输出已被折叠且之后未重新 `read`」的文件路径。
-2. **编辑前拦截（[src/edit-modes/folded-read-guard.ts](../src/edit-modes/folded-read-guard.ts)）**：维护每会话（最多 `512` 个会话）的未重读路径集合；在 `tolerant`、`hashline`、`line-edit` 执行修改前调用 `isFoldedUnreadPath` 检查，命中则拒绝修改并返回明确提示，要求先对目标文件重新调用 `read` 再编辑。
+2. **编辑前拦截（[src/edit-modes/folded-read-guard.ts](../src/edit-modes/folded-read-guard.ts)）**：维护每会话（最多 `512` 个会话）的未重读路径集合；在 `tolerant` 与 `line-edit` 执行修改前调用 `isFoldedUnreadPath` 检查，命中则拒绝修改并提示先重读（`line-edit` 中若所有 hunk 均携带已校验通过的非平凡 `start_text` 锚点且文件版本未变，允许免重读直接定位修改）。

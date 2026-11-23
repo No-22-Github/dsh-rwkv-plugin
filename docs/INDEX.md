@@ -15,7 +15,7 @@
 | 文档 | 大致大小 | 职责说明 |
 |---|---|---|
 | [docs/wire-and-prompt.md](wire-and-prompt.md) | ~11.2 KB | 字节级提示词拼装、`Assistant:` 无空格铁律、停止符、`agent-fast` 采样、`recover-preamble` 与容错解析、双开关与 `rwkv-trace.jsonl` 排查 |
-| [docs/edit-modes.md](edit-modes.md) | ~4.9 KB | 4 种编辑模式（`tolerant` / `hashline` / `line-edit` / `literal`）、`src/core/edit-modes/` 与 `src/edit-modes/` 解耦、行哈希校验与增量语法闸门 |
+| [docs/edit-modes.md](edit-modes.md) | ~5.0 KB | 3 种编辑模式（`tolerant` / `line-edit` / `literal`）、Anchored Batch `edit_lines` 三级自愈、`src/core/edit-modes/` 与 `src/edit-modes/` 解耦与增量语法闸门 |
 | [docs/context-modes.md](context-modes.md) | ~5.1 KB | `auto-fold v2`（默认）、`worklist`、`relay`、`full` 上下文管理、`3000` tok 结果截断与 `folded-read-guard` 防盲改机制 |
 
 ## 样例参考（按需抽查）
@@ -29,5 +29,5 @@
 ## 按场景快速定位
 
 - **想改提示词或排查输出解析 / 重复拦截**：先看 [how-it-works.md](how-it-works.md)，再读 [wire-and-prompt.md](wire-and-prompt.md)（注意改提示词需同步重采训练数据）。
-- **想改 `edit` / `edit_lines` 行为或行哈希逻辑**：看 [edit-modes.md](edit-modes.md)。
+- **想改 `edit` / `edit_lines` 行为或锚点自愈逻辑**：看 [edit-modes.md](edit-modes.md)。
 - **想调上下文窗口、折叠阈值或防盲改**：看 [context-modes.md](context-modes.md)。

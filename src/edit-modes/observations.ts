@@ -1,5 +1,5 @@
-// Shared session file-version and visible-line observation store used by both
-// `line-edit` and `hashline` DSH tool plugins. Persists per-file versions and
+// Shared session file-version and visible-line observation store used by the
+// `line-edit` DSH tool plugin. Persists per-file versions and
 // seen line numbers in session plugin records (`plugin:rwkv-edit-lines/observed`)
 // so process-per-turn evaluators keep read state across resumed turns, while
 // enforcing `folded-read-guard` when earlier `read` outputs were folded out.
@@ -203,23 +203,29 @@ export async function resolveTargetWithGuards(
   observations: Observations,
   rawFilePath: string,
   exec: LineEditExecLike,
-): Promise<{ readonly target: FsTargetLike; readonly guard: { kind: 'replaceIfVersion'; version: unknown; lines: SeenLines } }> {
+  options?: { readonly allowFolded?: boolean },
+): Promise<{
+  readonly target: FsTargetLike
+  readonly guard: { kind: 'replaceIfVersion'; version: unknown; lines: SeenLines }
+  readonly folded: boolean
+}> {
   if (typeof rawFilePath !== 'string' || rawFilePath.trim() === '') {
     throw new Error('file_path must be a non-empty string')
   }
   const cwd = await ensureExecWorkingDir(host, exec)
   const resolveOpts = { ...cwd !== undefined ? { cwd } : {}, ...exec.signal ? { signal: exec.signal } : {} }
   const target = await host.fs.resolve(rawFilePath, resolveOpts)
-  if (isFoldedUnreadPath(sessionIdOfExec(exec), [
+  const folded = isFoldedUnreadPath(sessionIdOfExec(exec), [
     host.fs.processPath(target),
     target.displayPath,
     ...(cwd !== undefined ? [resolve(cwd, rawFilePath.trim())] : []),
-  ])) {
+  ])
+  if (folded && !options?.allowFolded) {
     throw new Error(foldedUnreadErrorMessage(target.displayPath, EDIT_LINES_TOOL))
   }
   const guard = observations.guard(exec, target)
   if (typeof guard === 'string') throw new Error(guard)
-  return { target, guard }
+  return { target, guard, folded }
 }
 
 export function remediateStaleVersion(error: unknown): unknown {

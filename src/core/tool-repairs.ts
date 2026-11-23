@@ -2,6 +2,7 @@
 // DSH native value shape repairs for 7B outputs.
 
 import { editLinesAliasesFor } from './edit-modes/index.ts'
+import { normalizeLineEditArgs } from './edit-modes/line-edit.ts'
 import {
   normalizeWorklistStatus,
   parsePlanItems,
@@ -19,7 +20,6 @@ const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   read: 'read_file', view: 'read_file', cat: 'read_file', open_file: 'read_file',
   write: 'write_file', create_file: 'write_file', save_file: 'write_file',
   edit: 'edit_file', str_replace: 'edit_file', replace: 'edit_file', replace_in_file: 'edit_file',
-  hashline: 'edit_lines', hash_edit: 'edit_lines', edit_hash: 'edit_lines',
   glob: 'list_files', ls: 'list_files', list_dir: 'list_files', list_directory: 'list_files',
   grep: 'search_text', search: 'search_text', search_files: 'search_text',
   shell: 'bash', run: 'bash', terminal: 'bash', execute_command: 'bash', run_command: 'bash',
@@ -38,6 +38,10 @@ export function resolveTool(tools: readonly WireTool[], name: string): { tool: W
     ?? tools.find(tool => tool.dshName.toLowerCase() === lower)
     // DSH-named catalog: the trained names (read_file, ...) and their aliases.
     ?? tools.find(tool => BUILTIN_MAPPINGS[tool.dshName]?.wireName === (TOOL_NAME_ALIASES[lower] ?? lower))
+    // Cross-harness compatibility: when `edit_lines` replaces `edit`, route `edit`/`edit_file` calls to `edit_lines`.
+    ?? ((lower === 'edit' || lower === 'edit_file' || TOOL_NAME_ALIASES[lower] === 'edit_file')
+      ? tools.find(tool => tool.dshName === 'edit_lines')
+      : undefined)
   return target ? { tool: target, aliased: true } : undefined
 }
 
@@ -114,11 +118,14 @@ const looseInt = (value: unknown) => finiteInt(typeof value === 'string' ? Numbe
 /** DSH-named tools: alias keys, end_line -> limit, a lone query string -> queries, a bash description. */
 function normalizeNativeArguments(tool: WireTool, args: Args): Args {
   const aliases = tool.dshName === 'edit_lines'
-    ? editLinesAliasesFor({ native: true, schema: tool.schema })
+    ? editLinesAliasesFor({ native: true })
     : NATIVE_ARGUMENT_ALIASES[tool.dshName]
   if (aliases === undefined) return args
   let out = renameAliases(args, aliases)
   const current = out ?? args
+  if (tool.dshName === 'edit_lines' && current.edits !== undefined) {
+    out = normalizeLineEditArgs(current)
+  }
   if (tool.dshName === 'read' && current.end_line !== undefined) {
     const start = looseInt(current.offset) ?? 1
     const end = looseInt(current.end_line)
@@ -147,10 +154,13 @@ function normalizeNativeArguments(tool: WireTool, args: Args): Args {
 export function normalizeArguments(tool: WireTool, args: Args): Args {
   if (tool.native === true) return normalizeNativeArguments(tool, args)
   const aliases = tool.name === 'edit_lines'
-    ? editLinesAliasesFor({ native: false, schema: tool.schema })
+    ? editLinesAliasesFor({ native: false })
     : ARGUMENT_ALIASES[tool.name]
   if (aliases === undefined) return args
   let out = renameAliases(args, aliases)
+  if (tool.name === 'edit_lines' && (out ?? args).edits !== undefined) {
+    out = normalizeLineEditArgs(out ?? args)
+  }
   if (tool.name === 'read_file' && args.start_line === undefined && args.offset !== undefined) {
     const start = looseInt(args.offset)
     const limit = looseInt(args.limit)

@@ -86,10 +86,14 @@ function summarizeCallPair(
   if (typeof rawKey === 'string' && rawKey.trim() !== '') {
     const clean = rawKey.trim().replace(/\s+/g, ' ')
     target = clean.length > 80 ? `${clean.slice(0, 77)}...` : clean
-    if (callItem.name === 'edit_lines' && args.start_line !== undefined && args.end_line !== undefined) {
+    if (callItem.name === 'edit_lines' && Array.isArray(args.edits) && args.edits.length > 0) {
+      const first = args.edits[0] as Record<string, unknown> | undefined
+      if (first && first.start_line !== undefined && first.end_line !== undefined) {
+        const extra = args.edits.length > 1 ? ` (+${args.edits.length - 1})` : ''
+        target = `${target}:${String(first.start_line)}-${String(first.end_line)}${extra}`
+      }
+    } else if (callItem.name === 'edit_lines' && args.start_line !== undefined && args.end_line !== undefined) {
       target = `${target}:${String(args.start_line)}-${String(args.end_line)}`
-    } else if (callItem.name === 'edit_lines' && args.start !== undefined) {
-      target = `${target}:${String(args.start)}${args.end !== undefined ? `-${String(args.end)}` : ''}`
     }
   }
   let outcome = resultItem.ok ? 'ok' : 'error'
@@ -243,10 +247,14 @@ export function maskResultInPlace(
   if (typeof rawKey === 'string' && rawKey.trim() !== '') {
     const clean = rawKey.trim().replace(/\s+/g, ' ')
     target = clean.length > 80 ? `${clean.slice(0, 77)}...` : clean
-    if (callItem.name === 'edit_lines' && args.start_line !== undefined && args.end_line !== undefined) {
+    if (callItem.name === 'edit_lines' && Array.isArray(args.edits) && args.edits.length > 0) {
+      const first = args.edits[0] as Record<string, unknown> | undefined
+      if (first && first.start_line !== undefined && first.end_line !== undefined) {
+        const extra = args.edits.length > 1 ? ` (+${args.edits.length - 1})` : ''
+        target = `${target}:${String(first.start_line)}-${String(first.end_line)}${extra}`
+      }
+    } else if (callItem.name === 'edit_lines' && args.start_line !== undefined && args.end_line !== undefined) {
       target = `${target}:${String(args.start_line)}-${String(args.end_line)}`
-    } else if (callItem.name === 'edit_lines' && args.start !== undefined) {
-      target = `${target}:${String(args.start)}${args.end !== undefined ? `-${String(args.end)}` : ''}`
     }
   }
   const trimmedTrailing = resultItem.text.endsWith('\n') ? resultItem.text.slice(0, -1) : resultItem.text

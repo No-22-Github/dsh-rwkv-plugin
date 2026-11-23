@@ -20,7 +20,7 @@ export const AGENT_FAST_SAMPLING: SamplingDefaults = {
   penaltyDecay: 0.996,
 }
 
-export type EditMode = 'tolerant' | 'line-edit' | 'hashline' | 'literal'
+export type EditMode = 'tolerant' | 'line-edit' | 'literal'
 export type HistoryMode = 'auto-fold' | 'full' | 'relay' | 'worklist'
 
 export const DEFAULT_EDIT_MODE: EditMode = 'tolerant'

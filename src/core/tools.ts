@@ -126,7 +126,7 @@ export function buildCatalog(offered: readonly DshToolSchema[], options: Catalog
       })
     } else if (mapping !== undefined) {
       const effective = tool.name === 'edit_lines'
-        ? editLinesTrainedWireSpec(tool.parameters, workspacePath)
+        ? editLinesTrainedWireSpec(workspacePath)
         : mapping
       if (exclude.has(tool.name) || exclude.has(effective.wireName)) continue
       tools.push({

@@ -23,7 +23,6 @@ export const TOLERANT_EDIT_MODE: EditModeSpec = {
   id: 'tolerant',
   excludedTools: ['edit_lines'],
   mountsEditLinesPlugin: false,
-  formatsHashRead: false,
   usesTolerantHook: true,
 }
 

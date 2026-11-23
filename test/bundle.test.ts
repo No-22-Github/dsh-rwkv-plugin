@@ -22,9 +22,9 @@ test('bundle: the RWKV preset mounts the line-edit plugin', () => {
   assert.equal(lines[row + 1]?.trim(), 'name: dsh-rwkv-plugin/line-edit')
 })
 
-test('bundle: the line-edit and hashline entries are exported by the package', () => {
+test('bundle: the line-edit entry is exported by the package', () => {
   assert.equal(manifest.exports?.['./line-edit'], './lib/line-edit.js')
-  assert.equal(manifest.exports?.['./hashline'], './lib/hashline.js')
+  assert.equal(manifest.exports?.['./hashline'], undefined)
 })
 
 test('bundle: the RWKV preset mounts the stateful worklist plugin and exports ./todo', () => {

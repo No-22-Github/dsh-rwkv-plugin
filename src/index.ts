@@ -19,7 +19,7 @@ import {
   type EditMode,
   type HistoryMode,
 } from './core/defaults.ts'
-import { usesHashReadFormat } from './core/edit-modes/index.ts'
+import { maxReadLinesForEditMode } from './core/edit-modes/index.ts'
 import type { ToolMode, ToolNames } from './core/tools.ts'
 import { setFoldedUnreadPaths } from './edit-modes/folded-read-guard.ts'
 import { installEditModeHooks } from './edit-modes/index.ts'
@@ -142,8 +142,8 @@ export const Config = z.object({
     .description('Fix near-miss output: parser repairs, tool name / argument aliases, scalar coercion, DSH value repairs, path repair. Off: exact protocol form only, arguments reach DSH as written.').volatile(),
   guards: z.boolean().default(DEFAULT_HARNESS.guards)
     .description('Harness interventions: format re-asks, duplicate / failure gates, over-budget think close, answer-stage re-asks and fallbacks. Off: the model\'s output stands.').volatile(),
-  editMode: z.union(['tolerant', 'line-edit', 'hashline', 'literal']).default('tolerant')
-    .description('tolerant (default): standard `edit` with recall-tolerant matching, auto-reindent, dual-anchor sliding-window guard, and pre-write syntax check. line-edit: coordinate-based `edit_lines`. hashline: line:hash anchored `edit_lines`. literal: stock exact `edit`.').volatile(),
+  editMode: z.union(['tolerant', 'line-edit', 'literal']).default('tolerant')
+    .description('tolerant (default): recall-tolerant `edit` + syntax guard. line-edit: anchored batch `edit_lines` (`start_text` self-healing + atomic `edits[]` + <=200-line read cap). literal: exact `edit`.').volatile(),
   historyMode: z.union(['auto-fold', 'full', 'relay', 'worklist']).default('auto-fold')
     .description('auto-fold (default): immediate <=2k prior-turn compaction + 13.5k->9k batch in-place observation masking (<250 tok exempt, recent 3 pairs kept, 14.5k stage archive). full: renders the whole conversation. worklist: active `todo_plan` + `todo_update`. relay: model-written handoff cards.').volatile(),
   relayBudgetTokens: z.natural().default(DEFAULT_RELAY_BUDGET_TOKENS)
@@ -239,10 +239,10 @@ export function apply(ctx: Context, config: Config): void {
   // Long tool results in RWKV sessions: cut once when the tool runs, the rest saved to a file.
   applyResultBudget(ctx, {
     providers: () => config.providers,
-    hashline: () => usesHashReadFormat(config.editMode.get()),
+    maxReadLines: () => maxReadLinesForEditMode(config.editMode.get()),
     log: message => console.log(`[rwkv-llm] ${message}`),
   })
-  // Edit-mode host hooks (`tolerant` / `literal` + live `editMode` sync for `line-edit` / `hashline`).
+  // Edit-mode host hooks (`tolerant` / `literal` + live `editMode` sync).
   installEditModeHooks(ctx, {
     providers: () => config.providers,
     editMode: () => config.editMode.get(),

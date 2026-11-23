@@ -52,11 +52,11 @@ sequenceDiagram
   - 提示词与协议：`dsh-prompt.ts`、`prompt.ts`、`tools.ts`、`defaults.ts`、`time-zone.ts`
   - 决策循环与解析：`agent.ts`、`parse.ts`、`policy.ts`、`step-gates.ts`、`tool-mappings.ts`、`tool-repairs.ts`
   - 上下文折叠：`worklist.ts`、`fold-pairs.ts`、`fold-window.ts`、`todo-state.ts`、`relay.ts`
-  - 编辑纯逻辑：`src/core/edit-modes/`（`tolerant.ts`、`hashline.ts`、`line-edit.ts`、`literal.ts`、`shared.ts`）及 `tolerant-edit.ts`、`hashline.ts`、`line-edit.ts`
+  - 编辑纯逻辑：`src/core/edit-modes/`（`tolerant.ts`、`line-edit.ts`、`literal.ts`、`shared.ts`）及 `tolerant-edit.ts`、`line-edit.ts`
 - **`src/`（宿主、后端与 UI 层）**：
   - 宿主接入：`index.ts`、`dsh-host.ts`、`adapter.ts`、`history.ts`、`session-setup.ts`、`routes.ts`、`paths.ts`、`result-budget.ts`、`tokenizer.ts`、`relay-store.ts`、`traces.ts`、`trace-stats.ts`
   - 后端调用：`src/backend/`（`generator.ts`、`lightning.ts`、`irwkv.ts`、`stream.ts`）
-  - 宿主编辑工具：`src/edit-modes/`（含 `mode-state.ts`、`observations.ts`、`syntax-check.ts`、`folded-read-guard.ts`）及根导出 `hashline.ts` / `line-edit.ts` / `todo.ts`
+  - 宿主编辑工具：`src/edit-modes/`（含 `mode-state.ts`、`observations.ts`、`syntax-check.ts`、`folded-read-guard.ts`）及根导出 `line-edit.ts` / `todo.ts`
   - 前端面板：`src/client/`（设置页、`TraceView.tsx`「RWKV」标签页、模型/Adapter/State 选择器）
 
 ## 核心设计原则
@@ -68,5 +68,5 @@ sequenceDiagram
 ## 专题文档
 
 - **[wire-and-prompt.md](wire-and-prompt.md)**：RWKV 字节级提示词格式、`Assistant:` 无空格铁律、停止符、`agent-fast` 采样、`recover-preamble` 与容错解析、兜底开关与轨迹排查。
-- **[edit-modes.md](edit-modes.md)**：4 种编辑模式（`tolerant` / `hashline` / `line-edit` / `literal`）、`src/core/edit-modes/` 与 `src/edit-modes/` 解耦、行哈希校验与增量语法闸门。
+- **[edit-modes.md](edit-modes.md)**：3 种编辑模式（`tolerant` / `line-edit` / `literal`）、Anchored Batch `edit_lines` 三级自愈、`src/core/edit-modes/` 与 `src/edit-modes/` 解耦与增量语法闸门。
 - **[context-modes.md](context-modes.md)**：`auto-fold v2`（默认）、`relay`、`worklist`、`full` 上下文管理、`3000` tok 结果截断与 `folded-read-guard` 防盲改机制。

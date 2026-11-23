@@ -22,7 +22,6 @@
 //
 // No DSH runtime imports: the pipeline's teacher plugin mounts the same hook.
 
-import { formatHashReadResult } from './core/edit-modes/hashline.ts'
 import { toolResponse } from './core/prompt.ts'
 import { providerOfExec, sessionIdOfExec, type AgentLike } from './dsh-host.ts'
 import { countTokens } from './tokenizer.ts'
@@ -117,11 +116,15 @@ export const READ_SHOWN_EVENT = 'rwkv/read-shown'
 
 /**
  * A DSH read result (`<content>` with "N: text" lines and a footer) shortened
- * to fit `budget`, with read's own byte-cap footer; undefined when it already
- * fits or is not in that shape. At least one line is kept.
+ * to fit `budget` and optional `maxLines`, with read's own continuation footer;
+ * undefined when it already fits or is not in that shape. At least one line is kept.
  */
-export function capReadResult(text: string, budget: number, wrap: Wrap = body => body): string | undefined {
-  if (countTokens(wrap(text)) <= budget) return undefined
+export function capReadResult(
+  text: string,
+  budget: number,
+  wrap: Wrap = body => body,
+  maxLines?: number,
+): string | undefined {
   const open = text.indexOf('<content>\n')
   const close = text.lastIndexOf('\n</content>')
   if (open < 0 || close < open) return undefined
@@ -130,6 +133,8 @@ export function capReadResult(text: string, budget: number, wrap: Wrap = body =>
   const footerAt = body.lastIndexOf('\n\n(')
   if (footerAt < 0) return undefined
   const lines = body.slice(0, footerAt).split('\n')
+  const overLineCap = maxLines !== undefined && maxLines > 0 && lines.length > maxLines
+  if (!overLineCap && countTokens(wrap(text)) <= budget) return undefined
   const first = READ_LINE.exec(lines[0] ?? '')
   if (!first) return undefined
   // DSH's own footer knows the file's length unless read itself hit its byte cap.
@@ -143,7 +148,7 @@ export function capReadResult(text: string, budget: number, wrap: Wrap = body =>
     return `${text.slice(0, start)}${lines.slice(0, count).join('\n')}\n\n${footer}${text.slice(close)}`
   }
   let low = 1
-  let high = lines.length
+  let high = overLineCap ? Math.min(lines.length, maxLines!) : lines.length
   while (low < high) {
     const middle = Math.ceil((low + high) / 2)
     if (countTokens(wrap(render(middle))) <= budget) low = middle
@@ -170,7 +175,7 @@ export interface ResultBudgetOptions {
   /** Provider ids whose sessions get the budget (the RWKV plugin's routes, or the teacher's). */
   readonly providers: () => readonly string[]
   readonly budget?: number
-  readonly hashline?: () => boolean
+  readonly maxReadLines?: () => number | undefined
   readonly log?: (message: string) => void
 }
 
@@ -194,9 +199,9 @@ export function applyResultBudget(ctx: unknown, options: ResultBudgetOptions): v
     // of "result", a token or two either way.
     const wrap: Wrap = body => toolResponse(exec.name, true, body)
     if (exec.name === 'read') {
-      const formatted = options.hashline?.() ? formatHashReadResult(text) : text
-      const bounded = countTokens(wrap(formatted)) <= budget ? undefined : capReadResult(formatted, budget, wrap)
-      const finalText = bounded ?? formatted
+      const lineCap = options.maxReadLines?.()
+      const bounded = capReadResult(text, budget, wrap, lineCap)
+      const finalText = bounded ?? text
       const window = readWindow(finalText)
       if (window !== undefined) context.emit(READ_SHOWN_EVENT, exec, window)
       return finalText === text ? decision : { ...decision, kind: 'accept', content: [{ type: 'text', text: finalText }] }

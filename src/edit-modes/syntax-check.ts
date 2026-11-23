@@ -1,5 +1,5 @@
-// Pre-write incremental syntax check shared across `tolerant`, `line-edit`,
-// and `hashline` edit modes. Uses checkers every DSH machine provides:
+// Pre-write incremental syntax check shared across `tolerant` and `line-edit`
+// edit modes. Uses checkers every DSH machine provides:
 // Python's compile() via python3, Node's stripTypeScriptTypes / --check,
 // bash -n, and JSON.parse. Unknown extensions or missing checkers pass through.
 
