@@ -221,6 +221,15 @@ const SHELL_WRITE = new RegExp([
  * A call that may change what a later read or test run sees: an edit or write
  * of a file, or a shell command matching {@link SHELL_WRITE}.
  */
+export function targetFileSuffix(_name: string, args: Args): string {
+  const raw = typeof args.file_path === 'string' ? args.file_path : typeof args.path === 'string' ? args.path : ''
+  return raw.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+}
+
+export function sameTargetFile(a: string, b: string): boolean {
+  return a !== '' && b !== '' && (a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`))
+}
+
 export function isMutatingCall(name: string, args: Args): boolean {
   if (FILE_WRITERS.has(name)) return true
   return name === 'bash' && typeof args.command === 'string' && SHELL_WRITE.test(args.command)
@@ -252,6 +261,10 @@ export interface TurnState {
   readonly lastCallKey: string
   /** Whether that immediately preceding workspace call succeeded. */
   readonly lastCallOk: boolean
+  /** Count of each non-bookkeeping call key executed in the active epoch/window. */
+  readonly epochKeyCounts: ReadonlyMap<string, number>
+  /** Consecutive/current failed edits per target file path until a succeeding write/edit resets it. */
+  readonly perFileFailedEdits: ReadonlyMap<string, number>
   readonly consecutiveFailedTool: string
   readonly consecutiveFailures: number
 }
@@ -286,9 +299,12 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
   const start = currentTurnStart(history)
   const gateStart = Math.max(start, options.duplicateFrom ?? start)
   const first = history[start]
-  const calls = new Map<string, { name: string; key: string; mutating: boolean }>()
+  const calls = new Map<string, { name: string; key: string; mutating: boolean; file: string }>()
   const successKeys = new Set<string>()
   const failedEpochs = new Map<string, number>()
+  const epochKeyCounts = new Map<string, number>()
+  const readKeys = new Map<string, string>()
+  const perFileFailedEdits = new Map<string, number>()
   const results: TurnResult[] = []
   let workspaceSteps = 0
   let consecutiveWorklistCalls = 0
@@ -297,15 +313,28 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
   let lastCallOk = false
   let consecutiveFailedTool = ''
   let consecutiveFailures = 0
+  const READ_TOOLS = new Set(['read', 'read_file'])
+  const EDIT_FAIL_TRACKERS = new Set(['edit', 'edit_file', 'edit_lines', 'write', 'write_file'])
   for (let index = start; index < history.length; index++) {
     const item = history[index]!
     if (item.kind === 'call') {
-      calls.set(item.id, { name: item.name, key: callKey(item.name, item.args), mutating: isMutatingCall(item.name, item.args) })
+      calls.set(item.id, {
+        name: item.name,
+        key: callKey(item.name, item.args),
+        mutating: isMutatingCall(item.name, item.args),
+        file: targetFileSuffix(item.name, item.args),
+      })
     }
     if (item.kind !== 'result') continue
-    const { name: calledName, key, mutating } = calls.get(item.id) ?? { name: item.name, key: callKey(item.name, {}), mutating: false }
+    const { name: calledName, key, mutating, file } = calls.get(item.id) ?? {
+      name: item.name,
+      key: callKey(item.name, {}),
+      mutating: false,
+      file: '',
+    }
     results.push({ name: item.name, ok: item.ok })
-    if (BOOKKEEPING_TOOLS.has(calledName) || BOOKKEEPING_TOOLS.has(item.name)) {
+    const isBookkeeping = BOOKKEEPING_TOOLS.has(calledName) || BOOKKEEPING_TOOLS.has(item.name)
+    if (isBookkeeping) {
       consecutiveWorklistCalls++
     } else {
       workspaceSteps++
@@ -313,10 +342,25 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
     }
     if (index < gateStart) continue
     if (item.ok) {
-      if (mutating) successKeys.clear()
+      if (mutating) {
+        successKeys.clear()
+        epochKeyCounts.clear()
+        readKeys.clear()
+      }
+      if (EDIT_FAIL_TRACKERS.has(calledName) && file !== '') {
+        for (const tracked of [...perFileFailedEdits.keys()]) {
+          if (sameTargetFile(tracked, file)) perFileFailedEdits.delete(tracked)
+        }
+      }
       const maskedInPlace = item.text.startsWith(FOLDED_OUTPUT_MARKER) || (options.maskedCallIds?.has(item.id) ?? false)
-      if (!maskedInPlace) successKeys.add(key)
-      if (!BOOKKEEPING_TOOLS.has(calledName) && !BOOKKEEPING_TOOLS.has(item.name)) {
+      if (!maskedInPlace) {
+        successKeys.add(key)
+        if (!isBookkeeping) {
+          epochKeyCounts.set(key, (epochKeyCounts.get(key) ?? 0) + 1)
+          if (READ_TOOLS.has(calledName)) readKeys.set(key, file)
+        }
+      }
+      if (!isBookkeeping) {
         lastCallKey = maskedInPlace ? '' : key
         lastCallOk = true
       }
@@ -326,9 +370,19 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
       consecutiveFailures = 0
     } else {
       failedEpochs.set(key, successfulCalls)
-      if (!BOOKKEEPING_TOOLS.has(calledName) && !BOOKKEEPING_TOOLS.has(item.name)) {
+      if (!isBookkeeping) {
+        epochKeyCounts.set(key, (epochKeyCounts.get(key) ?? 0) + 1)
         lastCallKey = key
         lastCallOk = false
+      }
+      if (EDIT_FAIL_TRACKERS.has(calledName) && file !== '') {
+        perFileFailedEdits.set(file, (perFileFailedEdits.get(file) ?? 0) + 1)
+        for (const [rk, rf] of [...readKeys.entries()]) {
+          if (sameTargetFile(rf, file)) {
+            epochKeyCounts.delete(rk)
+            readKeys.delete(rk)
+          }
+        }
       }
       if (item.name === consecutiveFailedTool) consecutiveFailures++
       else {
@@ -347,6 +401,8 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
     failedEpochs,
     lastCallKey,
     lastCallOk,
+    epochKeyCounts,
+    perFileFailedEdits,
     consecutiveFailedTool,
     consecutiveFailures,
   }

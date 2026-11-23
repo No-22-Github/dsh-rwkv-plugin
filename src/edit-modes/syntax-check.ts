@@ -88,6 +88,8 @@ export async function syntaxError(text: string, path: string): Promise<string | 
   switch (extension) {
     case '.py':
       return run('python3', ['-c', PYTHON_CHECK, path], text)
+    case '.go':
+      return run('gofmt', ['-e'], text)
     case '.ts':
     case '.mts':
     case '.cts':

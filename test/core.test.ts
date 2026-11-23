@@ -672,3 +672,59 @@ test('fallbackSummary false salvages inner reasoning instead of "I looked up..."
   const res = await decideStep({ history: atLimit, tools, config: cfg, generator: gen })
   assert.deepEqual(res.decision, { type: 'final', text: 'Confirming 3 lines.', via: 'salvage' })
 })
+
+test('duplicateGateMode bounded unlocks re-read after failed edit, closes out 3rd repeat, and caps 5 failed edits per file', async () => {
+  const cfg: HarnessConfig = { ...harness, duplicateGateMode: 'bounded' }
+
+  // 1) read -> failed edit on same file -> re-read same file is unlocked (no closeout / no duplicate-retry)
+  const afterFailedEdit: HistoryItem[] = [
+    { kind: 'user', text: 'Fix a.py' },
+    { kind: 'call', id: 'c1', name: 'read_file', args: { path: '/ws/a.py' } },
+    { kind: 'result', id: 'c1', name: 'read_file', ok: true, text: 'def f(): return 1' },
+    { kind: 'call', id: 'c2', name: 'edit', args: { file_path: 'a.py', old_string: 'bad', new_string: 'good' } },
+    { kind: 'result', id: 'c2', name: 'edit', ok: false, text: 'Error: Could not find old_string' },
+  ]
+  const genUnlock = new ScriptedGenerator([
+    '>Need to reread a.py</think><tool_call>{"name":"read_file","arguments":{"path":"/ws/a.py"}}',
+  ])
+  const unlocked = await decideStep({ history: afterFailedEdit, tools, config: cfg, generator: genUnlock })
+  assert.equal(unlocked.decision.type, 'tool')
+  assert.deepEqual(unlocked.decision.type === 'tool' && unlocked.decision.args, { path: '/ws/a.py' })
+  assert.equal(genUnlock.prompts.length, 1)
+
+  // 2) 3rd identical non-mutated call (seen >= 2) triggers closeout
+  const seenTwice: HistoryItem[] = [
+    { kind: 'user', text: 'Check a.py' },
+    { kind: 'call', id: 'c1', name: 'read_file', args: { path: 'a.py' } },
+    { kind: 'result', id: 'c1', name: 'read_file', ok: true, text: 'x = 1' },
+    { kind: 'call', id: 'c2', name: 'glob', args: { pattern: '*.py' } },
+    { kind: 'result', id: 'c2', name: 'glob', ok: true, text: 'a.py' },
+    { kind: 'call', id: 'c3', name: 'read_file', args: { path: 'a.py' } },
+    { kind: 'result', id: 'c3', name: 'read_file', ok: true, text: 'x = 1' },
+    { kind: 'call', id: 'c4', name: 'glob', args: { pattern: '*.py' } },
+    { kind: 'result', id: 'c4', name: 'glob', ok: true, text: 'a.py' },
+  ]
+  const genClose = new ScriptedGenerator([
+    '>Read a.py again</think><tool_call>{"name":"read_file","arguments":{"path":"a.py"}}',
+    '>Got x = 1 from a.py.</think>x = 1',
+  ])
+  const closed = await decideStep({ history: seenTwice, tools, config: cfg, generator: genClose })
+  assert.deepEqual(closed.decision, { type: 'final', text: 'x = 1', via: 'answer-stage' })
+  assert.match(genClose.prompts[1]!, /Tool execution is complete/)
+
+  // 3) 5 failed edits on the same file forces closeout on next edit of that file
+  const fiveFails: HistoryItem[] = [{ kind: 'user', text: 'Edit b.py' }]
+  for (let i = 1; i <= 5; i++) {
+    fiveFails.push(
+      { kind: 'call', id: `e${i}`, name: 'edit', args: { file_path: 'b.py', old_string: `v${i}`, new_string: 'ok' } },
+      { kind: 'result', id: `e${i}`, name: 'edit', ok: false, text: 'Error: Could not find old_string' },
+    )
+  }
+  const genCap = new ScriptedGenerator([
+    '>Try 6th edit</think><tool_call>{"name":"edit","arguments":{"file_path":"b.py","old_string":"v6","new_string":"ok"}}',
+    '>Could not apply the edit to b.py.</think>Could not locate the target block in b.py.',
+  ])
+  const capped = await decideStep({ history: fiveFails, tools, config: cfg, generator: genCap })
+  assert.equal(capped.decision.type, 'final')
+  assert.equal(capped.decision.type === 'final' && capped.decision.via, 'answer-stage')
+})

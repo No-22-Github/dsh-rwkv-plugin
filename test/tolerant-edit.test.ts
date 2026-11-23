@@ -89,7 +89,7 @@ test('tolerant-edit: ambiguous regions stop at the ambiguous level and already-a
   }
 })
 
-test('syntax-check: validates TypeScript (.ts/.mts/.cts) alongside Python, JS, shell, and JSON', async () => {
+test('syntax-check: validates TypeScript (.ts/.mts/.cts) alongside Go, Python, JS, shell, and JSON', async () => {
   const validTs = 'import {\n  type Stats,\n} from "node:fs"\nexport function ok(n: number): boolean {\n  return Number.isFinite(n) && n > 0\n}\n'
   const brokenTs = 'export function ok(n: number): boolean {\n  return Number.isFinite(n && n > 0\n}\n'
   assert.equal(await introducedSyntaxError(validTs, validTs, 'check.ts'), undefined)
@@ -97,6 +97,10 @@ test('syntax-check: validates TypeScript (.ts/.mts/.cts) alongside Python, JS, s
   assert.equal(await introducedSyntaxError(brokenTs, 'export function ok(n: number): boolean {\n  return Number.isFinite(n\n', 'check.ts'), undefined)
   // Non-erasable TS syntax (enum / parameter properties) must not be rejected as a syntax error.
   assert.equal(await introducedSyntaxError('export enum Mode { A = 1 }\n', 'export enum Mode { A = 1, B = 2 }\n', 'enum.ts'), undefined)
+  const validGo = 'package main\n\nfunc ok(x int) int {\n\treturn x + 1\n}\n'
+  const brokenGo = 'package main\n\nfunc ok(x int) int {\n\treturn x +\n}\n'
+  assert.equal(await introducedSyntaxError(validGo, validGo, 'main.go'), undefined)
+  assert.match(String(await introducedSyntaxError(validGo, brokenGo, 'main.go')), /expected operand|syntax error|<standard input>/)
 })
 
 test('tolerant-edit hook: blocks syntax-breaking edits before disk write, delegates exact edits, and stamps sandbox policy on repaired edits', async () => {

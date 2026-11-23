@@ -93,7 +93,7 @@ export interface HarnessConfig {
    * summary fallbacks.
    */
   readonly guards: boolean
-  /** Duplicate gate mode when `guards` is true: 'epoch' (default), 'adjacent', or 'off'. */
+  /** Duplicate gate mode when `guards` is true: 'epoch' (default), 'bounded', 'adjacent', or 'off'. */
   readonly duplicateGateMode?: DuplicateGateMode
   /** Attempt-2 answer prefill mode: 'default', 'zh-only' (avoids English opener collision), or 'none'. */
   readonly answerOpenerMode?: 'default' | 'zh-only' | 'none'

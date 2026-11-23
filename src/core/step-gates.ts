@@ -10,6 +10,8 @@ import {
   DUPLICATE_FAILED_RETRY_REMINDER,
   duplicateRetryReminder,
   NOOP_EDIT_REMINDER,
+  sameTargetFile,
+  targetFileSuffix,
   toolFailureReminder,
   type TurnState,
 } from './policy.ts'
@@ -95,7 +97,7 @@ export class ThinkSplitter {
   }
 }
 
-export type DuplicateGateMode = 'epoch' | 'adjacent' | 'off'
+export type DuplicateGateMode = 'epoch' | 'bounded' | 'adjacent' | 'off'
 
 export interface GateOptions {
   readonly outputRepairs: boolean
@@ -160,6 +162,66 @@ export function gateToolCall(
           { role: 'user', text: toolResponse(tool.name, false, msg) },
           { role: 'user', text: msg },
         ],
+      }
+    }
+  } else if (mode === 'bounded') {
+    if (isNoopEditCall(tool.dshName, args)) {
+      const noopKey = callKey(tool.name, args)
+      if ((state.epochKeyCounts.get(noopKey) ?? 0) >= 1 || duplicateRetryUsed) {
+        return { type: 'closeout', reminder: NOOP_EDIT_REMINDER }
+      }
+      return {
+        type: 'rejected',
+        reason: 'blocked',
+        receipt: [
+          { role: 'assistant', text: recordToolCall(tool.name, args) },
+          { role: 'user', text: toolResponse(tool.name, false, NOOP_EDIT_REMINDER) },
+          { role: 'user', text: NOOP_EDIT_REMINDER },
+        ],
+      }
+    }
+    const key = callKey(tool.name, args)
+    const seen = key === '' ? 0 : (state.epochKeyCounts.get(key) ?? 0)
+    if (seen >= 2) {
+      return { type: 'closeout', reminder: state.successfulCalls > 0 ? DUPLICATE_ANSWER_REMINDER : DUPLICATE_FAILED_REMINDER }
+    }
+    if (key !== '' && key === state.lastCallKey) {
+      const msg = state.lastCallOk ? duplicateRetryReminder(tools) : DUPLICATE_FAILED_RETRY_REMINDER
+      return {
+        type: 'rejected',
+        reason: 'blocked',
+        receipt: [
+          { role: 'assistant', text: recordToolCall(tool.name, args) },
+          { role: 'user', text: toolResponse(tool.name, false, msg) },
+          { role: 'user', text: msg },
+        ],
+      }
+    }
+    if (seen === 1) {
+      const msg = state.successKeys.has(key) ? duplicateRetryReminder(tools) : DUPLICATE_FAILED_RETRY_REMINDER
+      if (!duplicateRetryUsed) {
+        return { type: 'duplicate-retry', receipt: [{ role: 'user', text: msg }] }
+      }
+      return {
+        type: 'rejected',
+        reason: 'blocked',
+        receipt: [
+          { role: 'assistant', text: recordToolCall(tool.name, args) },
+          { role: 'user', text: toolResponse(tool.name, false, msg) },
+          { role: 'user', text: msg },
+        ],
+      }
+    }
+    if (tool.dshName === 'edit' || tool.dshName === 'edit_lines') {
+      const file = targetFileSuffix(tool.dshName, args)
+      if (file !== '') {
+        let failedEdits = 0
+        for (const [tracked, count] of state.perFileFailedEdits) {
+          if (sameTargetFile(tracked, file)) failedEdits += count
+        }
+        if (failedEdits >= 5) {
+          return { type: 'closeout', reminder: state.successfulCalls > 0 ? DUPLICATE_ANSWER_REMINDER : DUPLICATE_FAILED_REMINDER }
+        }
       }
     }
   } else {
