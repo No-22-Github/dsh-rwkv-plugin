@@ -246,7 +246,8 @@ export function gateToolCall(
       return { type: 'closeout', reminder: state.successfulCalls > 0 ? DUPLICATE_ANSWER_REMINDER : DUPLICATE_FAILED_REMINDER }
     }
   }
-  if (tool.name === state.consecutiveFailedTool && state.consecutiveFailures >= config.maxConsecutiveFailures) {
+  const boundedEditCovered = mode === 'bounded' && (tool.dshName === 'edit' || tool.dshName === 'edit_lines')
+  if (!boundedEditCovered && tool.name === state.consecutiveFailedTool && state.consecutiveFailures >= config.maxConsecutiveFailures) {
     const error = `tool "${tool.name}" blocked after ${state.consecutiveFailures} consecutive failures; choose a different tool or answer`
     return {
       type: 'rejected',

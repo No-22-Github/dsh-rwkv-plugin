@@ -15,7 +15,7 @@ import {
   type SandboxPolicyLike,
 } from '../dsh-host.ts'
 import { foldedUnreadErrorMessage, isFoldedUnreadPath } from './folded-read-guard.ts'
-import { introducedSyntaxError } from './syntax-check.ts'
+import { introducedSyntaxError, syntaxError } from './syntax-check.ts'
 
 interface FsTargetLike { readonly displayPath: string }
 interface FsLike {
@@ -78,11 +78,61 @@ export function applyTolerantEdit(ctx: unknown, options: TolerantEditOptions): v
   }
 
   host.on('tools/execute', async (exec, next) => {
-    if (exec.name !== 'edit' || exec.parent !== undefined || !options.enabled()) return next()
+    if ((exec.name !== 'edit' && exec.name !== 'write') || exec.parent !== undefined || !options.enabled()) return next()
     const provider = providerOfExec(exec)
     if (provider === undefined || !options.providers().includes(provider)) return next()
     const fs = host.get('fs') as FsLike | undefined
     if (fs === undefined || typeof exec.arguments !== 'object' || exec.arguments === null) return next()
+
+    if (exec.name === 'write') {
+      const wargs = exec.arguments as { file_path?: unknown; content?: unknown }
+      if (typeof wargs.file_path !== 'string' || wargs.file_path.trim() === '' || typeof wargs.content !== 'string') {
+        return next()
+      }
+      const cwd = await ensureExecWorkingDir(host, exec)
+      const resolveOpts = { ...cwd !== undefined ? { cwd } : {}, ...exec.signal ? { signal: exec.signal } : {} }
+      let target: FsTargetLike
+      try {
+        target = await fs.resolve(wargs.file_path, resolveOpts)
+      } catch {
+        return next()
+      }
+      if ((options.foldedReadGuard?.() ?? true) && isFoldedUnreadPath(sessionIdOfExec(exec), [
+        fs.processPath(target),
+        target.displayPath,
+        ...(cwd !== undefined ? [resolve(cwd, wargs.file_path.trim())] : []),
+      ])) {
+        return errorResult(foldedUnreadErrorMessage(target.displayPath, 'write'))
+      }
+      let existingBefore: string | undefined
+      try {
+        existingBefore = await fs.readText(target, exec.signal)
+      } catch {
+        existingBefore = undefined
+      }
+      if (existingBefore !== undefined) {
+        const beforeLines = existingBefore.split('\n').length
+        const afterLines = wargs.content.split('\n').length
+        if (beforeLines >= 30 && afterLines < Math.max(5, Math.floor(beforeLines * 0.25))) {
+          return errorResult(
+            `Refusing to overwrite ${beforeLines}-line file ${target.displayPath} with only ${afterLines} lines via write; `
+            + 'use edit to modify or append rows without losing existing content.',
+          )
+        }
+      }
+      if (options.syntaxGuard()) {
+        const broken = existingBefore !== undefined
+          ? await introducedSyntaxError(existingBefore, wargs.content, target.displayPath)
+          : (await syntaxError(wargs.content, target.displayPath)) || undefined
+        if (broken !== undefined) {
+          return errorResult(
+            `Your write to ${target.displayPath} was NOT applied: it contains a syntax error (${broken}). `
+            + 'Fix content (check parentheses, braces, quotes, indentation, and column structure) and try again.',
+          )
+        }
+      }
+      return next()
+    }
 
     const args = exec.arguments as {
       file_path?: unknown
@@ -109,12 +159,24 @@ export function applyTolerantEdit(ctx: unknown, options: TolerantEditOptions): v
       if (
         typeof args.old_string !== 'string' || args.old_string === '' ||
         typeof args.new_string !== 'string' ||
-        args.old_string === args.new_string ||
-        args.replace_all === true
+        args.old_string === args.new_string
       ) {
         return next()
       }
       before = await fs.readText(target, exec.signal)
+      if (args.replace_all === true) {
+        if (options.syntaxGuard() && before.includes(args.old_string)) {
+          const afterAll = before.split(args.old_string).join(args.new_string)
+          const broken = await introducedSyntaxError(before, afterAll, target.displayPath)
+          if (broken !== undefined) {
+            return errorResult(
+              `Your edit to ${target.displayPath} was NOT applied: it introduces a syntax error (${broken}). `
+              + 'Fix new_string and try again.',
+            )
+          }
+        }
+        return next()
+      }
     } catch {
       return next()
     }

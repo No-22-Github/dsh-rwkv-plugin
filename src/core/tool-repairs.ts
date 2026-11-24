@@ -23,7 +23,7 @@ const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   glob: 'list_files', ls: 'list_files', list_dir: 'list_files', list_directory: 'list_files',
   grep: 'search_text', search: 'search_text', search_files: 'search_text',
   shell: 'bash', run: 'bash', terminal: 'bash', execute_command: 'bash', run_command: 'bash',
-  fetch: 'web_fetch', search_web: 'web_search',
+  fetch: 'web_fetch', webfetch: 'web_fetch', search_web: 'web_search', websearch: 'web_search',
   worklist_plan: TODO_PLAN_TOOL, plan_todo: TODO_PLAN_TOOL,
   worklist_update: TODO_UPDATE_TOOL, update_todo: TODO_UPDATE_TOOL,
 }

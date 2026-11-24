@@ -23,6 +23,31 @@ except SyntaxError as error:
     sys.exit(1)
 `
 
+const TOML_CHECK = String.raw`
+import sys, tomllib
+try:
+    tomllib.loads(sys.stdin.read())
+except Exception as error:
+    print(f"TOML: {error}")
+    sys.exit(1)
+`
+
+const YAML_CHECK = String.raw`
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit(0)
+try:
+    list(yaml.safe_load_all(sys.stdin.read()))
+except Exception as error:
+    first = str(error).splitlines()[0] if str(error) else type(error).__name__
+    print(f"YAML: {first}")
+    sys.exit(1)
+`
+
+const JAVA_PARSE_ERROR_RE = /error:\s*(?:';' expected|reached end of file while parsing|class, interface, enum, or record expected|illegal start of (?:expression|type)|unclosed (?:string|character) literal|unclosed comment|<identifier> expected|'[^']+' expected|(?:unnamed class|compact source file|implicitly declared class) should not have package declaration)/i
+
 /** stdout+stderr of a failed run; '' when it passed; undefined when it could not run. */
 function run(command: string, args: readonly string[], input: string): Promise<string | undefined> {
   return new Promise(resolve => {
@@ -82,6 +107,76 @@ function tsOrJsStripCheck(text: string): string | undefined {
   }
 }
 
+async function javaParseCheck(text: string): Promise<string | undefined> {
+  const dir = await mkdtemp(join(tmpdir(), 'rwkv-java-check-'))
+  try {
+    const pubMatch = /\bpublic\s+(?:final\s+|abstract\s+)?(?:class|interface|enum|record)\s+([A-Za-z_$][A-Za-z0-9_$]*)/.exec(text)
+    const fileName = `${pubMatch?.[1] ?? 'Check'}.java`
+    const file = join(dir, fileName)
+    await writeFile(file, text)
+    const output = await run('javac', ['-J-Duser.language=en', '-J-Duser.country=US', '-encoding', 'UTF-8', '-XDcompilePolicy=simple', '-proc:none', '-d', dir, file], '')
+    if (!output) return output
+    const parseLine = output.split('\n').find(line => JAVA_PARSE_ERROR_RE.test(line))
+    if (!parseLine) return '' // Only type/symbol resolution errors -> syntax & brace structure is valid.
+    return parseLine.replace(file, fileName).trim()
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
+function parseCsvRows(text: string): string[][] | string {
+  const rows: string[][] = []
+  let row: string[] = []
+  let field = ''
+  let inQuotes = false
+  const s = text.replace(/\r\n/g, '\n')
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!
+    if (inQuotes) {
+      if (ch === '"') {
+        if (s[i + 1] === '"') { field += '"'; i++ }
+        else inQuotes = false
+      } else {
+        field += ch
+      }
+    } else if (ch === '"') {
+      if (field === '') inQuotes = true
+      else field += ch
+    } else if (ch === ',') {
+      row.push(field)
+      field = ''
+    } else if (ch === '\n') {
+      row.push(field)
+      field = ''
+      if (!(row.length === 1 && row[0] === '')) rows.push(row)
+      row = []
+    } else {
+      field += ch
+    }
+  }
+  if (inQuotes) return 'CSV: unclosed double-quoted field'
+  if (field !== '' || row.length > 0) {
+    row.push(field)
+    if (!(row.length === 1 && row[0] === '')) rows.push(row)
+  }
+  return rows
+}
+
+function csvStructureError(text: string): string {
+  if (text.trim() === '') return ''
+  const parsed = parseCsvRows(text)
+  if (typeof parsed === 'string') return parsed
+  if (parsed.length < 2) return ''
+  const headerCols = parsed[0]!.length
+  if (headerCols < 2) return ''
+  for (let r = 1; r < parsed.length; r++) {
+    if (parsed[r]!.length !== headerCols) {
+      return `CSV column count mismatch at row ${r + 1}: expected ${headerCols} columns (matching header "${parsed[0]!.slice(0, 4).join(',')}"), got ${parsed[r]!.length}`
+    }
+  }
+  return ''
+}
+
 /** The first syntax error in `text` as a file named `path`, '' when it parses, undefined when unchecked. */
 export async function syntaxError(text: string, path: string): Promise<string | undefined> {
   const extension = extname(path).toLowerCase()
@@ -90,6 +185,8 @@ export async function syntaxError(text: string, path: string): Promise<string | 
       return run('python3', ['-c', PYTHON_CHECK, path], text)
     case '.go':
       return run('gofmt', ['-e'], text)
+    case '.java':
+      return javaParseCheck(text)
     case '.ts':
     case '.mts':
     case '.cts':
@@ -101,6 +198,13 @@ export async function syntaxError(text: string, path: string): Promise<string | 
     case '.sh':
     case '.bash':
       return run('bash', ['-n'], text)
+    case '.toml':
+      return run('python3', ['-c', TOML_CHECK], text)
+    case '.yaml':
+    case '.yml':
+      return run('python3', ['-c', YAML_CHECK], text)
+    case '.csv':
+      return csvStructureError(text)
     case '.json':
       if (text.trim() === '') return ''
       try {

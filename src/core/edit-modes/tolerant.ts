@@ -275,7 +275,15 @@ function similarRegion(file: Lines, old: readonly string[]): RegionResult {
 
   const anchorsOk = !splitAnchor && firstScores[best.p]! >= 0.88 && lastScores[best.p + n - 1]! >= 0.88
   const closest = { firstLine: first + 1, lastLine: last + 1, similarity: best.score }
-  if (n < 2 || best.score < 0.9 || !anchorsOk || (runner && runner.score > best.score - 0.1)) {
+  const singleLineHighConf = n === 1
+    && oldKeys[0]!.length >= 36
+    && best.score >= 0.95
+    && (!runner || runner.score <= best.score - 0.14)
+  const multiLineOk = n >= 2
+    && best.score >= 0.9
+    && anchorsOk
+    && (!runner || runner.score <= best.score - (n >= 3 && best.score >= 0.96 ? 0.06 : 0.1))
+  if (!singleLineHighConf && !multiLineOk) {
     return { kind: 'none', ...best.score >= 0.5 ? { closest } : {} }
   }
 
@@ -433,7 +441,18 @@ export function resolveTolerantEdit(
   const exactAt = content.indexOf(oldLF)
   if (exactAt >= 0) {
     if (content.indexOf(oldLF, exactAt + 1) >= 0) {
-      return { kind: 'exact' } // Let DSH's own multiple-match error report it consistently.
+      const hitLines: number[] = []
+      let pos = exactAt
+      while (pos >= 0 && hitLines.length < 16) {
+        hitLines.push(lineAt(content, pos))
+        pos = content.indexOf(oldLF, pos + Math.max(1, oldLF.length))
+      }
+      const shown = hitLines.slice(0, 8).join(', ')
+      return {
+        kind: 'refused',
+        message: `Could not apply edit in ${displayPath}: old_string matched multiple places (lines ${shown}${hitLines.length > 8 ? ', ...' : ''}). `
+          + 'Include surrounding lines in old_string so it matches uniquely, or set replace_all: true if every occurrence should change.',
+      }
     }
     return eol === '\r\n' && (!oldString.includes('\r\n') || (newString.includes('\n') && !newString.includes('\r\n')))
       ? {

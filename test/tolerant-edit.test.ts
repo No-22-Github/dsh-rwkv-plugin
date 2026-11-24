@@ -286,3 +286,84 @@ test('tolerant-edit hook: blocks blind edits to folded-unread files until re-rea
   assert.equal(allowed.isError, false)
   assert.equal(nextCalls, 1)
 })
+
+test('Harness v2.2: exact multi-match reports line numbers, write guard blocks syntax errors & catastrophic truncation, and CSV/TOML/Java checks work', async () => {
+  // 1) Exact duplicate old_string reports exact line numbers
+  const dupYaml = 'jobs:\n  build:\n    replicas: 1\n  scheduler:\n    replicas: 1\n'
+  const multi = resolveTolerantEdit(dupYaml, '    replicas: 1', '    replicas: 3', 'compose.yaml')
+  assert.equal(multi.kind, 'refused')
+  if (multi.kind === 'refused') {
+    assert.match(multi.message, /matched multiple places \(lines 3, 5\)/)
+  }
+
+  // 2) CSV column structure check & TOML syntax check & Java brace check
+  const validCsv = 'id,name,amount,status\nORD-1,Alice,100.00,paid\nORD-2,Bob,50.00,pending\n'
+  const brokenCsv = 'id,name,amount,status\nORD-1,Alice,100.00,paid\nORD-2,Bob,pending\n'
+  assert.equal(await introducedSyntaxError(validCsv, validCsv, 'orders.csv'), undefined)
+  assert.match(String(await introducedSyntaxError(validCsv, brokenCsv, 'orders.csv')), /CSV column count mismatch at row 3/)
+
+  const validToml = '[server]\nport = 8080\n'
+  const brokenToml = '[server\nport = 8080\n'
+  assert.equal(await introducedSyntaxError(validToml, validToml, 'config.toml'), undefined)
+  assert.match(String(await introducedSyntaxError(validToml, brokenToml, 'config.toml')), /TOML:/)
+
+  // Java: cross-file unknown symbol (`ExternalItem`) passes syntax check, while extra `}` closing class early is caught!
+  const validJavaWithSiblingRef = 'package demo;\npublic class App {\n  public int size(ExternalItem x) {\n    return 1;\n  }\n}\n'
+  const brokenJavaExtraBrace = 'package demo;\npublic class App {\n  public int size(ExternalItem x) {\n    return 1;\n  }\n}\n  public int stray() { return 2; }\n}\n'
+  assert.equal(await introducedSyntaxError(validJavaWithSiblingRef, validJavaWithSiblingRef, 'App.java'), undefined)
+  assert.match(String(await introducedSyntaxError(validJavaWithSiblingRef, brokenJavaExtraBrace, 'App.java')), /class, interface, enum, or record expected|unnamed class/)
+
+  // 3) write hook blocks catastrophic truncation (200 lines -> 3 lines) and syntax-breaking writes
+  const longCsv = ['col1,col2,col3', ...Array.from({ length: 60 }, (_, i) => `r${i},a,b`)].join('\n') + '\n'
+  const files = new Map<string, string>([
+    ['/ws/ledger.csv', longCsv],
+    ['/ws/app.py', 'def ok():\n    return 1\n'],
+  ])
+  let listener: ((exec: any, next: () => Promise<any>) => Promise<any>) | undefined
+  let nextCalls = 0
+  const mockFs = {
+    resolve: async (p: string) => ({ displayPath: p }),
+    readText: async (t: { displayPath: string }) => {
+      const v = files.get(`/ws/${t.displayPath}`)
+      if (v === undefined) throw new Error('ENOENT')
+      return v
+    },
+    editText: async () => ({ version: 'v2', before: '', after: '' }),
+    processPath: (t: { displayPath: string }) => `/ws/${t.displayPath}`,
+  }
+  applyTolerantEdit({
+    on: (_ev: string, fn: typeof listener) => { listener = fn },
+    emit: () => {},
+    get: (name: string) => (name === 'fs' ? mockFs : undefined),
+  }, {
+    providers: () => ['rwkv'],
+    enabled: () => true,
+    outputRepairs: () => true,
+    syntaxGuard: () => true,
+    foldedReadGuard: () => true,
+  })
+
+  const truncWrite = await listener!({
+    name: 'write',
+    arguments: { file_path: 'ledger.csv', content: 'r61,x,y\nr62,x,y\n' },
+    agent: { session: {}, options: { provider: 'rwkv' } },
+  }, async () => {
+    nextCalls++
+    return { content: [{ type: 'text', text: 'ok' }], isError: false }
+  })
+  assert.equal(truncWrite.isError, true)
+  assert.equal(nextCalls, 0)
+  assert.match(truncWrite.content[0].text, /Refusing to overwrite/)
+
+  const badPyWrite = await listener!({
+    name: 'write',
+    arguments: { file_path: 'app.py', content: "def ok():\n    raise ValueError('unterminated)\n" },
+    agent: { session: {}, options: { provider: 'rwkv' } },
+  }, async () => {
+    nextCalls++
+    return { content: [{ type: 'text', text: 'ok' }], isError: false }
+  })
+  assert.equal(badPyWrite.isError, true)
+  assert.equal(nextCalls, 0)
+  assert.match(badPyWrite.content[0].text, /Your write to app\.py was NOT applied: it contains a syntax error/)
+})

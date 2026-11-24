@@ -740,3 +740,60 @@ test('capServerStops keeps <=4 stops and collapses 6 hv21 answer-stage stops to 
     ['</tool_call>', '\nUser:', '\nTool:', '<tool_call'],
   )
 })
+
+test('Harness v2.2: webfetch/websearch aliases, folded-read-guard re-read unlock, 3rd edit allowed in bounded mode, and orphan </think> strip', async () => {
+  const cfg: HarnessConfig = { ...harness, maxSteps: 10, duplicateGateMode: 'bounded', answerOpenerMode: 'zh-only', fallbackSummary: false }
+  const editTools = buildCatalog([
+    { name: 'read', description: '', parameters: {} },
+    { name: 'write', description: '', parameters: {} },
+    { name: 'edit', description: '', parameters: {} },
+    { name: 'web_fetch', description: '', parameters: {} },
+    { name: 'web_search', description: '', parameters: {} },
+  ], { mode: 'mapped', exclude: ['edit_lines'] })
+
+  // 1) webfetch / websearch aliases resolve cleanly to web_fetch / web_search
+  const genAlias = new ScriptedGenerator([
+    '>Fetch docs</think><tool_call>{"name":"webfetch","arguments":{"url":"https://example.com"}}',
+  ])
+  const aliased = await decideStep({ history: [{ kind: 'user', text: 'Read https://example.com' }], tools: editTools, config: cfg, generator: genAlias })
+  assert.equal(aliased.decision.type, 'tool')
+  assert.equal(aliased.decision.type === 'tool' && aliased.decision.tool.dshName, 'web_fetch')
+
+  // 2) folded-read-guard rejects edit(router.py) -> model obeys and calls read_file(router.py) -> exact same edit(router.py) is unlocked!
+  const foldedThenRead: HistoryItem[] = [
+    { kind: 'user', text: 'Rename list_loans to loan_history in router.py' },
+    { kind: 'call', id: 'e1', name: 'edit_file', args: { path: 'src/router.py', old_text: 'list_loans', new_text: 'loan_history' } },
+    { kind: 'result', id: 'e1', name: 'edit_file', ok: false, text: 'Error: src/router.py was folded out of the active context window; read it first before editing.' },
+    { kind: 'call', id: 'r1', name: 'read_file', args: { path: 'src/router.py' } },
+    { kind: 'result', id: 'r1', name: 'read_file', ok: true, text: '1: from svc import list_loans\n' },
+  ]
+  const genRetryEdit = new ScriptedGenerator([
+    '>Confirmed line 1</think><tool_call>{"name":"edit_file","arguments":{"path":"src/router.py","old_text":"list_loans","new_text":"loan_history"}}',
+  ])
+  const retried = await decideStep({ history: foldedThenRead, tools: editTools, config: cfg, generator: genRetryEdit })
+  assert.equal(retried.decision.type, 'tool')
+  assert.equal(retried.decision.type === 'tool' && retried.decision.tool.dshName, 'edit')
+  assert.equal(genRetryEdit.prompts.length, 1)
+
+  // 3) 2 consecutive edit failures do NOT block a 3rd edit with corrected old_text in bounded mode
+  const twoEditFails: HistoryItem[] = [
+    { kind: 'user', text: 'Update README.md' },
+    { kind: 'call', id: 'e1', name: 'edit_file', args: { path: 'README.md', old_text: 'v1', new_text: 'v3' } },
+    { kind: 'result', id: 'e1', name: 'edit_file', ok: false, text: 'Error: Could not find old_string' },
+    { kind: 'call', id: 'e2', name: 'edit_file', args: { path: 'README.md', old_text: 'v2', new_text: 'v3' } },
+    { kind: 'result', id: 'e2', name: 'edit_file', ok: false, text: 'Error: Could not find old_string' },
+  ]
+  const genThirdEdit = new ScriptedGenerator([
+    '>Use exact line</think><tool_call>{"name":"edit_file","arguments":{"path":"README.md","old_text":"version: 2","new_text":"version: 3"}}',
+  ])
+  const thirdEdit = await decideStep({ history: twoEditFails, tools: editTools, config: cfg, generator: genThirdEdit })
+  assert.equal(thirdEdit.decision.type, 'tool')
+  assert.equal(thirdEdit.decision.type === 'tool' && thirdEdit.decision.tool.dshName, 'edit')
+
+  // 4) cleanFinalText strips orphan </think> when answerOpener had no matching <think>
+  const genOrphan = new ScriptedGenerator([
+    '>内部推演</think>已完成所有修改。',
+  ])
+  const cleanRes = await decideStep({ history: [{ kind: 'user', text: '总结一下' }], tools: editTools, config: cfg, generator: genOrphan })
+  assert.deepEqual(cleanRes.decision, { type: 'final', text: '已完成所有修改。', via: 'model' })
+})

@@ -30,6 +30,7 @@ import {
   correction,
   EMPTY_EXIT_REASK,
   extractThinkInner,
+  hasPlanningMarker,
   isChinese,
   oneStageAnswerInstruction,
   POST_TOOL_REMINDER,
@@ -390,9 +391,9 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       if (attempt === 2) {
         if (openerMode === 'default') {
           opener = answerOpener(state.task)
-        } else if (openerMode === 'zh-only' && isChinese(state.task)) {
+        } else if (openerMode === 'zh-only' && isChinese(state.task) && state.successfulCalls > 0) {
           opener = '根据上面的工具结果，'
-        } else {
+        } else if (openerMode !== 'zh-only' || !isChinese(state.task)) {
           extraStops = ['<tool_call>', '<tool_call']
           rawAssistantPrefix = config.thinking === 'full' ? ` <think>${priorThink}</think>\n` : undefined
         }
@@ -409,12 +410,12 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       lastOutput = opener ? `${opener}${output}` : output
       outputs.push(lastOutput)
       let action = parseAction(lastOutput, result.finish, parseOptions)
+      const truncatedPlanningAtToolStop = action.type === 'final' && hasPlanningMarker(cleanFinalText(action.text))
       if (
         attempt === 2
         && openerMode === 'zh-only'
         && !isChinese(state.task)
-        && action.type === 'error'
-        && action.kind === 'empty'
+        && ((action.type === 'error' && action.kind === 'empty') || truncatedPlanningAtToolStop)
         && (result.stop === '<tool_call>' || result.stop === '<tool_call')
       ) {
         const retryPrefix = config.thinking === 'full' ? ` <think>${priorThink}</think>Summary:\n` : 'Summary:\n'

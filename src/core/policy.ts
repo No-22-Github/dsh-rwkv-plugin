@@ -111,6 +111,11 @@ export function answerOpener(task: string): string {
 
 const PLANNING_MARKERS = ['让我', '我需要', '我将', '我会再', '接下来', '再搜', '再查', 'let me', 'i need to', 'i will', 'i\'ll', 'next,']
 
+export function hasPlanningMarker(text: string): boolean {
+  const lower = text.trim().toLowerCase()
+  return PLANNING_MARKERS.some(marker => lower.includes(marker))
+}
+
 /** Prose written before a tool frame, when it is a real answer and not a plan. */
 export function salvageAnswerProse(output: string, opener = ''): string {
   let text = output
@@ -302,6 +307,7 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
   const calls = new Map<string, { name: string; key: string; mutating: boolean; file: string }>()
   const successKeys = new Set<string>()
   const failedEpochs = new Map<string, number>()
+  const failedEditFiles = new Map<string, string>()
   const epochKeyCounts = new Map<string, number>()
   const readKeys = new Map<string, string>()
   const perFileFailedEdits = new Map<string, number>()
@@ -346,6 +352,19 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
         successKeys.clear()
         epochKeyCounts.clear()
         readKeys.clear()
+        failedEditFiles.clear()
+      }
+      if (READ_TOOLS.has(calledName) && file !== '') {
+        // Re-reading file F unlocks retrying an edit on F that was previously blocked
+        // (e.g. by folded-read-guard after cross-turn auto-fold).
+        for (const [ek, ef] of [...failedEditFiles.entries()]) {
+          if (sameTargetFile(ef, file)) {
+            epochKeyCounts.delete(ek)
+            failedEpochs.delete(ek)
+            failedEditFiles.delete(ek)
+            if (lastCallKey === ek) lastCallKey = ''
+          }
+        }
       }
       if (EDIT_FAIL_TRACKERS.has(calledName) && file !== '') {
         for (const tracked of [...perFileFailedEdits.keys()]) {
@@ -365,6 +384,7 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
         lastCallOk = true
       }
       failedEpochs.delete(key)
+      failedEditFiles.delete(key)
       successfulCalls++
       consecutiveFailedTool = ''
       consecutiveFailures = 0
@@ -376,7 +396,11 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
         lastCallOk = false
       }
       if (EDIT_FAIL_TRACKERS.has(calledName) && file !== '') {
-        perFileFailedEdits.set(file, (perFileFailedEdits.get(file) ?? 0) + 1)
+        failedEditFiles.set(key, file)
+        const isFoldedGuardBlock = /folded out of the active context window|has not been read/i.test(item.text)
+        if (!isFoldedGuardBlock) {
+          perFileFailedEdits.set(file, (perFileFailedEdits.get(file) ?? 0) + 1)
+        }
         for (const [rk, rf] of [...readKeys.entries()]) {
           if (sameTargetFile(rf, file)) {
             epochKeyCounts.delete(rk)

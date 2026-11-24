@@ -280,6 +280,10 @@ export function thinkOpen(text: string): boolean {
 /** Final-answer clean-up: leftover think block, trailing role labels the stop did not catch. */
 export function cleanFinalText(text: string): string {
   let result = stripLeadingThinkBlocks(text.trim())
+  if (result.includes('</think>') && !result.includes('<think')) {
+    const afterOrphanClose = result.slice(result.lastIndexOf('</think>') + '</think>'.length).trim()
+    if (afterOrphanClose !== '') result = afterOrphanClose
+  }
   const role = /\n\s*(?:User|System|Assistant|Tool)\s*[:：]/.exec(result)
   if (role) result = result.slice(0, role.index)
   return result.replace(/✿.*$/s, '').trim()
