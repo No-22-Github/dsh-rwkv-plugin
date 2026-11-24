@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import type { GenerateRequest, GenerateResult, Generator } from '../src/backend/generator.ts'
 import { LoopGuard, splitAtStop, v1Root } from '../src/backend/generator.ts'
+import { capServerStops } from '../src/backend/irwkv.ts'
 import { decideStep, DEFAULT_HARNESS, type HarnessConfig } from '../src/core/agent.ts'
 import { parseAction } from '../src/core/parse.ts'
 import { dshSystemSections } from '../src/core/dsh-prompt.ts'
@@ -727,4 +728,15 @@ test('duplicateGateMode bounded unlocks re-read after failed edit, closes out 3r
   const capped = await decideStep({ history: fiveFails, tools, config: cfg, generator: genCap })
   assert.equal(capped.decision.type, 'final')
   assert.equal(capped.decision.type === 'final' && capped.decision.via, 'answer-stage')
+})
+
+test('capServerStops keeps <=4 stops and collapses 6 hv21 answer-stage stops to 4 for vLLM', () => {
+  assert.deepEqual(
+    capServerStops(['</tool_call>', '\nUser:', '\nSystem:', '\nTool:']),
+    ['</tool_call>', '\nUser:', '\nSystem:', '\nTool:'],
+  )
+  assert.deepEqual(
+    capServerStops(['</tool_call>', '\nUser:', '\nSystem:', '\nTool:', '<tool_call>', '<tool_call']),
+    ['</tool_call>', '\nUser:', '\nTool:', '<tool_call'],
+  )
 })

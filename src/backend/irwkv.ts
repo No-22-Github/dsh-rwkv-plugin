@@ -22,6 +22,25 @@ export interface IRWKVConfig {
   readonly loopGuard?: boolean
 }
 
+/**
+ * Caps server-side `stop` sequences to OpenAI/vLLM's 4-item limit while client
+ * stream matching still enforces all `request.stops`.
+ */
+export function capServerStops(stops: readonly string[], maxItems = 4): readonly string[] {
+  if (stops.length <= maxItems) return stops
+  // Drop superstrings already covered by a shorter non-empty prefix stop (e.g. "<tool_call>" vs "<tool_call").
+  const deduped = stops.filter(
+    s => s !== '' && !stops.some(other => other !== '' && other !== s && s.startsWith(other)),
+  )
+  if (deduped.length <= maxItems) return deduped
+  // Prefer dropping rare "\nSystem:" server-side first (client-side stream matcher still enforces all stops).
+  const withoutSystem = deduped.filter(s => s !== '\nSystem:')
+  if (withoutSystem.length <= maxItems) return withoutSystem
+  // Keep extra tail stops (like "<tool_call") plus earliest core stops.
+  const tailCount = Math.min(maxItems - 1, Math.max(1, withoutSystem.length - 3))
+  return [...withoutSystem.slice(0, maxItems - tailCount), ...withoutSystem.slice(-tailCount)]
+}
+
 export class IRWKVClient implements Generator {
   private readonly config: IRWKVConfig
   private readonly root: string
@@ -45,7 +64,7 @@ export class IRWKVClient implements Generator {
       presence_penalty: request.sampling.presencePenalty,
       frequency_penalty: request.sampling.frequencyPenalty,
       penalty_decay: request.sampling.penaltyDecay,
-      stop: request.stops,
+      stop: capServerStops(request.stops),
       ...stopTokenIds.length > 0 ? { stop_token_ids: stopTokenIds } : {},
       add_special_tokens: false,
       stream: true,
