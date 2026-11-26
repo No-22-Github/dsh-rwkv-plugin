@@ -369,6 +369,27 @@ test('file paths missing the last workspace component are repaired only when the
   assert.equal(repairToolPaths('edit', rel, cwd), rel)
   const cmd = { command: `cat ${join(root, 'task', 'a.py')}` }
   assert.equal(repairToolPaths('bash', cmd, cwd), cmd)
+
+  // macOS spill-path self-healing: /tmp/dsh-spill-... or mangled tmpdir prefix -> real OS tmpdir.
+  const fakeTmp = mkdtempSync(join(tmpdir(), 'rwkv-spill-tmp-'))
+  const spillRel = join('dsh-spill-16QuoN', 'session-ee9a1a8e3135', '7c7b309ed761-web_fetch.txt')
+  const spillReal = join(fakeTmp, spillRel)
+  mkdirSync(join(fakeTmp, 'dsh-spill-16QuoN', 'session-ee9a1a8e3135'), { recursive: true })
+  writeFileSync(spillReal, 'JSON-RPC 2.0\n')
+  assert.deepEqual(
+    repairToolPaths('read', { file_path: `/tmp/${spillRel}` }, cwd, fakeTmp),
+    { file_path: spillReal },
+  )
+  assert.deepEqual(
+    repairToolPaths('grep', { pattern: 'error', path: `/tmp/${spillRel}` }, cwd, fakeTmp),
+    { pattern: 'error', path: spillReal },
+  )
+  assert.deepEqual(
+    repairToolPaths('read', { file_path: `/var/folders/qd/wrong/T/DSH-spill-16QuoN/session-ee9a1a8e3135/7c7b309ed761-web_fetch.txt` }, undefined, fakeTmp),
+    { file_path: spillReal },
+  )
+  const missingSpill = { file_path: '/tmp/dsh-spill-missing/session-x/nope.txt' }
+  assert.equal(repairToolPaths('read', missingSpill, cwd, fakeTmp), missingSpill)
 })
 
 // ── RWKV Agent preset (toolNames: dsh) ─────────────────────────────────────

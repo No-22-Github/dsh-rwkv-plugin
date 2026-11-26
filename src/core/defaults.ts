@@ -12,9 +12,9 @@ export interface SamplingDefaults {
 }
 
 export const AGENT_FAST_SAMPLING: SamplingDefaults = {
-  temperature: 0.5,
+  temperature: 0.35,
   topK: 65536,
-  topP: 0.7,
+  topP: 0.85,
   presencePenalty: 0.5,
   frequencyPenalty: 0.2,
   penaltyDecay: 0.996,

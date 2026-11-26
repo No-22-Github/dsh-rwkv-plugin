@@ -5,6 +5,7 @@
 // file, or a deliberate path outside the workspace is passed through as is.
 
 import { existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import type { HistoryItem } from './core/policy.ts'
 
@@ -29,6 +30,26 @@ const GHOST_WORKSPACE_ROOTS = [
   '/app',
 ] as const
 
+const SPILL_SUFFIX_PATTERN = /\/(dsh-spill-[^/]+(?:\/.*)?)$/i
+
+/**
+ * macOS spill-path self-healing: models trained in Linux containers often
+ * rewrite `/var/folders/.../T/dsh-spill-...` as `/tmp/dsh-spill-...` (or
+ * mangle the random macOS tmpdir prefix). Remap to the real OS tmpdir only
+ * when the original path does not exist and the remapped spill path does.
+ */
+function repairSpillPath(path: string, tempDir: string): string | undefined {
+  if (!isAbsolute(path) || existsSync(path)) return undefined
+  const match = SPILL_SUFFIX_PATTERN.exec(path)
+  if (!match) return undefined
+  const suffix = match[1]!
+  const normalized = suffix.replace(/^dsh-spill-/i, 'dsh-spill-')
+  const candidates = normalized === suffix
+    ? [join(tempDir, normalized)]
+    : [join(tempDir, normalized), join(tempDir, suffix)]
+  return candidates.find(candidate => existsSync(candidate))
+}
+
 function repairPath(path: string, cwd: string): string {
   if (!isAbsolute(path) || existsSync(path)) return path
   const parent = dirname(cwd)
@@ -48,13 +69,19 @@ function repairPath(path: string, cwd: string): string {
 const FILE_TOOLS = new Set(['read', 'write', 'edit', 'edit_lines', 'glob', 'grep'])
 
 /** DSH-side arguments with file_path / path repaired; the same object when nothing changed. */
-export function repairToolPaths(dshName: string, args: Record<string, unknown>, cwd: string | undefined): Record<string, unknown> {
-  if (cwd === undefined || !FILE_TOOLS.has(dshName) || !existsSync(cwd)) return args
+export function repairToolPaths(
+  dshName: string,
+  args: Record<string, unknown>,
+  cwd: string | undefined,
+  tempDir: string = tmpdir(),
+): Record<string, unknown> {
+  if (!FILE_TOOLS.has(dshName)) return args
+  const hasCwd = cwd !== undefined && existsSync(cwd)
   let out: Record<string, unknown> | undefined
   for (const key of ['file_path', 'path']) {
     const value = args[key]
     if (typeof value !== 'string') continue
-    const repaired = repairPath(value, cwd)
+    const repaired = repairSpillPath(value, tempDir) ?? (hasCwd ? repairPath(value, cwd) : value)
     if (repaired !== value) {
       out ??= { ...args }
       out[key] = repaired
