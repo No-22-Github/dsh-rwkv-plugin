@@ -144,3 +144,25 @@ test('an upstream 413 on adapter upload explains the Cloudflare cap', async () =
     server.close()
   }
 })
+
+test('lightning client sends accept-encoding identity by default on adapter list', async () => {
+  const encodings: (string | undefined)[] = []
+  const server = createServer((request, response) => {
+    encodings.push(typeof request.headers['accept-encoding'] === 'string' ? request.headers['accept-encoding'] : undefined)
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ data: [{ id: 'a1', version: 'v1' }] }))
+  })
+  const url = await listen(server)
+  try {
+    const client = new LightningClient({ baseURL: url, model: 'm' })
+    const adapters = await client.listAdapters()
+    assert.deepEqual(adapters, [{ id: 'a1', version: 'v1' }])
+    assert.equal(encodings[0], 'identity')
+
+    const custom = new LightningClient({ baseURL: url, model: 'm', headers: { 'Accept-Encoding': 'gzip' } })
+    await custom.listAdapters()
+    assert.equal(encodings[1], 'gzip')
+  } finally {
+    server.close()
+  }
+})

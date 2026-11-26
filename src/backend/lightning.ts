@@ -64,7 +64,10 @@ export class LightningClient implements Generator {
   }
 
   private headers(extra: Record<string, string> = {}): Record<string, string> {
-    return { ...this.config.headers, ...extra }
+    // Ask for uncompressed JSON so rwkv_router gateways do not trip over gzipped backend adapter lists.
+    const merged = { ...this.config.headers, ...extra }
+    const hasAcceptEncoding = Object.keys(merged).some(key => key.toLowerCase() === 'accept-encoding')
+    return hasAcceptEncoding ? merged : { 'accept-encoding': 'identity', ...merged }
   }
 
   async generate(request: GenerateRequest, onDelta?: (text: string) => void): Promise<GenerateResult> {
