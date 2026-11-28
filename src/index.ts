@@ -4,6 +4,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
+import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 import z from '@deepseek-ai/schemastery'
 import { RwkvAdapter, type AdapterSettings, type ModelConfig } from './adapter.ts'
 import { DEFAULT_HARNESS } from './core/agent.ts'
@@ -187,8 +188,20 @@ function traceLocationOf(config: Config): TraceLocation {
   return new TraceLocation(config.traceDir.get())
 }
 
-function settingsOf(config: Config): AdapterSettings {
+const CONTEXT_FOLD_RECORD = 'plugin:rwkv-llm/context-fold'
+const appendRecord = appendPluginRecord as unknown as (session: object, type: string, data: unknown) => unknown
+
+function settingsOf(config: Config, ctx: Context): AdapterSettings {
   const editMode = config.editMode.get()
+  const emitFold = (sessionId: string, fold: { readonly kind: string; readonly beforeTokens: number; readonly afterTokens: number; readonly foldedTools: number }) => {
+    try {
+      const sessions = (ctx as unknown as { get?(name: string): unknown }).get?.('sessions') as { get?(id: string): object | undefined } | undefined
+      const session = sessions?.get?.(sessionId)
+      if (session !== undefined) appendRecord(session, CONTEXT_FOLD_RECORD, fold)
+    } catch {
+      // Session log unavailable in minimal compositions: ignore cleanly.
+    }
+  }
   return {
     models: config.models.get(),
     harness: {
@@ -232,12 +245,13 @@ function settingsOf(config: Config): AdapterSettings {
       worklistPinUneditedRead: config.worklistPinUneditedRead.get(),
     }),
     ...config.recordTraces.get() ? { traces: traceLocationOf(config) } : {},
+    onFoldEvent: emitFold,
     log: message => console.log(`[rwkv-llm] ${message}`),
   }
 }
 
 export function apply(ctx: Context, config: Config): void {
-  const adapter = new RwkvAdapter(() => settingsOf(config))
+  const adapter = new RwkvAdapter(() => settingsOf(config, ctx))
   ctx.llm.registerAdapter(config.providers, adapter)
   ;(ctx as unknown as { provide: (service: string, value: unknown) => void }).provide(
     'rwkvSessionCleanup',

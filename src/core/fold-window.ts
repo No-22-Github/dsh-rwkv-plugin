@@ -58,6 +58,13 @@ export interface ActiveWindowOptions {
   readonly forcedPinnedRead?: CallPair
 }
 
+export interface ContextFoldEvent {
+  readonly kind: 'in-place' | 'stage-archive' | 'prior-turn' | 'worklist' | 'relay'
+  readonly beforeTokens: number
+  readonly afterTokens: number
+  readonly foldedTools: number
+}
+
 export interface ActiveWindowResult {
   readonly items: HistoryItem[]
   readonly duplicateFrom: number
@@ -65,6 +72,7 @@ export interface ActiveWindowResult {
   readonly checkpointAt?: number
   readonly liveNudge?: string
   readonly maskedCallIds?: ReadonlySet<string>
+  readonly foldEvent?: ContextFoldEvent
 }
 
 export function buildActiveWindow(
@@ -438,6 +446,7 @@ export function buildInPlaceFoldWindow(
   let archivedCount = 0
   const maskedCallIndices = new Set<number>()
   const clearedReasoning = new Set<number>()
+  let lastStepFold: ContextFoldEvent | undefined
 
   const assembleInPlace = (endIndex: number, pairsSub: readonly CallPair[]): { items: HistoryItem[]; tokens: number } => {
     const archivedPairs = archivedCount > 0 ? pairsSub.slice(0, archivedCount) : []
@@ -481,9 +490,13 @@ export function buildInPlaceFoldWindow(
   }
 
   for (let k = 0; k < pairs.length; k++) {
+    const isLast = k === pairs.length - 1
     const pairsSub = pairs.slice(0, k + 1)
-    const endAtK = k === pairs.length - 1 ? history.length : pairs[k]!.resultIndex + 1
+    const endAtK = isLast ? history.length : pairs[k]!.resultIndex + 1
     let cur = assembleInPlace(endAtK, pairsSub)
+    const beforeTokens = cur.tokens
+    const maskedBefore = maskedCallIndices.size
+    const archivedBefore = archivedCount
     if (cur.tokens > opts.budgetTokens) {
       const maskLimit = pairsSub.length - keepFloor
       let changed = false
@@ -517,6 +530,19 @@ export function buildInPlaceFoldWindow(
       maskedCallIndices.delete(droppedPair.callIndex)
       cur = assembleInPlace(endAtK, pairsSub)
     }
+    if (isLast) {
+      const deltaArchived = archivedCount - archivedBefore
+      const deltaMasked = Math.max(0, maskedCallIndices.size - (maskedBefore - deltaArchived))
+      const foldedTools = deltaArchived + deltaMasked
+      if (foldedTools > 0 || cur.tokens < beforeTokens) {
+        lastStepFold = {
+          kind: deltaArchived > 0 ? 'stage-archive' : 'in-place',
+          beforeTokens,
+          afterTokens: cur.tokens,
+          foldedTools,
+        }
+      }
+    }
   }
 
   const finalBuilt = assembleInPlace(history.length, pairs)
@@ -532,5 +558,6 @@ export function buildInPlaceFoldWindow(
     duplicateFrom,
     totalTokens: finalBuilt.tokens,
     ...(maskedCallIds.size > 0 ? { maskedCallIds } : {}),
+    ...(lastStepFold !== undefined ? { foldEvent: lastStepFold } : {}),
   }
 }

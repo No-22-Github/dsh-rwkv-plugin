@@ -62,9 +62,9 @@ import {
   type FinalVia,
 } from './step-gates.ts'
 import type { WireTool } from './tools.ts'
-import { worklistEntries, type WorklistOptions } from './worklist.ts'
+import { worklistEntries, type ContextFoldEvent, type WorklistOptions } from './worklist.ts'
 
-export type { Decision, FinalVia }
+export type { ContextFoldEvent, Decision, FinalVia }
 
 export const DECISION_STOPS = ['</tool_call>', '\nUser:', '\nSystem:', '\nTool:'] as const
 
@@ -122,6 +122,7 @@ export const DEFAULT_HARNESS: HarnessConfig = {
 export interface GenerationTrace {
   readonly stage: 'decision' | 'answer' | 'card'
   readonly prompt: string
+  readonly promptTokens?: number
   readonly output: string
   readonly finish: string
   readonly stop?: string
@@ -130,6 +131,7 @@ export interface GenerationTrace {
   readonly repairs: readonly string[]
   readonly relay?: RelayTrace
   readonly worklist?: WorklistTrace
+  readonly fold?: ContextFoldEvent
 }
 
 export interface WorklistTrace {
@@ -149,8 +151,19 @@ export interface RelayTrace {
 
 export interface StepHooks {
   reasoning?(delta: string): void
+  text?(delta: string): void
   attempt?(label: string): void
   trace?(trace: GenerationTrace): void
+  wireStart?(info: {
+    readonly stage: 'decision' | 'answer' | 'card'
+    readonly prompt: string
+    readonly fullPrompt?: string
+    readonly promptTokens: number
+    readonly pastThinks?: readonly string[]
+    readonly fold?: ContextFoldEvent
+  }): void
+  wireDelta?(delta: string): void
+  wireEnd?(info: { readonly output: string; readonly outputTokens: number }): void
 }
 
 export interface StepInput {
@@ -175,6 +188,7 @@ export interface StepResult {
   readonly completionTokens: number
   readonly generations: number
   readonly foldedUnread?: readonly string[]
+  readonly foldEvent?: ContextFoldEvent
 }
 
 const MAX_THINK_STOP_RESUMES = 4
@@ -197,13 +211,17 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
   let completionTokens = 0
   let generations = 0
 
+  let worklistTrace: WorklistTrace | undefined
+  let stepFoldEvent: ContextFoldEvent | undefined
+  let foldTraced = false
+
   const generate = async (
     entries: readonly Entry[],
     stage: 'decision' | 'answer' | 'card',
     label: string,
     prefill?: string,
     options?: { readonly rawAssistantPrefix?: string; readonly extraStops?: readonly string[] },
-  ): Promise<{ output: string; result: GenerateResult; prompt: string }> => {
+  ): Promise<{ output: string; result: GenerateResult; prompt: string; promptTokens: number }> => {
     const rawPrefix = options?.rawAssistantPrefix
     const prompt = renderPrompt(entries, {
       thinking: config.thinking,
@@ -212,8 +230,36 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       ...rawPrefix === undefined ? {} : { rawAssistantPrefix: rawPrefix },
     })
     hooks?.attempt?.(label)
+    if (hooks?.wireStart !== undefined) {
+      const pastThinks = config.thinking === 'full' && config.historyEmptyThink
+        ? entries.filter(entry => entry.role === 'assistant').map(entry => entry.reasoning ?? '')
+        : undefined
+      const fullEntries: Entry[] = [
+        { role: 'system', text: system },
+        ...transcriptEntries(input.history, { tools, postToolReminder: reminder }),
+      ]
+      const fullPrompt = renderPrompt(fullEntries, {
+        thinking: config.thinking,
+        historyEmptyThink: false,
+        ...prefill === undefined ? {} : { prefill },
+        ...rawPrefix === undefined ? {} : { rawAssistantPrefix: rawPrefix },
+      })
+      hooks.wireStart({
+        stage,
+        prompt,
+        fullPrompt,
+        promptTokens: countTokens(prompt),
+        ...(pastThinks !== undefined && pastThinks.some(t => t !== '') ? { pastThinks } : {}),
+        ...(stage !== 'card' && stepFoldEvent !== undefined ? { fold: stepFoldEvent } : {}),
+      })
+    }
     const hasOpenThink = config.thinking === 'full' && prefill === undefined && rawPrefix === undefined
-    const splitter = hasOpenThink && hooks?.reasoning ? new ThinkSplitter(hooks.reasoning) : undefined
+    const streamText = stage !== 'card' && prefill === undefined ? hooks?.text : undefined
+    const splitter = hasOpenThink && (hooks?.reasoning || streamText)
+      ? new ThinkSplitter(hooks?.reasoning, streamText, false)
+      : !hasOpenThink && streamText
+        ? new ThinkSplitter(undefined, streamText, true)
+        : undefined
     const stops = options?.extraStops ? [...DECISION_STOPS, ...options.extraStops] : [...DECISION_STOPS]
     const request: GenerateRequest = {
       prompt,
@@ -225,12 +271,18 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       ...input.signal ? { signal: input.signal } : {},
       ...input.sessionId ? { sessionId: input.sessionId } : {},
     }
-    const onDelta = splitter ? (text: string) => splitter.feed(text) : undefined
+    const onDelta = splitter || hooks?.wireDelta
+      ? (text: string) => {
+        splitter?.feed(text)
+        hooks?.wireDelta?.(text)
+      }
+      : undefined
     let result = await input.generator.generate(request, onDelta)
     generations++
     let text = result.text
     let spent = result.completionTokens ?? countTokens(text)
-    promptTokens += result.promptTokens ?? countTokens(prompt)
+    const stepPromptTokens = result.promptTokens ?? countTokens(prompt)
+    promptTokens += stepPromptTokens
 
     const opening = hasOpenThink ? '<think' : ''
     for (let resume = 0; resume < MAX_THINK_STOP_RESUMES; resume++) {
@@ -267,24 +319,28 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       result = { ...next, text }
     }
     completionTokens += spent
+    hooks?.wireEnd?.({ output: text, outputTokens: spent })
     const output = rawPrefix !== undefined
       ? `${rawPrefix.trimStart()}${text}`
       : hasOpenThink ? reconstructOutput(text, config.thinking) : text
-    return { output, result: { ...result, text }, prompt }
+    return { output, result: { ...result, text }, prompt, promptTokens: stepPromptTokens }
   }
 
-  let worklistTrace: WorklistTrace | undefined
   const traced = (
     stage: 'decision' | 'answer' | 'card', prompt: string, output: string, result: GenerateResult, action: Action,
-    outcome: string, gateRepairs: readonly string[] = [], relay?: RelayTrace,
+    outcome: string, gateRepairs: readonly string[] = [], relay?: RelayTrace, stepPromptTokens?: number,
   ) => {
     const parsed = action.type === 'tool' || action.type === 'exit' ? action.repairs : []
+    const attachFold = !foldTraced && stage !== 'card' && stepFoldEvent !== undefined ? stepFoldEvent : undefined
+    if (attachFold !== undefined) foldTraced = true
     hooks?.trace?.({
       stage, prompt, output, finish: result.finish, action: describeAction(action), outcome,
       repairs: [...parsed, ...gateRepairs],
+      ...stepPromptTokens === undefined ? {} : { promptTokens: stepPromptTokens },
       ...result.stop === undefined ? {} : { stop: result.stop },
       ...relay === undefined ? {} : { relay },
       ...stage === 'decision' && worklistTrace !== undefined ? { worklist: worklistTrace } : {},
+      ...attachFold === undefined ? {} : { fold: attachFold },
     })
   }
   const parseOptions = { strict: !config.outputRepairs }
@@ -296,19 +352,20 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
     completionTokens,
     generations,
     ...(foldedUnread !== undefined ? { foldedUnread } : {}),
+    ...(stepFoldEvent !== undefined ? { foldEvent: stepFoldEvent } : {}),
   })
 
   const writeCard = async (need: RelayNeed, cards: readonly RelayCard[]): Promise<RelayCard> => {
     let text = ''
-    let pending: { output: string; result: GenerateResult; prompt: string } | undefined
+    let pending: { output: string; result: GenerateResult; prompt: string; promptTokens: number } | undefined
     try {
       const entries: Entry[] = [
         { role: 'system', text: system },
         ...recapEntries(input.history, cards, need, { tools, postToolReminder: '' }),
       ]
-      const { output, result, prompt } = await generate(entries, 'card', 'handoff recap')
+      const { output, result, prompt, promptTokens: cardPromptTokens } = await generate(entries, 'card', 'handoff recap')
       text = cleanCardText(output)
-      pending = { output, result, prompt }
+      pending = { output, result, prompt, promptTokens: cardPromptTokens }
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') throw error
     }
@@ -316,7 +373,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
     const card = makeCard(input.history, need, text !== '' ? text : fallbackCard(input.history, need, budget))
     const relay: RelayTrace = { from: need.start, to: need.end, turn: need.turn, fallback: text === '', card: card.text }
     if (pending !== undefined) {
-      traced('card', pending.prompt, pending.output, pending.result, { type: 'final', text }, text === '' ? 'card-empty' : 'card', [], relay)
+      traced('card', pending.prompt, pending.output, pending.result, { type: 'final', text }, text === '' ? 'card-empty' : 'card', [], relay, pending.promptTokens)
     } else if (hooks?.trace !== undefined) {
       hooks.trace({
         stage: 'card', prompt: '', output: '', finish: 'error', action: 'card', outcome: 'card-failed', repairs: [], relay,
@@ -339,6 +396,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       ...config.worklist,
     })
     foldedUnread = fold.foldedUnread
+    stepFoldEvent = fold.foldEvent
     liveWorklistNudge = fold.nudge
     worklistTrace = {
       promptTokens: fold.promptTokens,
@@ -404,7 +462,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
           ...extraStops === undefined ? {} : { extraStops },
         }
         : undefined
-      let { output, result, prompt } = await generate(staged, 'answer', attempt === 0 ? 'answer' : 'answer re-ask', opener, genOpts)
+      let { output, result, prompt, promptTokens: answerPromptTokens } = await generate(staged, 'answer', attempt === 0 ? 'answer' : 'answer re-ask', opener, genOpts)
       const closedThink = extractThinkInner(output)
       if (closedThink !== '') priorThink = closedThink
       lastOutput = opener ? `${opener}${output}` : output
@@ -426,6 +484,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
         output = retry.output
         result = retry.result
         prompt = retry.prompt
+        answerPromptTokens = retry.promptTokens
         lastOutput = output
         outputs.push(lastOutput)
         action = parseAction(lastOutput, result.finish, parseOptions)
@@ -433,22 +492,22 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       if (allowTools && action.type === 'tool' && state.steps < config.maxSteps) {
         const gated = gateToolCall(action, state, tools, config, true)
         if (gated.type === 'run') {
-          traced('answer', prompt, output, result, action, 'run', gated.repairs)
+          traced('answer', prompt, output, result, action, 'run', gated.repairs, undefined, answerPromptTokens)
           return done({ type: 'tool', tool: gated.tool, args: gated.args, rawArgs: action.args, repairs: [...action.repairs, ...gated.repairs, 'answer_stage_tool'] })
         }
       }
       if (action.type === 'final' && !action.text.toLowerCase().includes('<tool_call')) {
         const text = cleanFinalText(action.text)
         if (text !== '') {
-          traced('answer', prompt, output, result, action, 'final')
+          traced('answer', prompt, output, result, action, 'final', [], undefined, answerPromptTokens)
           return done({ type: 'final', text, via: 'answer-stage' })
         }
       }
       if (action.type === 'exit' && action.answer !== '') {
-        traced('answer', prompt, output, result, action, 'final')
+        traced('answer', prompt, output, result, action, 'final', [], undefined, answerPromptTokens)
         return done({ type: 'final', text: action.answer, via: 'answer-stage' })
       }
-      traced('answer', prompt, output, result, action, config.guards ? 're-ask' : 'raw')
+      traced('answer', prompt, output, result, action, config.guards ? 're-ask' : 'raw', [], undefined, answerPromptTokens)
       if (attempt === 0) staged.push({ role: 'user', text: ANSWER_STAGE_REASK })
     }
     if (!config.guards) return done(rawFinal(lastOutput))
@@ -468,11 +527,11 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
   let blockedRetries = 0
   for (let attempt = 0; attempt < config.protocolRetries + 4; attempt++) {
     const label = attempt === 0 ? 'decide' : 're-ask'
-    const { output, result, prompt } = await generate([...base, ...extra], 'decision', label)
+    const { output, result, prompt, promptTokens: decisionPromptTokens } = await generate([...base, ...extra], 'decision', label)
     decisionOutputs.push(output)
     if (result.finish === 'cancelled') throw new DOMException('aborted', 'AbortError')
     const action = parseAction(output, result.finish, parseOptions)
-    const note = (outcome: string, gateRepairs?: readonly string[]) => traced('decision', prompt, output, result, action, outcome, gateRepairs)
+    const note = (outcome: string, gateRepairs?: readonly string[]) => traced('decision', prompt, output, result, action, outcome, gateRepairs, undefined, decisionPromptTokens)
     switch (action.type) {
       case 'final': {
         const text = cleanFinalText(action.text)

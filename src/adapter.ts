@@ -21,6 +21,7 @@ import { buildCatalog, type ToolMode, type ToolNames, type ToolOverride } from '
 import type { WorklistOptions } from './core/worklist.ts'
 import { setFoldedUnreadPaths } from './folded-read-guard.ts'
 import { historyFromMessages, systemText } from './history.ts'
+import { liveWire } from './live-wire.ts'
 import { repairToolPaths, runtimeCwd } from './paths.ts'
 import { RelayCardStore } from './relay-store.ts'
 import { buildExcludedTools } from './session-setup.ts'
@@ -75,6 +76,7 @@ export interface AdapterSettings {
   readonly traces?: TraceLocation
   readonly relay?: RelayOptions
   readonly worklist?: WorklistOptions
+  readonly onFoldEvent?: (sessionId: string, fold: { readonly kind: string; readonly beforeTokens: number; readonly afterTokens: number; readonly foldedTools: number }) => void
   readonly log?: (message: string) => void
 }
 
@@ -210,14 +212,37 @@ export class RwkvAdapter extends LlmAdapter {
     }
     let reasoningOpen = false
     let reasoning = ''
+    let textOpen = false
+    let textIndex = 0
+    let streamedText = ''
+    let nextIndex = 0
     let attempts = 0
+    const closeReasoning = () => {
+      if (!reasoningOpen) return
+      push({ type: 'block-end', index: 0, block: { type: 'reasoning', text: reasoning } })
+      reasoningOpen = false
+      nextIndex = Math.max(nextIndex, 1)
+    }
     const reasoningDelta = (text: string) => {
+      if (textOpen) return
       if (!reasoningOpen) {
         push({ type: 'block-start', index: 0, blockType: 'reasoning' })
         reasoningOpen = true
+        nextIndex = 1
       }
       reasoning += text
       push({ type: 'reasoning-delta', index: 0, text })
+    }
+    const textDelta = (text: string) => {
+      if (text === '') return
+      if (!textOpen) {
+        closeReasoning()
+        textIndex = nextIndex++
+        push({ type: 'block-start', index: textIndex, blockType: 'text' })
+        textOpen = true
+      }
+      streamedText += text
+      push({ type: 'text-delta', index: textIndex, text })
     }
     const sessionId = options.sessionId === undefined ? undefined : String(options.sessionId)
     const cwd = runtimeCwd(history)
@@ -248,10 +273,16 @@ export class RwkvAdapter extends LlmAdapter {
         },
         hooks: {
           ...harness.thinking === 'full' ? { reasoning: reasoningDelta } : {},
+          text: textDelta,
           attempt: label => {
             if (attempts++ > 0 && reasoningOpen) reasoningDelta(`\n\n[harness: ${label}]\n\n`)
           },
           trace: writeTrace,
+          ...(sessionId !== undefined && options.purpose === undefined ? {
+            wireStart: info => liveWire.start(sessionId, { model: config.id, ...info }),
+            wireDelta: delta => liveWire.delta(sessionId, delta),
+            wireEnd: info => liveWire.finish(sessionId, info),
+          } : {}),
         },
       })
     })().finally(() => {
@@ -276,6 +307,7 @@ export class RwkvAdapter extends LlmAdapter {
       step = await work
     } catch (error) {
       if (reasoningOpen) yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: reasoning } }
+      if (textOpen) yield { type: 'block-end', index: textIndex, block: { type: 'text', text: streamedText } }
       if (options.signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
         yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'rwkv: request aborted', code: 'ABORTED' } } }
         return
@@ -283,19 +315,39 @@ export class RwkvAdapter extends LlmAdapter {
       throw llmError(error)
     }
     setFoldedUnreadPaths(sessionId, step.foldedUnread ?? [])
-    let index = 0
+    if (sessionId !== undefined && step.foldEvent !== undefined && options.purpose === undefined) {
+      this.settings.onFoldEvent?.(sessionId, step.foldEvent)
+    }
     if (reasoningOpen) {
       yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: reasoning } }
-      index = 1
+      reasoningOpen = false
+      nextIndex = Math.max(nextIndex, 1)
     }
     const { decision } = step
     const repairs = decision.type === 'tool' ? [...decision.repairs] : []
     let handed: { args: Record<string, unknown>; changes: ArgumentChange[] } | undefined
     if (decision.type === 'final') {
-      yield { type: 'block-start', index, blockType: 'text' }
-      yield { type: 'text-delta', index, text: decision.text }
-      yield { type: 'block-end', index, block: { type: 'text', text: decision.text } }
+      if (textOpen) {
+        if (decision.text.startsWith(streamedText)) {
+          const rest = decision.text.slice(streamedText.length)
+          if (rest !== '') {
+            streamedText += rest
+            yield { type: 'text-delta', index: textIndex, text: rest }
+          }
+        }
+        yield { type: 'block-end', index: textIndex, block: { type: 'text', text: streamedText || decision.text } }
+      } else {
+        const index = nextIndex++
+        yield { type: 'block-start', index, blockType: 'text' }
+        yield { type: 'text-delta', index, text: decision.text }
+        yield { type: 'block-end', index, block: { type: 'text', text: decision.text } }
+      }
     } else {
+      if (textOpen) {
+        yield { type: 'block-end', index: textIndex, block: { type: 'text', text: streamedText } }
+        textOpen = false
+      }
+      const index = nextIndex++
       const id = brandString<ToolCallId>(`call_${randomUUID().replace(/-/g, '').slice(0, 24)}`)
       const dshArgs = decision.tool.toDsh(decision.args)
       const pathed = harness.outputRepairs ? repairToolPaths(decision.tool.dshName, dshArgs, cwd) : dshArgs

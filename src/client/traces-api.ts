@@ -3,6 +3,13 @@
 export const TRACE_ROUTE = '/api/rwkv/traces'
 export const TRACE_EXPORT_ROUTE = '/api/rwkv/trace-export'
 
+export interface ContextFoldTrace {
+  readonly kind: string
+  readonly beforeTokens: number
+  readonly afterTokens: number
+  readonly foldedTools: number
+}
+
 export interface TraceRecord {
   readonly at?: string
   readonly model?: string
@@ -10,6 +17,7 @@ export interface TraceRecord {
   readonly stage?: string
   readonly prompt?: string
   readonly promptChars?: number
+  readonly promptTokens?: number
   readonly output?: string
   readonly finish?: string
   readonly stop?: string
@@ -28,6 +36,40 @@ export interface TraceRecord {
   readonly relay?: RelayCardTrace
   /** Decision records in worklist mode. */
   readonly worklist?: WorklistStepTrace
+  /** Context fold event triggered right before this generation. */
+  readonly fold?: ContextFoldTrace
+}
+
+export function formatTokens(tokens: number): string {
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k`
+  return String(tokens)
+}
+
+export type CtxTier = 'green' | 'blue' | 'yellow' | 'red'
+
+export function ctxTier(tokens: number): CtxTier {
+  if (tokens <= 8000) return 'green'
+  if (tokens <= 12000) return 'blue'
+  if (tokens <= 16000) return 'yellow'
+  return 'red'
+}
+
+export function foldKindLabel(kind: string): string {
+  switch (kind) {
+    case 'prior-turn': return '跨轮上下文压缩'
+    case 'stage-archive': return '阶段归档折叠'
+    case 'worklist': return '工单检查点折叠'
+    case 'relay': return '交接卡压缩'
+    default: return '上下文折叠'
+  }
+}
+
+export function foldDetailText(fold: ContextFoldTrace): string {
+  const range = `${formatTokens(fold.beforeTokens)} → ${formatTokens(fold.afterTokens)}`
+  if (fold.foldedTools > 0) {
+    return `${range}，已折叠 ${fold.foldedTools} 条工具调用`
+  }
+  return range
 }
 
 export interface WorklistStepTrace {

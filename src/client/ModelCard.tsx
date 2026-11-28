@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { AdapterPicker } from './AdapterPicker.tsx'
-import { EditorActions, Field, HeadersInput, NumberInput, SelectInput, TextInput } from './fields.tsx'
+import { ComboInput, EditorActions, Field, HeadersInput, NumberInput, SelectInput, TextInput } from './fields.tsx'
 import { Segment } from './Segment.tsx'
 import { StatePicker, useServerModels } from './StatePicker.tsx'
 import { isHttpUrl, normalizeBaseURL } from './url.ts'
@@ -92,7 +92,6 @@ export function ModelEditor(props: {
     if (modelLinked && first !== undefined && first !== draft.model) setUpstream(first, false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [server.models, modelLinked])
-  const listId = `rwkv-models-${props.initial.id || 'new'}`
   const modelHint = server.loading ? '正在向服务器查询模型…'
     : server.error ? `没能取到模型列表：${server.error}`
     : server.models === undefined ? '填好服务地址后会自动从服务器读取'
@@ -123,8 +122,7 @@ export function ModelEditor(props: {
       <div className="rwkv-grid">
         <Field label="服务地址"><TextInput value={draft.baseURL} disabled={disabled} placeholder="100.64.0.8:8060" onChange={value => set('baseURL', value)} /></Field>
         <Field label="上游模型 ID" hint={modelHint}>
-          <TextInput value={draft.model} disabled={disabled} placeholder="自动从服务器读取" list={listId} onChange={value => setUpstream(value)} />
-          <datalist id={listId}>{(server.models ?? []).map(id => <option key={id} value={id} />)}</datalist>
+          <ComboInput value={draft.model} options={server.models ?? []} disabled={disabled} placeholder="自动从服务器读取" align="end" onChange={value => setUpstream(value)} />
         </Field>
         <Field label="模型 ID"><TextInput value={draft.id} disabled={disabled} placeholder="默认同上游模型 ID" onChange={value => { setIdLinked(value.trim() === ''); set('id', value) }} /></Field>
         <Field label="显示名"><TextInput value={draft.name} disabled={disabled} placeholder="默认同上游模型 ID" onChange={value => { setNameLinked(value.trim() === ''); set('name', value) }} /></Field>

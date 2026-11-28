@@ -9,7 +9,19 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { BackendError, listModels } from './backend/generator.ts'
 import { LightningClient, MAX_ADAPTER_UPLOAD_BYTES, MAX_STATE_UPLOAD_BYTES } from './backend/lightning.ts'
-import { allSessions, deleteTrace, exportTask, sessionRecords, traceStats, type TraceLocation } from './traces.ts'
+import { countWireBlockTokens, liveWire, type LiveWireSnapshot } from './live-wire.ts'
+import { countTokens } from './tokenizer.ts'
+import { allSessions, deleteTrace, exportTask, sessionRecords, traceStats, transcriptWithThinks, type TraceLocation } from './traces.ts'
+
+function extractThinkText(output: string): string {
+  const close = output.indexOf('</think>')
+  if (close < 0) return ''
+  const open = output.indexOf('<think')
+  if (open < 0 || open > close) return ''
+  const bodyStart = output.indexOf('>', open)
+  if (bodyStart < 0 || bodyStart > close) return ''
+  return output.slice(bodyStart + 1, close).trim()
+}
 
 export const MODEL_ROUTE = '/api/rwkv/models'
 export const STATE_ROUTE = '/api/rwkv/states'
@@ -154,6 +166,54 @@ export async function handleServerRoute(request: IncomingMessage, response: Serv
 
 export const TRACE_ROUTE = '/api/rwkv/traces'
 export const TRACE_EXPORT_ROUTE = '/api/rwkv/trace-export'
+export const LIVE_WIRE_ROUTE = '/api/rwkv/live'
+
+function fallbackLiveSnapshot(location: TraceLocation, session: string): LiveWireSnapshot | undefined {
+  const records = sessionRecords(location, session)
+  for (let i = records.length - 1; i >= 0; i--) {
+    const rec = records[i]!
+    if (rec.purpose !== undefined) continue
+    if (rec.stage !== 'decision' && rec.stage !== 'answer' && rec.stage !== 'card') continue
+    if (typeof rec.prompt !== 'string') continue
+    const rawOutput = rec.output ?? ''
+    const strippedOutput = rec.prompt.endsWith('<think') && rawOutput.startsWith('<think')
+      ? rawOutput.slice('<think'.length)
+      : rawOutput
+    const pastThinks: string[] = []
+    for (let j = 0; j < i; j++) {
+      const prev = records[j]!
+      if (prev.purpose !== undefined) continue
+      if (prev.stage !== 'decision' && prev.stage !== 'answer') continue
+      if (prev.outcome !== 'run' && prev.outcome !== 'final') continue
+      pastThinks.push(extractThinkText(prev.output ?? ''))
+    }
+    const fullPrompt = transcriptWithThinks(records.slice(0, i + 1)) || undefined
+    return {
+      sessionId: session,
+      model: rec.model ?? '',
+      stage: rec.stage,
+      streaming: false,
+      prompt: rec.prompt,
+      ...(fullPrompt === undefined ? {} : { fullPrompt }),
+      promptTokens: rec.promptTokens ?? rec.worklist?.promptTokens ?? 0,
+      blockTokens: countWireBlockTokens(rec.prompt),
+      ...(fullPrompt === undefined ? {} : { fullBlockTokens: countWireBlockTokens(fullPrompt) }),
+      ...(pastThinks.some(t => t !== '') ? { pastThinks } : {}),
+      output: strippedOutput,
+      outputTokens: countTokens(strippedOutput),
+      ...(rec.fold === undefined ? {} : {
+        fold: {
+          kind: rec.fold.kind as 'in-place' | 'stage-archive' | 'prior-turn' | 'worklist' | 'relay',
+          beforeTokens: rec.fold.beforeTokens,
+          afterTokens: rec.fold.afterTokens,
+          foldedTools: rec.fold.foldedTools,
+        },
+      }),
+      updatedAt: rec.at ?? new Date().toISOString(),
+    }
+  }
+  return undefined
+}
 
 export interface TraceRouteSettings {
   /** Where trace files are (next to DSH's session logs, or a custom directory). */
@@ -172,6 +232,40 @@ export interface TraceRouteSettings {
  */
 export function handleTraceRoute(request: IncomingMessage, response: ServerResponse, settings: () => TraceRouteSettings): boolean {
   const url = new URL(request.url ?? '/', 'http://host')
+  if (url.pathname.startsWith(`${LIVE_WIRE_ROUTE}/`)) {
+    if (request.method !== 'GET') {
+      send(response, 405, { error: 'method not allowed' })
+      return true
+    }
+    const session = decodeURIComponent(url.pathname.slice(LIVE_WIRE_ROUTE.length + 1))
+    const { location } = settings()
+    response.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      'connection': 'keep-alive',
+      'x-accel-buffering': 'no',
+    })
+    const writeEvent = (event: string, data: unknown) => {
+      if (response.writableEnded) return
+      response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    }
+    const initial = liveWire.get(session) ?? fallbackLiveSnapshot(location, session)
+    if (initial !== undefined) writeEvent('snapshot', initial)
+    else writeEvent('empty', { sessionId: session })
+    const unsubscribe = liveWire.subscribe(session, event => {
+      if (event.type === 'snapshot') writeEvent('snapshot', event.state)
+      else if (event.type === 'delta') writeEvent('delta', { text: event.text })
+      else writeEvent('done', { output: event.output, outputTokens: event.outputTokens, updatedAt: event.updatedAt })
+    })
+    const heartbeat = setInterval(() => {
+      if (!response.writableEnded) response.write(': ping\n\n')
+    }, 25_000)
+    request.on('close', () => {
+      clearInterval(heartbeat)
+      unsubscribe()
+    })
+    return true
+  }
   const isList = url.pathname === TRACE_ROUTE || url.pathname.startsWith(`${TRACE_ROUTE}/`)
   if (!isList && url.pathname !== TRACE_EXPORT_ROUTE) return false
   const { location, recording } = settings()

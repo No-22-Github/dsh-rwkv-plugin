@@ -38,7 +38,7 @@ const { values, positionals } = parseArgs({
     adapter: { type: 'string' },
     'empty-think': { type: 'boolean', default: true },
     thinking: { type: 'string', default: 'full' },
-    'max-steps': { type: 'string', default: '15' },
+    'max-steps': { type: 'string', default: '30' },
     'context-window': { type: 'string', default: '32768' },
     home: { type: 'string' },
     dsh: { type: 'string' },

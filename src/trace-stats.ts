@@ -8,6 +8,7 @@ export interface TraceRecord {
   readonly purpose?: string
   readonly stage?: string
   readonly prompt?: string
+  readonly promptTokens?: number
   readonly output?: string
   readonly finish?: string
   readonly stop?: string
@@ -23,6 +24,8 @@ export interface TraceRecord {
   readonly relay?: { readonly from: number; readonly to: number; readonly turn: number; readonly fallback: boolean; readonly card: string }
   /** Decision records in worklist mode: token budget state and active checkpoint index. */
   readonly worklist?: { readonly promptTokens: number; readonly budgetTokens: number; readonly checkpointAt?: number; readonly nudged: boolean }
+  /** Context fold triggered on this step (auto-fold in-place mask, stage archive, prior-turn, or relay). */
+  readonly fold?: { readonly kind: string; readonly beforeTokens: number; readonly afterTokens: number; readonly foldedTools: number }
 }
 
 const isGeneration = (record: TraceRecord) => record.stage === 'decision' || record.stage === 'answer'

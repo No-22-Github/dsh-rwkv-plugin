@@ -818,3 +818,28 @@ test('Harness v2.2: webfetch/websearch aliases, folded-read-guard re-read unlock
   const cleanRes = await decideStep({ history: [{ kind: 'user', text: '总结一下' }], tools: editTools, config: cfg, generator: genOrphan })
   assert.deepEqual(cleanRes.decision, { type: 'final', text: '已完成所有修改。', via: 'model' })
 })
+
+test('ThinkSplitter streams prose after </think> and stops before <tool_call> or role labels', async () => {
+  const { ThinkSplitter } = await import('../src/core/step-gates.ts')
+  // 1) Pure tool call after </think>: reasoning streams, text stays empty, no XML leaks.
+  const r1: string[] = []
+  const t1: string[] = []
+  const s1 = new ThinkSplitter(d => r1.push(d), d => t1.push(d))
+  for (const ch of ['>plan', '</thi', 'nk>\n', '<tool_', 'call>{"name":"read"}</tool_call>']) s1.feed(ch)
+  assert.equal(r1.join(''), 'plan')
+  assert.equal(t1.join(''), '')
+
+  // 2) Prose + final answer streams token-by-token and stops cleanly before \nUser:.
+  const r2: string[] = []
+  const t2: string[] = []
+  const s2 = new ThinkSplitter(d => r2.push(d), d => t2.push(d))
+  for (const ch of ['>done</think>\n\n测试已', '全部通过！', '\nUs', 'er: next']) s2.feed(ch)
+  assert.equal(r2.join(''), 'done')
+  assert.equal(t2.join(''), '测试已全部通过！')
+
+  // 3) Preamble prose before <tool_call> streams the prose and stops before the XML tag.
+  const t3: string[] = []
+  const s3 = new ThinkSplitter(undefined, d => t3.push(d), true)
+  for (const ch of ['先看下配置，', '马上修。\n', '<tool', '_call>{"name":"read"}</tool_call>']) s3.feed(ch)
+  assert.equal(t3.join('').trimEnd(), '先看下配置，马上修。')
+})

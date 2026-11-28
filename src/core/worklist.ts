@@ -44,6 +44,7 @@ import {
   WORKLIST_CHECKPOINT_NUDGE,
   WORKLIST_INIT_NUDGE,
   type ActiveWindowResult,
+  type ContextFoldEvent,
   type InternalNudge,
   type RecordedWorklistNudge,
   type WorklistNudgeKind,
@@ -92,6 +93,7 @@ export {
   nudgeTextOf,
   WORKLIST_CHECKPOINT_NUDGE,
   WORKLIST_INIT_NUDGE,
+  type ContextFoldEvent,
   type RecordedWorklistNudge,
   type WorklistNudgeKind,
 }
@@ -170,6 +172,7 @@ export interface WorklistFoldResult {
   readonly checkpointAt?: number
   readonly foldedUnread: readonly string[]
   readonly maskedCallIds?: ReadonlySet<string>
+  readonly foldEvent?: ContextFoldEvent
 }
 
 export interface WorklistEntryOptions extends TranscriptOptions {
@@ -535,6 +538,26 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
   const recorded: RecordedWorklistNudge[] = triggeredNudges.map(({ afterResultIndex, kind }) => ({ afterResultIndex, kind }))
   const items = [...priorItems, ...finalWin.items]
 
+  let foldEvent = finalWin.foldEvent
+  if (foldEvent === undefined && immediatePriorFold && pairs.length === 0 && userStarts.length > 1) {
+    const prevFrom = userStarts.length === 2 ? 0 : userStarts[userStarts.length - 2]!
+    const prevSlice = history.slice(prevFrom, turnStart)
+    const prevToolCount = prevSlice.filter(item => item.kind === 'call').length
+    if (prevToolCount > 0) {
+      const rawPrevTok = itemsTokens(prevSlice, emptyThink)
+      const foldedPrevTok = itemsTokens(foldCompletedTurnCompact(history, prevFrom, turnStart, input.cwd), emptyThink)
+      const saved = rawPrevTok - foldedPrevTok
+      if (saved >= 100) {
+        foldEvent = {
+          kind: 'prior-turn',
+          beforeTokens: finalWin.totalTokens + saved,
+          afterTokens: finalWin.totalTokens,
+          foldedTools: prevToolCount,
+        }
+      }
+    }
+  }
+
   return {
     items,
     duplicateFrom: finalWin.duplicateFrom,
@@ -543,6 +566,7 @@ export function foldWorklist(history: readonly HistoryItem[], input: FoldWorklis
     ...(recorded.length > 0 ? { nudges: recorded } : {}),
     ...(finalWin.checkpointAt !== undefined ? { checkpointAt: finalWin.checkpointAt } : {}),
     ...(finalWin.maskedCallIds !== undefined ? { maskedCallIds: finalWin.maskedCallIds } : {}),
+    ...(foldEvent !== undefined ? { foldEvent } : {}),
     foldedUnread: foldedUnreadPaths(history, items, input.cwd),
   }
 }

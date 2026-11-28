@@ -26,11 +26,11 @@ export type HistoryMode = 'auto-fold' | 'full' | 'relay' | 'worklist'
 export const DEFAULT_EDIT_MODE: EditMode = 'tolerant'
 export const DEFAULT_HISTORY_MODE: HistoryMode = 'auto-fold'
 
-export const DEFAULT_MAX_STEPS = 15
+export const DEFAULT_MAX_STEPS = 30
 export const DEFAULT_MAX_CONSECUTIVE_FAILURES = 2
 export const DEFAULT_PROTOCOL_RETRIES = 2
-export const DEFAULT_DECISION_MAX_TOKENS = 4096
-export const DEFAULT_ANSWER_MAX_TOKENS = 4096
+export const DEFAULT_DECISION_MAX_TOKENS = 8192
+export const DEFAULT_ANSWER_MAX_TOKENS = 8192
 
 export const DEFAULT_RELAY_BUDGET_TOKENS = 8000
 export const DEFAULT_RELAY_CARD_MAX_TOKENS = 768

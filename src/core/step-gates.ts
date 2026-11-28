@@ -58,42 +58,117 @@ export function describeAction(action: Action): string {
   }
 }
 
-/** Streams the reasoning of a withheld "<think" generation: drops the closing ">", stops at </think>. */
+const TEXT_STOP_MARKERS = [
+  '<tool_call',
+  '</tool_call',
+  '<tool_response',
+  '<tool_result',
+  '<answer',
+  '<think',
+  '</think',
+  '\nUser:',
+  '\nSystem:',
+  '\nTool:',
+  '\nAssistant:',
+  '✿',
+] as const
+
+const MAX_TEXT_STOP_HOLD = Math.max(...TEXT_STOP_MARKERS.map(m => m.length - 1))
+
+/**
+ * Streams the reasoning of a withheld "<think" generation (dropping the
+ * closing ">", stopping reasoning at </think>) and optionally streams the
+ * subsequent prose text while stopping cleanly before any protocol tag
+ * (<tool_call>, \nUser:, etc.) so tool calls never leak raw XML.
+ */
 export class ThinkSplitter {
   private buffer = ''
   private started = false
-  private done = false
-  private readonly emit: (text: string) => void
+  private thinkDone = false
+  private textBuffer = ''
+  private textStarted = false
+  private textStopped = false
+  private readonly emitReasoning: ((text: string) => void) | undefined
+  private readonly emitText: ((text: string) => void) | undefined
 
-  constructor(emit: (text: string) => void) {
-    this.emit = emit
+  constructor(emitReasoning?: (text: string) => void, emitText?: (text: string) => void, startInText = false) {
+    this.emitReasoning = emitReasoning
+    this.emitText = emitText
+    this.thinkDone = startInText
   }
 
   feed(delta: string): void {
-    if (this.done) return
-    this.buffer += delta
-    if (!this.started) {
-      if (this.buffer === '') return
-      if (this.buffer.startsWith('>')) this.buffer = this.buffer.slice(1)
-      this.started = true
+    if (!this.thinkDone) {
+      this.buffer += delta
+      if (!this.started) {
+        if (this.buffer === '') return
+        if (this.buffer.startsWith('>')) this.buffer = this.buffer.slice(1)
+        this.started = true
+      }
+      const end = this.buffer.indexOf('</think>')
+      if (end >= 0) {
+        if (end > 0) this.emitReasoning?.(this.buffer.slice(0, end))
+        const tail = this.buffer.slice(end + '</think>'.length)
+        this.buffer = ''
+        this.thinkDone = true
+        if (tail !== '') this.feedText(tail)
+        return
+      }
+      let hold = 0
+      for (let length = Math.min(7, this.buffer.length); length > 0; length--) {
+        if ('</think>'.startsWith(this.buffer.slice(-length))) {
+          hold = length
+          break
+        }
+      }
+      const ready = this.buffer.slice(0, this.buffer.length - hold)
+      if (ready !== '') this.emitReasoning?.(ready)
+      this.buffer = this.buffer.slice(this.buffer.length - hold)
+      return
     }
-    const end = this.buffer.indexOf('</think>')
-    if (end >= 0) {
-      if (end > 0) this.emit(this.buffer.slice(0, end))
-      this.buffer = ''
-      this.done = true
+    this.feedText(delta)
+  }
+
+  private feedText(delta: string): void {
+    if (!this.emitText || this.textStopped || delta === '') return
+    this.textBuffer += delta
+    if (!this.textStarted) {
+      const trimmed = this.textBuffer.trimStart()
+      if (trimmed === '') {
+        this.textBuffer = ''
+        return
+      }
+      this.textBuffer = trimmed
+    }
+    let stopAt = -1
+    for (const marker of TEXT_STOP_MARKERS) {
+      const idx = this.textBuffer.indexOf(marker)
+      if (idx >= 0 && (stopAt < 0 || idx < stopAt)) stopAt = idx
+    }
+    if (stopAt >= 0) {
+      const before = this.textBuffer.slice(0, stopAt).trimEnd()
+      if (before !== '') {
+        this.textStarted = true
+        this.emitText(before)
+      }
+      this.textBuffer = ''
+      this.textStopped = true
       return
     }
     let hold = 0
-    for (let length = Math.min(7, this.buffer.length); length > 0; length--) {
-      if ('</think>'.startsWith(this.buffer.slice(-length))) {
+    for (let length = Math.min(MAX_TEXT_STOP_HOLD, this.textBuffer.length); length > 0; length--) {
+      const tail = this.textBuffer.slice(-length)
+      if (TEXT_STOP_MARKERS.some(marker => marker.startsWith(tail))) {
         hold = length
         break
       }
     }
-    const ready = this.buffer.slice(0, this.buffer.length - hold)
-    if (ready !== '') this.emit(ready)
-    this.buffer = this.buffer.slice(this.buffer.length - hold)
+    const ready = this.textBuffer.slice(0, this.textBuffer.length - hold)
+    if (ready !== '') {
+      this.textStarted = true
+      this.emitText(ready)
+    }
+    this.textBuffer = this.textBuffer.slice(this.textBuffer.length - hold)
   }
 }
 

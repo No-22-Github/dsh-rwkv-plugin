@@ -5,7 +5,21 @@
 // conversation tab and the developer section of the settings page.
 
 import { useEffect, useState } from 'react'
-import { fetchRecord, isCard, isGeneration, OUTCOME_LABEL, REPAIR_LABEL, touched, type ArgumentChange, type TraceRecord } from './traces-api.ts'
+import {
+  ctxTier,
+  fetchRecord,
+  foldDetailText,
+  foldKindLabel,
+  formatTokens,
+  isCard,
+  isGeneration,
+  OUTCOME_LABEL,
+  REPAIR_LABEL,
+  touched,
+  type ArgumentChange,
+  type ContextFoldTrace,
+  type TraceRecord,
+} from './traces-api.ts'
 
 const SHORT_VALUE = 16
 const MAX_CHANGES = 3
@@ -43,8 +57,11 @@ function HandedLine(props: { record: TraceRecord }) {
   const changes = record.changes ?? []
   const decision = (record.decision ?? '').replace(/^tool /, '')
   return (
-    <span className="rl-step">
-      → 交给 DSH <code>{decision}</code>
+    <span className="rl-step" title="交给 DSH">
+      <svg className="rl-step-arrow" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+        <path d="M2.5 2V6.5C2.5 7.05228 2.94772 7.5 3.5 7.5H9.5M9.5 7.5L7.25 5.25M9.5 7.5L7.25 9.75" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      <code>{decision}</code>
       {changes.slice(0, MAX_CHANGES).map((change, index) => (
         <span key={index} className="rl-change" title={changeTitle(change)}>{changeText(change)}</span>
       ))}
@@ -245,14 +262,21 @@ function Inspector(props: { session: string; row: Row; step: TraceRecord | undef
                 <KeyValue label="开关">{step.outputRepairs === false ? '修正模型输出：关 ' : ''}{step.guards === false ? '插件修复：关' : ''}</KeyValue>
               ) : null}
               {record.worklist ? (
-                <KeyValue label="状态化工单">
-                  提示词 {record.worklist.promptTokens} / {record.worklist.budgetTokens} token
+                <KeyValue label="上下文预算">
+                  提示词 {record.worklist.promptTokens.toLocaleString()} / {record.worklist.budgetTokens.toLocaleString()} token
                   {row.worklistFold !== undefined
                     ? ` · 本步刚执行折叠（${row.worklistFold.fromTokens !== undefined ? `${row.worklistFold.fromTokens} → ` : ''}${row.worklistFold.toTokens} token，检查点 #${record.worklist.checkpointAt}）`
                     : record.worklist.checkpointAt !== undefined
                       ? ` · 沿用已折叠窗口（检查点 #${record.worklist.checkpointAt}）`
                       : ''}
                   {record.worklist.nudged ? ' · 本步触发不撤回预算提醒' : ''}
+                </KeyValue>
+              ) : record.promptTokens !== undefined ? (
+                <KeyValue label="上下文长度">{record.promptTokens.toLocaleString()} RWKV token</KeyValue>
+              ) : null}
+              {record.fold ? (
+                <KeyValue label="本步折叠">
+                  {foldKindLabel(record.fold.kind)}：{foldDetailText(record.fold)}
                 </KeyValue>
               ) : null}
               <KeyValue label="模型">{record.model ?? '—'}</KeyValue>
@@ -295,6 +319,29 @@ function Inspector(props: { session: string; row: Row; step: TraceRecord | undef
       </div>
     </aside>
   )
+}
+
+function CtxBadge(props: { tokens: number | undefined }) {
+  if (props.tokens === undefined) return null
+  const tier = ctxTier(props.tokens)
+  return (
+    <span className={`rl-ctx rl-ctx-${tier}`} title={`提示词 ${props.tokens.toLocaleString()} RWKV token`}>
+      {formatTokens(props.tokens)}
+    </span>
+  )
+}
+
+function foldForRow(row: Row): ContextFoldTrace | undefined {
+  if (row.record.fold !== undefined) return row.record.fold
+  if (row.worklistFold !== undefined) {
+    return {
+      kind: 'worklist',
+      beforeTokens: row.worklistFold.fromTokens ?? row.worklistFold.toTokens,
+      afterTokens: row.worklistFold.toTokens,
+      foldedTools: 0,
+    }
+  }
+  return undefined
 }
 
 export function TraceFrames(props: { session: string; records: readonly TraceRecord[]; onlyTouched: boolean; showSide: boolean }) {
@@ -341,22 +388,47 @@ export function TraceFrames(props: { session: string; records: readonly TraceRec
     <div className="rl-ledger">
       <div className="rl-scroll">
       <table className="rl-table">
-        <colgroup><col className="rl-event-col" /><col /></colgroup>
+        <colgroup><col className="rl-event-col" /><col /><col className="rl-ctx-col" /></colgroup>
         <tbody>
-          {visible.map(row => {
+          {visible.flatMap(row => {
             if (row.record.stage === 'step') {
-              return (
+              return [(
                 <tr key={row.index} className="rl-step-row">
                   <td className="rl-event"><span className="rl-rail" /></td>
-                  <td className="rl-content"><HandedLine record={row.record} /></td>
+                  <td className="rl-content" colSpan={2}><HandedLine record={row.record} /></td>
                 </tr>
-              )
+              )]
             }
             const tone = toneOf(row.record)
             const repairs = row.record.repairs ?? []
-            return (
+            const ctxTokens = row.record.promptTokens ?? row.record.worklist?.promptTokens
+            const fold = !props.onlyTouched ? foldForRow(row) : undefined
+            const out = []
+            if (fold !== undefined) {
+              out.push(
+                <tr key={`fold-${row.index}`} className="rl-fold-row" data-turn-start={row.first}>
+                  <td className="rl-event">
+                    <span className="rl-rail rl-rail-fold" />
+                    <span className="rl-tag rl-tone-fold">折叠</span>
+                  </td>
+                  <td className="rl-content">
+                    <span className="rl-content-inner rl-fold-text">
+                      <svg className="rl-fold-icon" width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                        <path d="M4.5 2.5L7 5L9.5 2.5M4.5 11.5L7 9L9.5 11.5M2.5 7H11.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                      <span className="rl-fold-badge">{foldKindLabel(fold.kind)}</span>
+                      <span className="rl-dim">·</span>
+                      <span className="rl-fold-range">{formatTokens(fold.beforeTokens)} → {formatTokens(fold.afterTokens)}</span>
+                      {fold.foldedTools > 0 ? <span className="rl-dim">· 已折叠 {fold.foldedTools} 条工具调用</span> : null}
+                    </span>
+                  </td>
+                  <td className="rl-ctx-cell" />
+                </tr>,
+              )
+            }
+            out.push(
               <tr
-                key={row.index} tabIndex={0} data-selected={row.index === selected} data-turn-start={row.first && !props.onlyTouched}
+                key={row.index} tabIndex={0} data-selected={row.index === selected} data-turn-start={row.first && fold === undefined && !props.onlyTouched}
                 onClick={() => setSelected(current => current === row.index ? undefined : row.index)}
                 onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelected(row.index) } }}
               >
@@ -370,14 +442,16 @@ export function TraceFrames(props: { session: string; records: readonly TraceRec
                 <td className="rl-content">
                   <span className="rl-content-inner">
                     {row.record.stage === 'answer' ? <span className="rl-chip rl-chip-muted">收尾阶段</span> : null}
-                    <CutNote record={row.record} worklistFold={row.worklistFold} />
+                    <CutNote record={row.record} worklistFold={row.record.fold === undefined ? row.worklistFold : undefined} />
                     {row.record.finish === 'length' ? <span className="rl-chip rl-chip-warn">写满上限</span> : null}
                     <Preview record={row.record} />
                     {repairs.map(repair => <span key={repair} className="rl-chip rl-chip-warn" title={repair}>{REPAIR_LABEL[repair] ?? repair}</span>)}
                   </span>
                 </td>
-              </tr>
+                <td className="rl-ctx-cell"><CtxBadge tokens={ctxTokens} /></td>
+              </tr>,
             )
+            return out
           })}
         </tbody>
       </table>
