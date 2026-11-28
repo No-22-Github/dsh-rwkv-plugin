@@ -6,7 +6,8 @@
 
 > 需要 DSH **0.2.2-alpha.3+**（源码编译与联调细节见 [INSTALL.md](INSTALL.md)）。
 
-- **DSH 桌面端安装**：侧栏**插件 → 添加插件**，填入 `github:No-22-Github/dsh-rwkv-plugin`，安装后启用；在**设置 → RWKV Agent** 添加后端地址与模型即可。
+- **DSH 桌面端安装（npm，推荐）**：侧栏**插件 → 添加插件**，填入 `dsh-rwkv-plugin`，安装后启用；在**设置 → RWKV Agent** 添加后端地址与模型即可。（如需跟踪最新提交，也可填 `github:No-22-Github/dsh-rwkv-plugin`。）
+- **DSH CLI 安装**：`pnpm dsh plugin --profile web add dsh-rwkv-plugin`
 - **本地开发与验证**：
 
 ```bash
@@ -24,11 +25,11 @@ npm run smoke       # 冒烟检查
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
 | **后端与权重** | `rwkv_lightning` / `iRWKV` | 支持可选请求级 `adapterId` 与上传初始 `stateId`（服务重启需重传）。 |
-| **采样预设** | `agent-fast` | `temperature=0.5`、`topP=0.7`、`topK=65536`、适度惩罚；DSH 仅覆盖温度。 |
-| **编辑模式** | `tolerant` | 可选 `tolerant`（容错 `edit`）、`line-edit`（语义锚点批量 `edit_lines`）、`literal`。 |
-| **上下文管理** | `auto-fold`（v2） | 历史轮立即压缩至 `≤2k`，当前轮 `13.5k→9k` 原地遮蔽；可选 `worklist` / `relay` / `full`。 |
-| **单轮步数 / 重试** | `maxSteps=15` | 连续失败封禁 `2` 次、格式重问 `2` 次；超限后撤工具强制收尾。 |
-| **兜底开关** | `outputRepairs` / `guards` 全开 | 开发者区可关闭两者以测模型原样能力，并查看 `rwkv-trace.jsonl` 统计。 |
+| **采样预设** | `agent-fast` | `temperature=0.35`、`topP=0.85`、`topK=65536`、`presencePenalty=0.5`、`frequencyPenalty=0.2`、`penaltyDecay=0.996`；DSH 仅覆盖温度。 |
+| **编辑模式** | `tolerant` | 可选 `tolerant`（容错 `edit`）、`line-edit`（语义锚点批量 `edit_lines`）、`literal`；带增量语法闸门与防盲改保护。 |
+| **上下文管理** | `auto-fold`（v2） | 历史轮立即压缩至 `≤2k`，当前轮 `13.5k→9k` 原地遮蔽（`<250` tok 免遮、保底留近 `3` 对、`14.5k` 阶段归档）；可选 `worklist` / `relay` / `full`。 |
+| **步数 / 长度 / 重试** | `maxSteps=30` · `maxTokens=8192` | 单步决策与最终答复上限均为 `8192` tok；连续失败封禁 `2` 次、格式重问 `2` 次，超限后撤工具强制收尾。 |
+| **兜底与可观测性** | `outputRepairs` / `guards` 全开 | 开发者区可关闭兜底测原样能力；支持右侧栏「RWKV 实时上下文」流式高亮面板、主对话流折叠分割条、Trace 精确 token 分色胶囊与 `rwkv-trace.jsonl` 统计。 |
 
 ## 已知边界
 

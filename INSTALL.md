@@ -2,15 +2,15 @@
 
 ## 桌面版（推荐）
 
-需要 DeepSeek Harness 桌面版 0.2.1 或更新版本。
+需要 DeepSeek Harness 桌面版 0.2.2-alpha.3 或更新版本。
 
 1. 打开侧栏的**插件**，点**添加插件**，填入：
 
    ```
-   github:No-22-Github/dsh-rwkv-plugin
+   dsh-rwkv-plugin
    ```
 
-   也可以填完整地址 `https://github.com/No-22-Github/dsh-rwkv-plugin.git`。点**安装**，装完后选**立即启用**。
+   如需跟踪 GitHub 最新提交，也可以填 `github:No-22-Github/dsh-rwkv-plugin` 或 `https://github.com/No-22-Github/dsh-rwkv-plugin.git`。点**安装**，装完后选**立即启用**。
 
 2. 打开**设置 → RWKV Agent**，点**添加模型**，填入：
    - **后端**：`rwkv_lightning CUDA` 或 `iRWKV（vLLM）`
@@ -24,9 +24,9 @@
    - **RWKV 当主 Agent**：新会话里模型选刚加的 RWKV 模型，Agent 预设选「RWKV Agent」。
    - **RWKV 当子 Agent**：保持 DeepSeek 主 Agent，它会多一个 `rwkv_agent` 工具，默认用你加的第一个模型。
 
-   编辑默认走行号版 `edit_lines`（按 read 显示的行号改，不抄原文），原生 `edit` 在这两个入口里自动隐藏；要做 A/B、退回原生编辑时用 headless / 管线采集的 `--native-edit`。
+   编辑默认走容错 `edit`（`tolerant`），可在**设置 → RWKV Agent** 切换为语义锚点批量 `edit_lines`（`line-edit`）或精确字面 `literal`。
 
-更新插件：在**添加插件**里重新填一次同样的地址并安装。
+更新插件：在**添加插件**里重新填一次同样的包名或地址并安装。
 
 ## 从 DSH 源码运行
 
@@ -39,7 +39,7 @@ cd deepseek-harness && pnpm install && pnpm run build
 ```
 
 ```bash
-cd deepseek-harness && pnpm dsh plugin --profile web add github:No-22-Github/dsh-rwkv-plugin
+cd deepseek-harness && pnpm dsh plugin --profile web add dsh-rwkv-plugin
 ```
 
 ```bash
